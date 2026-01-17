@@ -134,23 +134,22 @@ def build_openapi_spec():
                 }
             },
             "/search": {
-                "post": {
+                "get": {
                     "summary": "Search vector-indexed collection",
-                    "requestBody": {
-                        "required": True,
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "type": "object",
-                                    "properties": {
-                                        "document_id": {"type": "string"},
-                                        "query": {"type": "string"},
-                                    },
-                                    "required": ["document_id", "query"],
-                                }
-                            }
+                    "parameters": [
+                        {
+                            "name": "document_id",
+                            "in": "query",
+                            "required": True,
+                            "schema": {"type": "string"},
                         },
-                    },
+                        {
+                            "name": "query",
+                            "in": "query",
+                            "required": True,
+                            "schema": {"type": "string"},
+                        },
+                    ],
                     "responses": {"200": {"description": "Search results"}},
                 }
             },
@@ -484,11 +483,10 @@ def index_document():
     )
 
 
-@app.post("/search")
+@app.get("/search")
 def search():
-    payload = request.get_json(silent=True) or {}
-    document_id = payload.get("document_id")
-    query = payload.get("query")
+    document_id = request.args.get("document_id")
+    query = request.args.get("query")
     if not document_id or not query:
         return jsonify({"error": "document_id and query are required"}), 400
 
