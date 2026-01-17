@@ -4,3 +4,4 @@ pymongo
 tavily-python
 sentence-transformers
 numpy
+anthropic
