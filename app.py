@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 import numpy as np
 from dotenv import load_dotenv
-from flask import Flask, jsonify, request
+from flask import Flask, Response, jsonify, request
 from pymongo import MongoClient
 from sentence_transformers import SentenceTransformer
 from tavily import TavilyClient
@@ -28,6 +28,201 @@ mongo_client = MongoClient(MONGODB_URI)
 tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
 
 _model_cache = {}
+
+
+def build_openapi_spec():
+    return {
+        "openapi": "3.0.3",
+        "info": {
+            "title": "Web Gather API",
+            "version": "1.0.0",
+            "description": "Gather, ingest, index, and search web documents.",
+        },
+        "paths": {
+            "/gather": {
+                "post": {
+                    "summary": "Gather web documents based on query",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {"query": {"type": "string"}},
+                                    "required": ["query"],
+                                }
+                            }
+                        },
+                    },
+                    "responses": {"200": {"description": "Search results"}},
+                }
+            },
+            "/ingest": {
+                "post": {
+                    "summary": "Ingest a web document by crawling a URL",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "url": {"type": "string"},
+                                        "depth": {"type": "integer"},
+                                        "breadth": {"type": "integer"},
+                                        "database": {"type": "string"},
+                                        "collection": {"type": "string"},
+                                    },
+                                    "required": ["url", "database", "collection"],
+                                }
+                            }
+                        },
+                    },
+                    "responses": {"200": {"description": "Ingestion result"}},
+                }
+            },
+            "/documents": {
+                "get": {
+                    "summary": "List uploaded documents for a collection",
+                    "parameters": [
+                        {
+                            "name": "database_name",
+                            "in": "query",
+                            "required": True,
+                            "schema": {"type": "string"},
+                        },
+                        {
+                            "name": "collection_name",
+                            "in": "query",
+                            "required": True,
+                            "schema": {"type": "string"},
+                        },
+                    ],
+                    "responses": {"200": {"description": "Documents list"}},
+                }
+            },
+            "/collections": {
+                "get": {
+                    "summary": "List collections with uploaded documents",
+                    "parameters": [
+                        {
+                            "name": "database_name",
+                            "in": "query",
+                            "required": True,
+                            "schema": {"type": "string"},
+                        }
+                    ],
+                    "responses": {"200": {"description": "Collections list"}},
+                }
+            },
+            "/index": {
+                "post": {
+                    "summary": "Index a document by id",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {"document_id": {"type": "string"}},
+                                    "required": ["document_id"],
+                                }
+                            }
+                        },
+                    },
+                    "responses": {"200": {"description": "Indexing result"}},
+                }
+            },
+            "/search": {
+                "post": {
+                    "summary": "Search vector-indexed collection",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "document_id": {"type": "string"},
+                                        "query": {"type": "string"},
+                                    },
+                                    "required": ["document_id", "query"],
+                                }
+                            }
+                        },
+                    },
+                    "responses": {"200": {"description": "Search results"}},
+                }
+            },
+            "/embedding-models": {
+                "get": {
+                    "summary": "List embedding models",
+                    "parameters": [
+                        {
+                            "name": "database_name",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "string"},
+                        }
+                    ],
+                    "responses": {"200": {"description": "Embedding models"}},
+                },
+                "post": {
+                    "summary": "Add embedding model",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "database_name": {"type": "string"},
+                                        "model_name": {"type": "string"},
+                                    },
+                                    "required": ["database_name", "model_name"],
+                                }
+                            }
+                        },
+                    },
+                    "responses": {"200": {"description": "Embedding model saved"}},
+                },
+            },
+        },
+    }
+
+
+@app.get("/openapi.json")
+def openapi():
+    return jsonify(build_openapi_spec())
+
+
+@app.get("/docs")
+def docs():
+    html = """
+    <!doctype html>
+    <html>
+      <head>
+        <title>Web Gather API Docs</title>
+        <link
+          rel="stylesheet"
+          href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css"
+        />
+      </head>
+      <body>
+        <div id="swagger-ui"></div>
+        <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+        <script>
+          window.onload = () => {
+            SwaggerUIBundle({
+              url: "/openapi.json",
+              dom_id: "#swagger-ui"
+            });
+          };
+        </script>
+      </body>
+    </html>
+    """
+    return Response(html, mimetype="text/html")
 
 
 def utc_now():
