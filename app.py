@@ -1,7 +1,9 @@
+import json
 import os
 import uuid
 from datetime import datetime, timezone
 
+import anthropic
 import numpy as np
 from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, request
@@ -13,11 +15,14 @@ load_dotenv()
 
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 MONGODB_URI = os.getenv("MONGODB_URI")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
 if not TAVILY_API_KEY:
     raise RuntimeError("TAVILY_API_KEY is not set")
 if not MONGODB_URI:
     raise RuntimeError("MONGODB_URI is not set")
+if not ANTHROPIC_API_KEY:
+    raise RuntimeError("ANTHROPIC_API_KEY is not set")
 
 WEB_GATHER_DB = "web-gather"
 DOCUMENTS_COLLECTION = "documents"
@@ -26,6 +31,7 @@ EMBEDDING_MODEL_COLLECTION = "embedding_model"
 app = Flask(__name__)
 mongo_client = MongoClient(MONGODB_URI)
 tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
+anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 _model_cache = {}
 
@@ -185,6 +191,62 @@ def build_openapi_spec():
                     },
                     "responses": {"200": {"description": "Embedding model saved"}},
                 },
+            },
+            "/parse_llm": {
+                "get": {
+                    "summary": "Parse document text using LLM",
+                    "description": "Dynamically parse document text according to specific instructions using a language model. Returns structured JSON with parsed sections.",
+                    "parameters": [
+                        {
+                            "name": "document",
+                            "in": "query",
+                            "required": True,
+                            "schema": {"type": "string"},
+                            "description": "The document text to parse",
+                        },
+                        {
+                            "name": "parsing_prompt",
+                            "in": "query",
+                            "required": True,
+                            "schema": {"type": "string"},
+                            "description": "Instructions for how to parse the document",
+                        },
+                        {
+                            "name": "document_id",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "string"},
+                            "description": "Optional document identifier (defaults to doc_001)",
+                        },
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Parsed document sections",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "parsed_doc": {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "document_id": {"type": "string"},
+                                                        "parsed_header_text": {"type": "string"},
+                                                        "parsed_text": {"type": "string"},
+                                                    },
+                                                },
+                                            }
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                        "400": {"description": "Missing required parameters"},
+                        "500": {"description": "LLM parsing failed"},
+                    },
+                }
             },
         },
     }
@@ -567,6 +629,78 @@ def add_embedding_model():
     )
 
     return jsonify({"database_name": database_name, "model_name": model_name})
+
+
+@app.get("/parse_llm")
+def parse_llm():
+    document = request.args.get("document")
+    parsing_prompt = request.args.get("parsing_prompt")
+    document_id = request.args.get("document_id", "doc_001")
+
+    if not document or not parsing_prompt:
+        return jsonify({"error": "document and parsing_prompt are required"}), 400
+
+    system_prompt = """You are a document parsing assistant. Your task is to parse documents according to specific instructions and return structured JSON output.
+
+You must return ONLY valid JSON with the following structure:
+- A top-level object with a "parsed_doc" key
+- The "parsed_doc" value should be an array of objects
+- Each object in the array represents one parsed section and must contain:
+  - "document_id": A string identifier for the document (use the provided document_id)
+  - "parsed_header_text": A string containing the header, title, or identifying text for this section
+  - "parsed_text": A string containing the main content/body text for this section
+
+Important guidelines:
+- Preserve the original text accurately - do not paraphrase or summarize unless explicitly instructed
+- Each section should be complete and meaningful on its own
+- Escape special characters properly in the JSON (quotes, newlines, etc.)
+- The parsed_header_text should be concise but descriptive enough to identify what the section contains
+- The parsed_text should contain the substantive content of that section
+- Return ONLY the JSON object, no additional text or markdown formatting"""
+
+    user_message = f"""Parse the following document according to the parsing instructions provided.
+
+<document>
+{document}
+</document>
+
+<parsing_prompt>
+{parsing_prompt}
+</parsing_prompt>
+
+<document_id>{document_id}</document_id>
+
+Return ONLY the JSON output with the parsed document sections."""
+
+    try:
+        message = anthropic_client.messages.create(
+            model="claude-3-haiku-20240307",
+            max_tokens=4096,
+            messages=[
+                {"role": "user", "content": user_message}
+            ],
+            system=system_prompt,
+        )
+
+        response_text = message.content[0].text.strip()
+
+        # Try to extract JSON if wrapped in code blocks
+        if response_text.startswith("```"):
+            lines = response_text.split("\n")
+            # Remove first and last lines (code block markers)
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            response_text = "\n".join(lines)
+
+        parsed_result = json.loads(response_text)
+        return jsonify(parsed_result)
+
+    except json.JSONDecodeError as e:
+        return jsonify({"error": f"Failed to parse LLM response as JSON: {str(e)}"}), 500
+    except Exception as e:
+        return jsonify({"error": f"LLM parsing failed: {str(e)}"}), 500
 
 
 if __name__ == "__main__":
