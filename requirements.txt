@@ -1,0 +1,6 @@
+flask
+python-dotenv
+pymongo
+tavily-python
+sentence-transformers
+numpy
