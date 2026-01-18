@@ -9,16 +9,16 @@ from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, request
 from pymongo import MongoClient
 from sentence_transformers import SentenceTransformer
-from tavily import TavilyClient
+from firecrawl import FirecrawlApp
 
 load_dotenv()
 
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY")
 MONGODB_URI = os.getenv("MONGODB_URI")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
-if not TAVILY_API_KEY:
-    raise RuntimeError("TAVILY_API_KEY is not set")
+if not FIRECRAWL_API_KEY:
+    raise RuntimeError("FIRECRAWL_API_KEY is not set")
 if not MONGODB_URI:
     raise RuntimeError("MONGODB_URI is not set")
 if not ANTHROPIC_API_KEY:
@@ -30,7 +30,7 @@ EMBEDDING_MODEL_COLLECTION = "embedding_model"
 
 app = Flask(__name__)
 mongo_client = MongoClient(MONGODB_URI)
-tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
+firecrawl_client = FirecrawlApp(api_key=FIRECRAWL_API_KEY)
 anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 _model_cache = {}
@@ -300,6 +300,8 @@ def get_model(model_name: str) -> SentenceTransformer:
 
 def normalize_results(raw_result):
     if isinstance(raw_result, dict):
+        if "data" in raw_result:
+            return raw_result["data"]
         if "results" in raw_result:
             return raw_result["results"]
         if "pages" in raw_result:
@@ -314,7 +316,7 @@ def combine_pages(pages):
     for page in pages:
         url = page.get("url", "")
         title = page.get("title", "")
-        content = page.get("raw_content") or page.get("content") or page.get("text") or ""
+        content = page.get("markdown") or page.get("raw_content") or page.get("content") or page.get("text") or ""
         if not content:
             continue
         header = "Source"
@@ -365,10 +367,12 @@ def gather():
     if not query:
         return jsonify({"error": "query is required"}), 400
 
-    results = tavily_client.search(
+    results = firecrawl_client.search(
         query=query,
-        max_results=10,
-        include_raw_content=True,
+        params={
+            "limit": 10,
+            "scrapeOptions": {"formats": ["markdown"]},
+        },
     )
     return jsonify({"query": query, "results": normalize_results(results)})
 
@@ -393,10 +397,13 @@ def ingest():
         )
 
     try:
-        crawl_result = tavily_client.crawl(
+        crawl_result = firecrawl_client.crawl_url(
             url=url,
-            max_depth=depth,
-            max_breadth=breadth,
+            params={
+                "maxDepth": depth,
+                "limit": breadth,
+                "scrapeOptions": {"formats": ["markdown"]},
+            },
         )
     except Exception as exc:
         return jsonify({"error": f"crawl failed: {exc}"}), 500

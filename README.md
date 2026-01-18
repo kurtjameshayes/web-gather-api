@@ -7,7 +7,7 @@ Flask API for gathering, ingesting, indexing, and searching web documents.
 1. Create a `.env` file in the repository root:
 
 ```
-TAVILY_API_KEY=your_tavily_key
+FIRECRAWL_API_KEY=your_firecrawl_key
 MONGODB_URI=mongodb://localhost:27017
 ```
 
