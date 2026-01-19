@@ -186,6 +186,63 @@ def build_openapi_spec():
                     "responses": {"200": {"description": "Collections list"}},
                 }
             },
+            "/all-databases": {
+                "get": {
+                    "summary": "List all databases in MongoDB",
+                    "description": "Returns all databases in the MongoDB instance, not just those with uploaded documents",
+                    "responses": {
+                        "200": {
+                            "description": "All databases list",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "databases": {
+                                                "type": "array",
+                                                "items": {"type": "string"},
+                                            }
+                                        },
+                                    }
+                                }
+                            },
+                        }
+                    },
+                }
+            },
+            "/all-collections": {
+                "get": {
+                    "summary": "List all collections in a MongoDB database",
+                    "description": "Returns all collections in the specified database, not just those tracked in documents",
+                    "parameters": [
+                        {
+                            "name": "database_name",
+                            "in": "query",
+                            "required": True,
+                            "schema": {"type": "string"},
+                        }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "All collections list",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "database_name": {"type": "string"},
+                                            "collections": {
+                                                "type": "array",
+                                                "items": {"type": "string"},
+                                            }
+                                        },
+                                    }
+                                }
+                            },
+                        }
+                    },
+                }
+            },
             "/index": {
                 "post": {
                     "summary": "Index a document by id",
@@ -827,6 +884,14 @@ def list_databases():
     return jsonify({"databases": databases})
 
 
+@app.get("/all-databases")
+def list_all_databases():
+    logger.info("GET /all-databases - Listing all MongoDB databases")
+    databases = mongo_client.list_database_names()
+    logger.info("GET /all-databases - Found %d databases", len(databases))
+    return jsonify({"databases": databases})
+
+
 @app.get("/collections")
 def list_collections():
     logger.info("GET /collections - Listing collections")
@@ -841,6 +906,20 @@ def list_collections():
         "collection_name", {"database_name": database_name}
     )
     logger.info("GET /collections - Found %d collections", len(collections))
+    return jsonify({"database_name": database_name, "collections": collections})
+
+
+@app.get("/all-collections")
+def list_all_collections():
+    logger.info("GET /all-collections - Listing all MongoDB collections")
+    database_name = request.args.get("database_name")
+    if not database_name:
+        logger.warning("GET /all-collections - Missing required parameter: database_name")
+        return jsonify({"error": "database_name is required"}), 400
+
+    logger.info("GET /all-collections - Querying all collections for database: %s", database_name)
+    collections = mongo_client[database_name].list_collection_names()
+    logger.info("GET /all-collections - Found %d collections", len(collections))
     return jsonify({"database_name": database_name, "collections": collections})
 
 
