@@ -149,6 +149,29 @@ def build_openapi_spec():
                     "responses": {"200": {"description": "Documents list"}},
                 }
             },
+            "/databases": {
+                "get": {
+                    "summary": "List all databases with uploaded documents",
+                    "responses": {
+                        "200": {
+                            "description": "Databases list",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "databases": {
+                                                "type": "array",
+                                                "items": {"type": "string"},
+                                            }
+                                        },
+                                    }
+                                }
+                            },
+                        }
+                    },
+                }
+            },
             "/collections": {
                 "get": {
                     "summary": "List collections with uploaded documents",
@@ -793,6 +816,15 @@ def list_documents():
     )
     logger.info("GET /documents - Found %d documents", len(docs))
     return jsonify({"documents": docs})
+
+
+@app.get("/databases")
+def list_databases():
+    logger.info("GET /databases - Listing databases")
+    wg_db = mongo_client[WEB_GATHER_DB]
+    databases = wg_db[DOCUMENTS_COLLECTION].distinct("database_name")
+    logger.info("GET /databases - Found %d databases", len(databases))
+    return jsonify({"databases": databases})
 
 
 @app.get("/collections")
