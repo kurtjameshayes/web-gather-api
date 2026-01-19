@@ -1,13 +1,17 @@
+import io
 import json
 import logging
 import os
 import uuid
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 import anthropic
 import numpy as np
+import requests
 from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, request
+from pypdf import PdfReader
 from pymongo import MongoClient
 from sentence_transformers import SentenceTransformer
 from firecrawl import FirecrawlApp
@@ -80,7 +84,8 @@ def build_openapi_spec():
             },
             "/ingest": {
                 "post": {
-                    "summary": "Ingest a web document by crawling a URL",
+                    "summary": "Ingest a document by crawling a URL or parsing a PDF",
+                    "description": "Supports both web pages (crawled via Firecrawl) and PDF files (downloaded and parsed). PDF files are automatically detected by URL extension or Content-Type header.",
                     "requestBody": {
                         "required": True,
                         "content": {
@@ -88,9 +93,9 @@ def build_openapi_spec():
                                 "schema": {
                                     "type": "object",
                                     "properties": {
-                                        "url": {"type": "string"},
-                                        "depth": {"type": "integer"},
-                                        "breadth": {"type": "integer"},
+                                        "url": {"type": "string", "description": "URL to a web page or PDF file"},
+                                        "depth": {"type": "integer", "description": "Crawl depth for web pages (ignored for PDFs)"},
+                                        "breadth": {"type": "integer", "description": "Max pages to crawl for web pages (ignored for PDFs)"},
                                         "database": {"type": "string"},
                                         "collection": {"type": "string"},
                                     },
@@ -99,7 +104,29 @@ def build_openapi_spec():
                             }
                         },
                     },
-                    "responses": {"200": {"description": "Ingestion result"}},
+                    "responses": {
+                        "200": {
+                            "description": "Ingestion result",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "document_id": {"type": "string"},
+                                            "document_type": {"type": "string", "enum": ["web", "pdf"]},
+                                            "pages": {"type": "integer"},
+                                            "database_name": {"type": "string"},
+                                            "collection_name": {"type": "string"},
+                                            "chunk_collection": {"type": "string"},
+                                            "indexed": {"type": "boolean"},
+                                            "chunks_indexed": {"type": "integer"},
+                                            "embedding_model": {"type": "string"},
+                                        },
+                                    }
+                                }
+                            },
+                        }
+                    },
                 }
             },
             "/documents": {
@@ -369,6 +396,88 @@ def combine_pages(pages):
     return "\n\n".join(combined).strip()
 
 
+def is_pdf_url(url: str) -> bool:
+    """Check if a URL points to a PDF file."""
+    parsed = urlparse(url)
+    path_lower = parsed.path.lower()
+    # Check file extension
+    if path_lower.endswith(".pdf"):
+        return True
+    # Check common PDF query patterns
+    if "pdf" in parsed.query.lower():
+        return True
+    return False
+
+
+def detect_content_type(url: str) -> str:
+    """Make a HEAD request to detect the content type of a URL."""
+    try:
+        logger.info("Detecting content type for URL: %s", url)
+        response = requests.head(url, allow_redirects=True, timeout=10)
+        content_type = response.headers.get("Content-Type", "").lower()
+        logger.info("Content-Type detected: %s", content_type)
+        return content_type
+    except Exception as exc:
+        logger.warning("Failed to detect content type for %s: %s", url, exc)
+        return ""
+
+
+def download_pdf(url: str) -> bytes:
+    """Download a PDF file from a URL."""
+    logger.info("Downloading PDF from: %s", url)
+    response = requests.get(url, timeout=60)
+    response.raise_for_status()
+    content_length = len(response.content)
+    logger.info("Downloaded PDF: %d bytes", content_length)
+    return response.content
+
+
+def extract_text_from_pdf(pdf_content: bytes) -> list[dict]:
+    """
+    Extract text from PDF content.
+    Returns a list of page dictionaries with 'page_number' and 'text' keys.
+    """
+    logger.info("Extracting text from PDF (%d bytes)", len(pdf_content))
+    pages = []
+    
+    try:
+        pdf_file = io.BytesIO(pdf_content)
+        reader = PdfReader(pdf_file)
+        total_pages = len(reader.pages)
+        logger.info("PDF has %d pages", total_pages)
+        
+        for page_num, page in enumerate(reader.pages, start=1):
+            text = page.extract_text() or ""
+            text = text.strip()
+            if text:
+                pages.append({
+                    "page_number": page_num,
+                    "text": text,
+                })
+                logger.info("Extracted %d characters from page %d", len(text), page_num)
+            else:
+                logger.warning("Page %d has no extractable text", page_num)
+        
+        logger.info("Successfully extracted text from %d/%d pages", len(pages), total_pages)
+    except Exception as exc:
+        logger.error("Failed to extract text from PDF: %s", exc)
+        raise
+
+    return pages
+
+
+def combine_pdf_pages(pages: list[dict], source_url: str) -> str:
+    """Combine PDF page texts into a single document string."""
+    combined = []
+    for page in pages:
+        page_num = page.get("page_number", "?")
+        text = page.get("text", "")
+        if text:
+            header = f"Page {page_num} | Source: {source_url}"
+            combined.append(f"{header}\n{text}")
+    return "\n\n".join(combined).strip()
+
+
 def chunk_text(text, chunk_size=1200, overlap=200):
     if not text:
         return []
@@ -540,24 +649,59 @@ def ingest():
             400,
         )
 
-    logger.info("POST /ingest - Crawling URL: %s (depth=%d, breadth=%d)", url, depth, breadth)
-    try:
-        crawl_result = firecrawl_client.crawl(
-            url=url,
-            max_discovery_depth=depth,
-            limit=breadth,
-        )
-    except Exception as exc:
-        logger.error("POST /ingest - Crawl failed for URL %s: %s", url, exc)
-        return jsonify({"error": f"crawl failed: {exc}"}), 500
+    # Detect if URL is a PDF file
+    is_pdf = is_pdf_url(url)
+    if not is_pdf:
+        # Check content type via HEAD request
+        content_type = detect_content_type(url)
+        is_pdf = "application/pdf" in content_type
 
-    pages = normalize_results(crawl_result)
-    logger.info("POST /ingest - Crawl returned %d pages", len(pages))
+    page_count = 0
+    document_type = "web"
 
-    combined_text = combine_pages(pages)
-    if not combined_text:
-        logger.warning("POST /ingest - Crawl returned no content for URL: %s", url)
-        return jsonify({"error": "crawl returned no content"}), 400
+    if is_pdf:
+        # Handle PDF file
+        logger.info("POST /ingest - Detected PDF file, downloading and extracting text")
+        document_type = "pdf"
+        try:
+            pdf_content = download_pdf(url)
+            pdf_pages = extract_text_from_pdf(pdf_content)
+            page_count = len(pdf_pages)
+            
+            if not pdf_pages:
+                logger.warning("POST /ingest - PDF has no extractable text: %s", url)
+                return jsonify({"error": "PDF has no extractable text"}), 400
+            
+            combined_text = combine_pdf_pages(pdf_pages, url)
+            logger.info("POST /ingest - Extracted text from %d PDF pages", page_count)
+            
+        except requests.RequestException as exc:
+            logger.error("POST /ingest - Failed to download PDF %s: %s", url, exc)
+            return jsonify({"error": f"Failed to download PDF: {exc}"}), 500
+        except Exception as exc:
+            logger.error("POST /ingest - Failed to parse PDF %s: %s", url, exc)
+            return jsonify({"error": f"Failed to parse PDF: {exc}"}), 500
+    else:
+        # Handle web page via Firecrawl
+        logger.info("POST /ingest - Crawling web URL: %s (depth=%d, breadth=%d)", url, depth, breadth)
+        try:
+            crawl_result = firecrawl_client.crawl(
+                url=url,
+                max_discovery_depth=depth,
+                limit=breadth,
+            )
+        except Exception as exc:
+            logger.error("POST /ingest - Crawl failed for URL %s: %s", url, exc)
+            return jsonify({"error": f"crawl failed: {exc}"}), 500
+
+        pages = normalize_results(crawl_result)
+        page_count = len(pages)
+        logger.info("POST /ingest - Crawl returned %d pages", page_count)
+
+        combined_text = combine_pages(pages)
+        if not combined_text:
+            logger.warning("POST /ingest - Crawl returned no content for URL: %s", url)
+            return jsonify({"error": "crawl returned no content"}), 400
 
     logger.info("POST /ingest - Combined text length: %d characters", len(combined_text))
 
@@ -570,6 +714,7 @@ def ingest():
         {
             "_id": document_id,
             "source_url": url,
+            "document_type": document_type,
             "text": combined_text,
             "created_at": utc_now(),
         }
@@ -584,6 +729,7 @@ def ingest():
             "database_name": database_name,
             "collection_name": collection_name,
             "source_url": url,
+            "document_type": document_type,
             "description": description,
             "created_at": utc_now(),
         }
@@ -608,7 +754,8 @@ def ingest():
 
     response_data = {
         "document_id": document_id,
-        "pages": len(pages),
+        "document_type": document_type,
+        "pages": page_count,
         "database_name": database_name,
         "collection_name": collection_name,
         "chunk_collection": chunk_collection,

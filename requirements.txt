@@ -5,3 +5,5 @@ firecrawl-py
 sentence-transformers
 numpy
 anthropic
+pypdf
+requests
