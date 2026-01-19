@@ -299,6 +299,13 @@ def get_model(model_name: str) -> SentenceTransformer:
 
 
 def normalize_results(raw_result):
+    # Handle Firecrawl CrawlJob response (has .data attribute)
+    if hasattr(raw_result, "data") and isinstance(raw_result.data, list):
+        return raw_result.data
+    # Handle Firecrawl SearchData response (has .web attribute)
+    if hasattr(raw_result, "web") and raw_result.web is not None:
+        return raw_result.web
+    # Handle dict responses (legacy compatibility)
     if isinstance(raw_result, dict):
         if "data" in raw_result:
             return raw_result["data"]
@@ -311,12 +318,33 @@ def normalize_results(raw_result):
     return []
 
 
+def get_page_attr(page, attr, default=""):
+    """Get attribute from page object or dict."""
+    if hasattr(page, attr):
+        return getattr(page, attr, default) or default
+    if isinstance(page, dict):
+        return page.get(attr, default) or default
+    return default
+
+
 def combine_pages(pages):
     combined = []
     for page in pages:
-        url = page.get("url", "")
-        title = page.get("title", "")
-        content = page.get("markdown") or page.get("raw_content") or page.get("content") or page.get("text") or ""
+        # Handle Firecrawl Document objects (url/title in metadata)
+        if hasattr(page, "metadata") and page.metadata:
+            url = getattr(page.metadata, "url", "") or ""
+            title = getattr(page.metadata, "title", "") or ""
+        else:
+            url = get_page_attr(page, "url")
+            title = get_page_attr(page, "title")
+
+        # Get content - try markdown first (Firecrawl), then fallbacks
+        content = (
+            get_page_attr(page, "markdown")
+            or get_page_attr(page, "raw_content")
+            or get_page_attr(page, "content")
+            or get_page_attr(page, "text")
+        )
         if not content:
             continue
         header = "Source"
@@ -360,6 +388,26 @@ def get_embedding_model_name(database_name: str):
     return record.get("model_name")
 
 
+def serialize_search_result(result):
+    """Convert Firecrawl search result object to dict."""
+    if isinstance(result, dict):
+        return result
+    # Handle SearchResultWeb or Document objects
+    data = {}
+    if hasattr(result, "url"):
+        data["url"] = result.url
+    if hasattr(result, "title"):
+        data["title"] = result.title
+    if hasattr(result, "description"):
+        data["description"] = result.description
+    if hasattr(result, "markdown"):
+        data["markdown"] = result.markdown
+    if hasattr(result, "metadata") and result.metadata:
+        data["url"] = getattr(result.metadata, "url", None) or data.get("url")
+        data["title"] = getattr(result.metadata, "title", None) or data.get("title")
+    return data
+
+
 @app.post("/gather")
 def gather():
     payload = request.get_json(silent=True) or {}
@@ -369,12 +417,11 @@ def gather():
 
     results = firecrawl_client.search(
         query=query,
-        params={
-            "limit": 10,
-            "scrapeOptions": {"formats": ["markdown"]},
-        },
+        limit=10,
     )
-    return jsonify({"query": query, "results": normalize_results(results)})
+    normalized = normalize_results(results)
+    serialized = [serialize_search_result(r) for r in normalized]
+    return jsonify({"query": query, "results": serialized})
 
 
 @app.post("/ingest")
@@ -397,13 +444,10 @@ def ingest():
         )
 
     try:
-        crawl_result = firecrawl_client.crawl_url(
+        crawl_result = firecrawl_client.crawl(
             url=url,
-            params={
-                "maxDepth": depth,
-                "limit": breadth,
-                "scrapeOptions": {"formats": ["markdown"]},
-            },
+            max_discovery_depth=depth,
+            limit=breadth,
         )
     except Exception as exc:
         return jsonify({"error": f"crawl failed: {exc}"}), 500
