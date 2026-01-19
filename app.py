@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import uuid
 from datetime import datetime, timezone
@@ -10,6 +11,13 @@ from flask import Flask, Response, jsonify, request
 from pymongo import MongoClient
 from sentence_transformers import SentenceTransformer
 from firecrawl import FirecrawlApp
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger("web-gather-api")
 
 load_dotenv()
 
@@ -28,9 +36,16 @@ WEB_GATHER_DB = "web-gather"
 DOCUMENTS_COLLECTION = "documents"
 EMBEDDING_MODEL_COLLECTION = "embedding_model"
 
+logger.info("Initializing Flask application")
 app = Flask(__name__)
+
+logger.info("Connecting to MongoDB at %s", MONGODB_URI.split("@")[-1] if "@" in MONGODB_URI else "localhost")
 mongo_client = MongoClient(MONGODB_URI)
+
+logger.info("Initializing Firecrawl client")
 firecrawl_client = FirecrawlApp(api_key=FIRECRAWL_API_KEY)
+
+logger.info("Initializing Anthropic client")
 anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 _model_cache = {}
@@ -379,13 +394,89 @@ def cosine_similarity(query_embedding, chunk_embeddings):
 
 
 def get_embedding_model_name(database_name: str):
+    logger.info("Looking up embedding model for database: %s", database_name)
     wg_db = mongo_client[WEB_GATHER_DB]
     record = wg_db[EMBEDDING_MODEL_COLLECTION].find_one(
         {"database_name": database_name}
     )
     if not record:
+        logger.warning("No embedding model configured for database: %s", database_name)
         return None
-    return record.get("model_name")
+    model_name = record.get("model_name")
+    logger.info("Found embedding model: %s for database: %s", model_name, database_name)
+    return model_name
+
+
+def index_document_chunks(document_id: str, text: str, database_name: str, collection_name: str):
+    """
+    Create vector-indexed chunks for a document.
+    Returns dict with indexing results or None if embedding model not configured.
+    """
+    logger.info("Starting indexing for document: %s", document_id)
+
+    model_name = get_embedding_model_name(database_name)
+    if not model_name:
+        logger.info("Skipping indexing - no embedding model configured for database: %s", database_name)
+        return None
+
+    logger.info("Chunking document text (length: %d characters)", len(text))
+    chunks = chunk_text(text)
+    if not chunks:
+        logger.warning("Document %s has no content to chunk", document_id)
+        return None
+
+    logger.info("Created %d chunks from document %s", len(chunks), document_id)
+
+    logger.info("Loading embedding model: %s", model_name)
+    model = get_model(model_name)
+
+    logger.info("Generating embeddings for %d chunks", len(chunks))
+    embeddings = model.encode(chunks, convert_to_numpy=True, normalize_embeddings=True)
+    logger.info("Embeddings generated successfully (dimension: %d)", embeddings.shape[1])
+
+    db = mongo_client[database_name]
+    chunk_collection = f"{collection_name}_chunks"
+
+    logger.info("Clearing existing chunks for document %s in collection %s", document_id, chunk_collection)
+    delete_result = db[chunk_collection].delete_many({"document_id": document_id})
+    logger.info("Deleted %d existing chunks", delete_result.deleted_count)
+
+    chunk_docs = []
+    for idx, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+        chunk_docs.append(
+            {
+                "document_id": document_id,
+                "chunk_index": idx,
+                "text": chunk,
+                "embedding": embedding.tolist(),
+                "created_at": utc_now(),
+            }
+        )
+
+    logger.info("Inserting %d chunks into collection %s", len(chunk_docs), chunk_collection)
+    db[chunk_collection].insert_many(chunk_docs)
+
+    wg_db = mongo_client[WEB_GATHER_DB]
+    wg_db[DOCUMENTS_COLLECTION].update_one(
+        {"document_id": document_id},
+        {
+            "$set": {
+                "indexed_at": utc_now(),
+                "chunk_count": len(chunk_docs),
+                "embedding_model": model_name,
+                "chunk_collection": chunk_collection,
+            }
+        },
+    )
+
+    logger.info("Indexing complete for document %s: %d chunks indexed with model %s",
+                document_id, len(chunk_docs), model_name)
+
+    return {
+        "chunks_indexed": len(chunk_docs),
+        "embedding_model": model_name,
+        "chunk_collection": chunk_collection,
+    }
 
 
 def serialize_search_result(result):
@@ -410,22 +501,27 @@ def serialize_search_result(result):
 
 @app.post("/gather")
 def gather():
+    logger.info("POST /gather - Starting web search")
     payload = request.get_json(silent=True) or {}
     query = payload.get("query")
     if not query:
+        logger.warning("POST /gather - Missing required parameter: query")
         return jsonify({"error": "query is required"}), 400
 
+    logger.info("POST /gather - Searching for: %s", query)
     results = firecrawl_client.search(
         query=query,
         limit=10,
     )
     normalized = normalize_results(results)
     serialized = [serialize_search_result(r) for r in normalized]
+    logger.info("POST /gather - Found %d results for query: %s", len(serialized), query)
     return jsonify({"query": query, "results": serialized})
 
 
 @app.post("/ingest")
 def ingest():
+    logger.info("POST /ingest - Starting document ingestion")
     payload = request.get_json(silent=True) or {}
     url = payload.get("url")
     depth = int(payload.get("depth", 1))
@@ -434,6 +530,7 @@ def ingest():
     collection_name = payload.get("collection")
 
     if not url or not database_name or not collection_name:
+        logger.warning("POST /ingest - Missing required parameters")
         return (
             jsonify(
                 {
@@ -443,6 +540,7 @@ def ingest():
             400,
         )
 
+    logger.info("POST /ingest - Crawling URL: %s (depth=%d, breadth=%d)", url, depth, breadth)
     try:
         crawl_result = firecrawl_client.crawl(
             url=url,
@@ -450,15 +548,24 @@ def ingest():
             limit=breadth,
         )
     except Exception as exc:
+        logger.error("POST /ingest - Crawl failed for URL %s: %s", url, exc)
         return jsonify({"error": f"crawl failed: {exc}"}), 500
 
     pages = normalize_results(crawl_result)
+    logger.info("POST /ingest - Crawl returned %d pages", len(pages))
+
     combined_text = combine_pages(pages)
     if not combined_text:
+        logger.warning("POST /ingest - Crawl returned no content for URL: %s", url)
         return jsonify({"error": "crawl returned no content"}), 400
 
+    logger.info("POST /ingest - Combined text length: %d characters", len(combined_text))
+
     document_id = str(uuid.uuid4())
+    logger.info("POST /ingest - Created document ID: %s", document_id)
+
     db = mongo_client[database_name]
+    logger.info("POST /ingest - Storing document in %s.%s", database_name, collection_name)
     db[collection_name].insert_one(
         {
             "_id": document_id,
@@ -470,6 +577,7 @@ def ingest():
 
     description = combined_text[:300]
     wg_db = mongo_client[WEB_GATHER_DB]
+    logger.info("POST /ingest - Creating document metadata record")
     wg_db[DOCUMENTS_COLLECTION].insert_one(
         {
             "document_id": document_id,
@@ -486,26 +594,49 @@ def ingest():
         {"document_id": document_id},
         {"$set": {"chunk_collection": chunk_collection}},
     )
+    logger.info("POST /ingest - Creating index on chunk collection: %s", chunk_collection)
     db[chunk_collection].create_index("document_id")
 
-    return jsonify(
-        {
-            "document_id": document_id,
-            "pages": len(pages),
-            "database_name": database_name,
-            "collection_name": collection_name,
-            "chunk_collection": chunk_collection,
-        }
+    # Automatically create vector-indexed chunks if embedding model is configured
+    logger.info("POST /ingest - Attempting to create vector-indexed chunks")
+    index_result = index_document_chunks(
+        document_id=document_id,
+        text=combined_text,
+        database_name=database_name,
+        collection_name=collection_name,
     )
+
+    response_data = {
+        "document_id": document_id,
+        "pages": len(pages),
+        "database_name": database_name,
+        "collection_name": collection_name,
+        "chunk_collection": chunk_collection,
+    }
+
+    if index_result:
+        response_data["indexed"] = True
+        response_data["chunks_indexed"] = index_result["chunks_indexed"]
+        response_data["embedding_model"] = index_result["embedding_model"]
+        logger.info("POST /ingest - Document ingested and indexed successfully: %s", document_id)
+    else:
+        response_data["indexed"] = False
+        response_data["message"] = "Document stored but not indexed - configure embedding model first"
+        logger.info("POST /ingest - Document ingested but not indexed (no embedding model): %s", document_id)
+
+    return jsonify(response_data)
 
 
 @app.get("/documents")
 def list_documents():
+    logger.info("GET /documents - Listing documents")
     database_name = request.args.get("database_name")
     collection_name = request.args.get("collection_name")
     if not database_name or not collection_name:
+        logger.warning("GET /documents - Missing required parameters")
         return jsonify({"error": "database_name and collection_name are required"}), 400
 
+    logger.info("GET /documents - Querying %s.%s", database_name, collection_name)
     wg_db = mongo_client[WEB_GATHER_DB]
     docs = list(
         wg_db[DOCUMENTS_COLLECTION].find(
@@ -513,120 +644,128 @@ def list_documents():
             {"_id": 0},
         )
     )
+    logger.info("GET /documents - Found %d documents", len(docs))
     return jsonify({"documents": docs})
 
 
 @app.get("/collections")
 def list_collections():
+    logger.info("GET /collections - Listing collections")
     database_name = request.args.get("database_name")
     if not database_name:
+        logger.warning("GET /collections - Missing required parameter: database_name")
         return jsonify({"error": "database_name is required"}), 400
 
+    logger.info("GET /collections - Querying collections for database: %s", database_name)
     wg_db = mongo_client[WEB_GATHER_DB]
     collections = wg_db[DOCUMENTS_COLLECTION].distinct(
         "collection_name", {"database_name": database_name}
     )
+    logger.info("GET /collections - Found %d collections", len(collections))
     return jsonify({"database_name": database_name, "collections": collections})
 
 
 @app.post("/index")
 def index_document():
+    logger.info("POST /index - Starting document indexing")
     payload = request.get_json(silent=True) or {}
     document_id = payload.get("document_id")
     if not document_id:
+        logger.warning("POST /index - Missing required parameter: document_id")
         return jsonify({"error": "document_id is required"}), 400
 
+    logger.info("POST /index - Looking up document: %s", document_id)
     wg_db = mongo_client[WEB_GATHER_DB]
     doc_record = wg_db[DOCUMENTS_COLLECTION].find_one({"document_id": document_id})
     if not doc_record:
+        logger.warning("POST /index - Document not found: %s", document_id)
         return jsonify({"error": "document_id not found"}), 404
 
     database_name = doc_record["database_name"]
     collection_name = doc_record["collection_name"]
+    logger.info("POST /index - Document found in %s.%s", database_name, collection_name)
+
+    # Check if embedding model is configured
     model_name = get_embedding_model_name(database_name)
     if not model_name:
+        logger.error("POST /index - No embedding model configured for database: %s", database_name)
         return jsonify({"error": "embedding model not configured"}), 400
 
     db = mongo_client[database_name]
     document = db[collection_name].find_one({"_id": document_id})
     if not document:
+        logger.warning("POST /index - Document content not found: %s", document_id)
         return jsonify({"error": "document not found"}), 404
 
-    chunks = chunk_text(document.get("text", ""))
-    if not chunks:
+    text = document.get("text", "")
+    if not text:
+        logger.warning("POST /index - Document has no text content: %s", document_id)
         return jsonify({"error": "document has no content"}), 400
 
-    model = get_model(model_name)
-    embeddings = model.encode(chunks, convert_to_numpy=True, normalize_embeddings=True)
-
-    chunk_collection = f"{collection_name}_chunks"
-    db[chunk_collection].delete_many({"document_id": document_id})
-    chunk_docs = []
-    for idx, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-        chunk_docs.append(
-            {
-                "document_id": document_id,
-                "chunk_index": idx,
-                "text": chunk,
-                "embedding": embedding.tolist(),
-                "created_at": utc_now(),
-            }
-        )
-    db[chunk_collection].insert_many(chunk_docs)
-
-    wg_db[DOCUMENTS_COLLECTION].update_one(
-        {"document_id": document_id},
-        {
-            "$set": {
-                "indexed_at": utc_now(),
-                "chunk_count": len(chunk_docs),
-                "embedding_model": model_name,
-                "chunk_collection": chunk_collection,
-            }
-        },
+    # Use shared indexing function
+    index_result = index_document_chunks(
+        document_id=document_id,
+        text=text,
+        database_name=database_name,
+        collection_name=collection_name,
     )
 
+    if not index_result:
+        logger.error("POST /index - Indexing failed for document: %s", document_id)
+        return jsonify({"error": "indexing failed"}), 500
+
+    logger.info("POST /index - Successfully indexed document: %s", document_id)
     return jsonify(
         {
             "document_id": document_id,
-            "chunks_indexed": len(chunk_docs),
-            "embedding_model": model_name,
-            "chunk_collection": chunk_collection,
+            "chunks_indexed": index_result["chunks_indexed"],
+            "embedding_model": index_result["embedding_model"],
+            "chunk_collection": index_result["chunk_collection"],
         }
     )
 
 
 @app.get("/search")
 def search():
+    logger.info("GET /search - Starting vector search")
     document_id = request.args.get("document_id")
     query = request.args.get("query")
     if not document_id or not query:
+        logger.warning("GET /search - Missing required parameters")
         return jsonify({"error": "document_id and query are required"}), 400
 
+    logger.info("GET /search - Searching document %s for: %s", document_id, query)
     wg_db = mongo_client[WEB_GATHER_DB]
     doc_record = wg_db[DOCUMENTS_COLLECTION].find_one({"document_id": document_id})
     if not doc_record:
+        logger.warning("GET /search - Document not found: %s", document_id)
         return jsonify({"error": "document_id not found"}), 404
 
     database_name = doc_record["database_name"]
     collection_name = doc_record["collection_name"]
     model_name = get_embedding_model_name(database_name)
     if not model_name:
+        logger.error("GET /search - No embedding model configured for database: %s", database_name)
         return jsonify({"error": "embedding model not configured"}), 400
 
     db = mongo_client[database_name]
     chunk_collection = f"{collection_name}_chunks"
+    logger.info("GET /search - Loading chunks from %s", chunk_collection)
     chunks = list(
         db[chunk_collection].find({"document_id": document_id}, {"_id": 0})
     )
     if not chunks:
+        logger.warning("GET /search - No chunks indexed for document: %s", document_id)
         return jsonify({"error": "no chunks indexed for document"}), 400
 
+    logger.info("GET /search - Found %d chunks, generating query embedding", len(chunks))
     model = get_model(model_name)
     query_embedding = model.encode(
         [query], convert_to_numpy=True, normalize_embeddings=True
     )[0]
     chunk_embeddings = [np.array(c["embedding"]) for c in chunks]
+
+    logger.info("GET /search - Computing cosine similarity scores")
     scores = cosine_similarity(query_embedding, chunk_embeddings)
 
     results = []
@@ -640,32 +779,40 @@ def search():
         )
     results.sort(key=lambda x: x["score"], reverse=True)
 
+    top_results = results[:5]
+    logger.info("GET /search - Returning top %d results (best score: %.3f)",
+                len(top_results), top_results[0]["score"] if top_results else 0)
     return jsonify(
         {
             "document_id": document_id,
             "query": query,
-            "results": results[:5],
+            "results": top_results,
         }
     )
 
 
 @app.get("/embedding-models")
 def list_embedding_models():
+    logger.info("GET /embedding-models - Listing embedding models")
     database_name = request.args.get("database_name")
     wg_db = mongo_client[WEB_GATHER_DB]
     query = {"database_name": database_name} if database_name else {}
     models = list(wg_db[EMBEDDING_MODEL_COLLECTION].find(query, {"_id": 0}))
+    logger.info("GET /embedding-models - Found %d models", len(models))
     return jsonify({"models": models})
 
 
 @app.post("/embedding-models")
 def add_embedding_model():
+    logger.info("POST /embedding-models - Adding embedding model")
     payload = request.get_json(silent=True) or {}
     database_name = payload.get("database_name")
     model_name = payload.get("model_name")
     if not database_name or not model_name:
+        logger.warning("POST /embedding-models - Missing required parameters")
         return jsonify({"error": "database_name and model_name are required"}), 400
 
+    logger.info("POST /embedding-models - Setting model %s for database %s", model_name, database_name)
     wg_db = mongo_client[WEB_GATHER_DB]
     wg_db[EMBEDDING_MODEL_COLLECTION].update_one(
         {"database_name": database_name},
@@ -679,17 +826,23 @@ def add_embedding_model():
         upsert=True,
     )
 
+    logger.info("POST /embedding-models - Successfully configured model %s for database %s", model_name, database_name)
     return jsonify({"database_name": database_name, "model_name": model_name})
 
 
 @app.get("/parse_llm")
 def parse_llm():
+    logger.info("GET /parse_llm - Starting LLM document parsing")
     document = request.args.get("document")
     parsing_prompt = request.args.get("parsing_prompt")
     document_id = request.args.get("document_id", "doc_001")
 
     if not document or not parsing_prompt:
+        logger.warning("GET /parse_llm - Missing required parameters")
         return jsonify({"error": "document and parsing_prompt are required"}), 400
+
+    logger.info("GET /parse_llm - Parsing document (length: %d) with prompt: %s...",
+                len(document), parsing_prompt[:50])
 
     system_prompt = """You are a document parsing assistant. Your task is to parse documents according to specific instructions and return structured JSON output.
 
@@ -724,6 +877,7 @@ Important guidelines:
 Return ONLY the JSON output with the parsed document sections."""
 
     try:
+        logger.info("GET /parse_llm - Calling Anthropic API (model: claude-3-haiku-20240307)")
         message = anthropic_client.messages.create(
             model="claude-3-haiku-20240307",
             max_tokens=4096,
@@ -734,6 +888,7 @@ Return ONLY the JSON output with the parsed document sections."""
         )
 
         response_text = message.content[0].text.strip()
+        logger.info("GET /parse_llm - Received response (length: %d)", len(response_text))
 
         # Try to extract JSON if wrapped in code blocks
         if response_text.startswith("```"):
@@ -746,13 +901,18 @@ Return ONLY the JSON output with the parsed document sections."""
             response_text = "\n".join(lines)
 
         parsed_result = json.loads(response_text)
+        section_count = len(parsed_result.get("parsed_doc", []))
+        logger.info("GET /parse_llm - Successfully parsed document into %d sections", section_count)
         return jsonify(parsed_result)
 
     except json.JSONDecodeError as e:
+        logger.error("GET /parse_llm - Failed to parse LLM response as JSON: %s", e)
         return jsonify({"error": f"Failed to parse LLM response as JSON: {str(e)}"}), 500
     except Exception as e:
+        logger.error("GET /parse_llm - LLM parsing failed: %s", e)
         return jsonify({"error": f"LLM parsing failed: {str(e)}"}), 500
 
 
 if __name__ == "__main__":
+    logger.info("Starting Web Gather API server on port 5000")
     app.run(debug=True, port=5000)
