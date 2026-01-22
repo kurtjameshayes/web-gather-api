@@ -61,7 +61,7 @@ def build_openapi_spec():
         "info": {
             "title": "Web Gather API",
             "version": "1.0.0",
-            "description": "Gather, ingest, index, and search web documents.",
+            "description": "Gather, load, index, and search web documents. The /ingest endpoint loads documents only - use /index separately to create vector embeddings.",
         },
         "paths": {
             "/gather": {
@@ -84,8 +84,8 @@ def build_openapi_spec():
             },
             "/ingest": {
                 "post": {
-                    "summary": "Ingest a document by crawling a URL or parsing a PDF",
-                    "description": "Supports both web pages (crawled via Firecrawl) and PDF files (downloaded and parsed). PDF files are automatically detected by URL extension or Content-Type header.",
+                    "summary": "Load a document by crawling a URL or parsing a PDF",
+                    "description": "Supports both web pages (crawled via Firecrawl) and PDF files (downloaded and parsed). PDF files are automatically detected by URL extension or Content-Type header. This endpoint only loads data - use /index to create vector embeddings.",
                     "requestBody": {
                         "required": True,
                         "content": {
@@ -98,6 +98,7 @@ def build_openapi_spec():
                                         "breadth": {"type": "integer", "description": "Max pages to crawl for web pages (ignored for PDFs)"},
                                         "database": {"type": "string"},
                                         "collection": {"type": "string"},
+                                        "mode": {"type": "string", "enum": ["append", "overwrite"], "description": "How to handle existing data: 'append' adds to existing data (default), 'overwrite' clears existing data first"},
                                     },
                                     "required": ["url", "database", "collection"],
                                 }
@@ -117,10 +118,9 @@ def build_openapi_spec():
                                             "pages": {"type": "integer"},
                                             "database_name": {"type": "string"},
                                             "collection_name": {"type": "string"},
-                                            "chunk_collection": {"type": "string"},
-                                            "indexed": {"type": "boolean"},
-                                            "chunks_indexed": {"type": "integer"},
-                                            "embedding_model": {"type": "string"},
+                                            "mode": {"type": "string"},
+                                            "overwritten": {"type": "boolean"},
+                                            "previous_document_count": {"type": "integer"},
                                         },
                                     }
                                 }
@@ -710,13 +710,14 @@ def gather():
 
 @app.post("/ingest")
 def ingest():
-    logger.info("POST /ingest - Starting document ingestion")
+    logger.info("POST /ingest - Starting document ingestion (load only)")
     payload = request.get_json(silent=True) or {}
     url = payload.get("url")
     depth = int(payload.get("depth", 1))
     breadth = int(payload.get("breadth", 5))
     database_name = payload.get("database")
     collection_name = payload.get("collection")
+    mode = payload.get("mode", "append").lower()
 
     if not url or not database_name or not collection_name:
         logger.warning("POST /ingest - Missing required parameters")
@@ -724,6 +725,18 @@ def ingest():
             jsonify(
                 {
                     "error": "url, database, and collection are required",
+                }
+            ),
+            400,
+        )
+
+    # Validate mode parameter
+    if mode not in ("append", "overwrite"):
+        logger.warning("POST /ingest - Invalid mode: %s", mode)
+        return (
+            jsonify(
+                {
+                    "error": "mode must be 'append' or 'overwrite'",
                 }
             ),
             400,
@@ -785,11 +798,42 @@ def ingest():
 
     logger.info("POST /ingest - Combined text length: %d characters", len(combined_text))
 
+    db = mongo_client[database_name]
+    wg_db = mongo_client[WEB_GATHER_DB]
+    chunk_collection = f"{collection_name}_chunks"
+    
+    # Track previous document count for response
+    previous_document_count = 0
+    overwritten = False
+
+    # Handle overwrite mode - clear existing data in collection
+    if mode == "overwrite":
+        logger.info("POST /ingest - Overwrite mode: checking for existing data in %s.%s", database_name, collection_name)
+        previous_document_count = db[collection_name].count_documents({})
+        
+        if previous_document_count > 0:
+            logger.info("POST /ingest - Overwrite mode: clearing %d existing documents", previous_document_count)
+            
+            # Delete documents from the main collection
+            db[collection_name].delete_many({})
+            
+            # Delete associated chunks
+            chunks_deleted = db[chunk_collection].delete_many({})
+            logger.info("POST /ingest - Overwrite mode: cleared %d chunks", chunks_deleted.deleted_count)
+            
+            # Delete document metadata records for this collection
+            wg_db[DOCUMENTS_COLLECTION].delete_many({
+                "database_name": database_name,
+                "collection_name": collection_name,
+            })
+            
+            overwritten = True
+            logger.info("POST /ingest - Overwrite mode: existing data cleared successfully")
+
     document_id = str(uuid.uuid4())
     logger.info("POST /ingest - Created document ID: %s", document_id)
 
-    db = mongo_client[database_name]
-    logger.info("POST /ingest - Storing document in %s.%s", database_name, collection_name)
+    logger.info("POST /ingest - Storing document in %s.%s (mode: %s)", database_name, collection_name, mode)
     db[collection_name].insert_one(
         {
             "_id": document_id,
@@ -801,13 +845,13 @@ def ingest():
     )
 
     description = combined_text[:300]
-    wg_db = mongo_client[WEB_GATHER_DB]
     logger.info("POST /ingest - Creating document metadata record")
     wg_db[DOCUMENTS_COLLECTION].insert_one(
         {
             "document_id": document_id,
             "database_name": database_name,
             "collection_name": collection_name,
+            "chunk_collection": chunk_collection,
             "source_url": url,
             "document_type": document_type,
             "description": description,
@@ -815,22 +859,9 @@ def ingest():
         }
     )
 
-    chunk_collection = f"{collection_name}_chunks"
-    wg_db[DOCUMENTS_COLLECTION].update_one(
-        {"document_id": document_id},
-        {"$set": {"chunk_collection": chunk_collection}},
-    )
-    logger.info("POST /ingest - Creating index on chunk collection: %s", chunk_collection)
+    # Create index on chunk collection for future indexing
+    logger.info("POST /ingest - Ensuring index on chunk collection: %s", chunk_collection)
     db[chunk_collection].create_index("document_id")
-
-    # Automatically create vector-indexed chunks if embedding model is configured
-    logger.info("POST /ingest - Attempting to create vector-indexed chunks")
-    index_result = index_document_chunks(
-        document_id=document_id,
-        text=combined_text,
-        database_name=database_name,
-        collection_name=collection_name,
-    )
 
     response_data = {
         "document_id": document_id,
@@ -838,19 +869,15 @@ def ingest():
         "pages": page_count,
         "database_name": database_name,
         "collection_name": collection_name,
-        "chunk_collection": chunk_collection,
+        "mode": mode,
+        "message": "Document loaded successfully. Use /index endpoint to create vector embeddings.",
     }
 
-    if index_result:
-        response_data["indexed"] = True
-        response_data["chunks_indexed"] = index_result["chunks_indexed"]
-        response_data["embedding_model"] = index_result["embedding_model"]
-        logger.info("POST /ingest - Document ingested and indexed successfully: %s", document_id)
-    else:
-        response_data["indexed"] = False
-        response_data["message"] = "Document stored but not indexed - configure embedding model first"
-        logger.info("POST /ingest - Document ingested but not indexed (no embedding model): %s", document_id)
+    if mode == "overwrite":
+        response_data["overwritten"] = overwritten
+        response_data["previous_document_count"] = previous_document_count
 
+    logger.info("POST /ingest - Document loaded successfully (mode: %s): %s", mode, document_id)
     return jsonify(response_data)
 
 
