@@ -246,19 +246,43 @@ def build_openapi_spec():
             "/index": {
                 "post": {
                     "summary": "Index a document by id",
+                    "description": "Create vector embeddings for a document and store them in the specified indexed collection.",
                     "requestBody": {
                         "required": True,
                         "content": {
                             "application/json": {
                                 "schema": {
                                     "type": "object",
-                                    "properties": {"document_id": {"type": "string"}},
-                                    "required": ["document_id"],
+                                    "properties": {
+                                        "document_id": {"type": "string", "description": "The document ID to index"},
+                                        "indexed_collection": {"type": "string", "description": "The collection name to store vector embeddings in"},
+                                        "mode": {"type": "string", "enum": ["append", "overwrite"], "description": "How to handle existing chunks: 'overwrite' replaces existing chunks for this document (default), 'append' adds new chunks without removing existing ones"},
+                                    },
+                                    "required": ["document_id", "indexed_collection"],
                                 }
                             }
                         },
                     },
-                    "responses": {"200": {"description": "Indexing result"}},
+                    "responses": {
+                        "200": {
+                            "description": "Indexing result",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "document_id": {"type": "string"},
+                                            "chunks_indexed": {"type": "integer"},
+                                            "embedding_model": {"type": "string"},
+                                            "indexed_collection": {"type": "string"},
+                                            "mode": {"type": "string"},
+                                            "previous_chunks_deleted": {"type": "integer"},
+                                        },
+                                    }
+                                }
+                            },
+                        }
+                    },
                 }
             },
             "/search": {
@@ -596,12 +620,26 @@ def get_embedding_model_name(database_name: str):
     return model_name
 
 
-def index_document_chunks(document_id: str, text: str, database_name: str, collection_name: str):
+def index_document_chunks(
+    document_id: str,
+    text: str,
+    database_name: str,
+    indexed_collection: str,
+    mode: str = "overwrite",
+):
     """
     Create vector-indexed chunks for a document.
+    
+    Args:
+        document_id: The document ID to index
+        text: The document text to chunk and embed
+        database_name: The database name
+        indexed_collection: The collection name to store chunks in
+        mode: "append" to add chunks, "overwrite" to replace existing chunks for this document
+    
     Returns dict with indexing results or None if embedding model not configured.
     """
-    logger.info("Starting indexing for document: %s", document_id)
+    logger.info("Starting indexing for document: %s (mode: %s)", document_id, mode)
 
     model_name = get_embedding_model_name(database_name)
     if not model_name:
@@ -624,11 +662,18 @@ def index_document_chunks(document_id: str, text: str, database_name: str, colle
     logger.info("Embeddings generated successfully (dimension: %d)", embeddings.shape[1])
 
     db = mongo_client[database_name]
-    chunk_collection = f"{collection_name}_chunks"
+    
+    # Track deleted count for response
+    deleted_count = 0
 
-    logger.info("Clearing existing chunks for document %s in collection %s", document_id, chunk_collection)
-    delete_result = db[chunk_collection].delete_many({"document_id": document_id})
-    logger.info("Deleted %d existing chunks", delete_result.deleted_count)
+    # In overwrite mode, clear existing chunks for this document
+    if mode == "overwrite":
+        logger.info("Overwrite mode: clearing existing chunks for document %s in collection %s", document_id, indexed_collection)
+        delete_result = db[indexed_collection].delete_many({"document_id": document_id})
+        deleted_count = delete_result.deleted_count
+        logger.info("Deleted %d existing chunks", deleted_count)
+    else:
+        logger.info("Append mode: keeping existing chunks for document %s", document_id)
 
     chunk_docs = []
     for idx, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
@@ -642,8 +687,11 @@ def index_document_chunks(document_id: str, text: str, database_name: str, colle
             }
         )
 
-    logger.info("Inserting %d chunks into collection %s", len(chunk_docs), chunk_collection)
-    db[chunk_collection].insert_many(chunk_docs)
+    logger.info("Inserting %d chunks into collection %s", len(chunk_docs), indexed_collection)
+    db[indexed_collection].insert_many(chunk_docs)
+    
+    # Create index on document_id for efficient lookups
+    db[indexed_collection].create_index("document_id")
 
     wg_db = mongo_client[WEB_GATHER_DB]
     wg_db[DOCUMENTS_COLLECTION].update_one(
@@ -653,19 +701,25 @@ def index_document_chunks(document_id: str, text: str, database_name: str, colle
                 "indexed_at": utc_now(),
                 "chunk_count": len(chunk_docs),
                 "embedding_model": model_name,
-                "chunk_collection": chunk_collection,
+                "indexed_collection": indexed_collection,
             }
         },
     )
 
-    logger.info("Indexing complete for document %s: %d chunks indexed with model %s",
-                document_id, len(chunk_docs), model_name)
+    logger.info("Indexing complete for document %s: %d chunks indexed with model %s (mode: %s)",
+                document_id, len(chunk_docs), model_name, mode)
 
-    return {
+    result = {
         "chunks_indexed": len(chunk_docs),
         "embedding_model": model_name,
-        "chunk_collection": chunk_collection,
+        "indexed_collection": indexed_collection,
+        "mode": mode,
     }
+    
+    if mode == "overwrite":
+        result["previous_chunks_deleted"] = deleted_count
+    
+    return result
 
 
 def serialize_search_result(result):
@@ -800,7 +854,6 @@ def ingest():
 
     db = mongo_client[database_name]
     wg_db = mongo_client[WEB_GATHER_DB]
-    chunk_collection = f"{collection_name}_chunks"
     
     # Track previous document count for response
     previous_document_count = 0
@@ -814,12 +867,26 @@ def ingest():
         if previous_document_count > 0:
             logger.info("POST /ingest - Overwrite mode: clearing %d existing documents", previous_document_count)
             
+            # Find all indexed collections for documents in this collection
+            doc_records = list(wg_db[DOCUMENTS_COLLECTION].find({
+                "database_name": database_name,
+                "collection_name": collection_name,
+            }))
+            
+            # Delete chunks from all indexed collections
+            indexed_collections = set()
+            for doc_record in doc_records:
+                indexed_col = doc_record.get("indexed_collection")
+                if indexed_col:
+                    indexed_collections.add(indexed_col)
+            
+            for indexed_col in indexed_collections:
+                chunks_deleted = db[indexed_col].delete_many({})
+                logger.info("POST /ingest - Overwrite mode: cleared %d chunks from %s", 
+                           chunks_deleted.deleted_count, indexed_col)
+            
             # Delete documents from the main collection
             db[collection_name].delete_many({})
-            
-            # Delete associated chunks
-            chunks_deleted = db[chunk_collection].delete_many({})
-            logger.info("POST /ingest - Overwrite mode: cleared %d chunks", chunks_deleted.deleted_count)
             
             # Delete document metadata records for this collection
             wg_db[DOCUMENTS_COLLECTION].delete_many({
@@ -950,9 +1017,21 @@ def index_document():
     logger.info("POST /index - Starting document indexing")
     payload = request.get_json(silent=True) or {}
     document_id = payload.get("document_id")
+    indexed_collection = payload.get("indexed_collection")
+    mode = payload.get("mode", "overwrite").lower()
+    
     if not document_id:
         logger.warning("POST /index - Missing required parameter: document_id")
         return jsonify({"error": "document_id is required"}), 400
+    
+    if not indexed_collection:
+        logger.warning("POST /index - Missing required parameter: indexed_collection")
+        return jsonify({"error": "indexed_collection is required"}), 400
+
+    # Validate mode parameter
+    if mode not in ("append", "overwrite"):
+        logger.warning("POST /index - Invalid mode: %s", mode)
+        return jsonify({"error": "mode must be 'append' or 'overwrite'"}), 400
 
     logger.info("POST /index - Looking up document: %s", document_id)
     wg_db = mongo_client[WEB_GATHER_DB]
@@ -982,12 +1061,16 @@ def index_document():
         logger.warning("POST /index - Document has no text content: %s", document_id)
         return jsonify({"error": "document has no content"}), 400
 
+    logger.info("POST /index - Indexing document %s into collection %s (mode: %s)", 
+                document_id, indexed_collection, mode)
+
     # Use shared indexing function
     index_result = index_document_chunks(
         document_id=document_id,
         text=text,
         database_name=database_name,
-        collection_name=collection_name,
+        indexed_collection=indexed_collection,
+        mode=mode,
     )
 
     if not index_result:
@@ -995,14 +1078,19 @@ def index_document():
         return jsonify({"error": "indexing failed"}), 500
 
     logger.info("POST /index - Successfully indexed document: %s", document_id)
-    return jsonify(
-        {
-            "document_id": document_id,
-            "chunks_indexed": index_result["chunks_indexed"],
-            "embedding_model": index_result["embedding_model"],
-            "chunk_collection": index_result["chunk_collection"],
-        }
-    )
+    
+    response_data = {
+        "document_id": document_id,
+        "chunks_indexed": index_result["chunks_indexed"],
+        "embedding_model": index_result["embedding_model"],
+        "indexed_collection": index_result["indexed_collection"],
+        "mode": index_result["mode"],
+    }
+    
+    if mode == "overwrite":
+        response_data["previous_chunks_deleted"] = index_result["previous_chunks_deleted"]
+    
+    return jsonify(response_data)
 
 
 @app.get("/search")
@@ -1022,17 +1110,21 @@ def search():
         return jsonify({"error": "document_id not found"}), 404
 
     database_name = doc_record["database_name"]
-    collection_name = doc_record["collection_name"]
+    indexed_collection = doc_record.get("indexed_collection")
+    
+    if not indexed_collection:
+        logger.warning("GET /search - Document not indexed: %s", document_id)
+        return jsonify({"error": "document has not been indexed - use /index endpoint first"}), 400
+    
     model_name = get_embedding_model_name(database_name)
     if not model_name:
         logger.error("GET /search - No embedding model configured for database: %s", database_name)
         return jsonify({"error": "embedding model not configured"}), 400
 
     db = mongo_client[database_name]
-    chunk_collection = f"{collection_name}_chunks"
-    logger.info("GET /search - Loading chunks from %s", chunk_collection)
+    logger.info("GET /search - Loading chunks from %s", indexed_collection)
     chunks = list(
-        db[chunk_collection].find({"document_id": document_id}, {"_id": 0})
+        db[indexed_collection].find({"document_id": document_id}, {"_id": 0})
     )
     if not chunks:
         logger.warning("GET /search - No chunks indexed for document: %s", document_id)
