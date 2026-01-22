@@ -851,17 +851,12 @@ def ingest():
             "document_id": document_id,
             "database_name": database_name,
             "collection_name": collection_name,
-            "chunk_collection": chunk_collection,
             "source_url": url,
             "document_type": document_type,
             "description": description,
             "created_at": utc_now(),
         }
     )
-
-    # Create index on chunk collection for future indexing
-    logger.info("POST /ingest - Ensuring index on chunk collection: %s", chunk_collection)
-    db[chunk_collection].create_index("document_id")
 
     response_data = {
         "document_id": document_id,
