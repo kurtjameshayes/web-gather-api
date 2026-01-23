@@ -246,19 +246,70 @@ def build_openapi_spec():
             "/index": {
                 "post": {
                     "summary": "Index a document by id",
+                    "description": "Index a document from a source collection and write the indexed chunks to an index collection. The embedding model is determined by the index_collection_name.",
                     "requestBody": {
                         "required": True,
                         "content": {
                             "application/json": {
                                 "schema": {
                                     "type": "object",
-                                    "properties": {"document_id": {"type": "string"}},
-                                    "required": ["document_id"],
+                                    "properties": {
+                                        "source_database_name": {
+                                            "type": "string",
+                                            "description": "The name of the database containing the collection to be indexed",
+                                        },
+                                        "source_collection_name": {
+                                            "type": "string",
+                                            "description": "The name of the collection containing the data to be indexed",
+                                        },
+                                        "source_document_id": {
+                                            "type": "string",
+                                            "description": "The id of the document within the source collection",
+                                        },
+                                        "index_database_name": {
+                                            "type": "string",
+                                            "description": "The database of the index collection",
+                                        },
+                                        "index_collection_name": {
+                                            "type": "string",
+                                            "description": "The indexed data will be written to this collection",
+                                        },
+                                    },
+                                    "required": [
+                                        "source_database_name",
+                                        "source_collection_name",
+                                        "source_document_id",
+                                        "index_database_name",
+                                        "index_collection_name",
+                                    ],
                                 }
                             }
                         },
                     },
-                    "responses": {"200": {"description": "Indexing result"}},
+                    "responses": {
+                        "200": {
+                            "description": "Indexing result",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "source_database_name": {"type": "string"},
+                                            "source_collection_name": {"type": "string"},
+                                            "source_document_id": {"type": "string"},
+                                            "index_database_name": {"type": "string"},
+                                            "index_collection_name": {"type": "string"},
+                                            "chunks_indexed": {"type": "integer"},
+                                            "embedding_model": {"type": "string"},
+                                            "chunk_collection": {"type": "string"},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                        "400": {"description": "Missing required parameters or embedding model not configured"},
+                        "404": {"description": "Document not found"},
+                    },
                 }
             },
             "/search": {
@@ -596,16 +647,41 @@ def get_embedding_model_name(database_name: str):
     return model_name
 
 
-def index_document_chunks(document_id: str, text: str, database_name: str, collection_name: str):
+def index_document_chunks(
+    document_id: str,
+    text: str,
+    database_name: str,
+    collection_name: str,
+    index_database_name: str = None,
+    index_collection_name: str = None,
+):
     """
     Create vector-indexed chunks for a document.
+    
+    Args:
+        document_id: The document identifier
+        text: The text content to index
+        database_name: The source database name (used for metadata updates)
+        collection_name: The source collection name (used for metadata updates)
+        index_database_name: The database where chunks will be stored (defaults to database_name)
+        index_collection_name: The collection name for chunks (defaults to collection_name)
+    
     Returns dict with indexing results or None if embedding model not configured.
     """
+    # Use source values as defaults if index values not provided
+    if index_database_name is None:
+        index_database_name = database_name
+    if index_collection_name is None:
+        index_collection_name = collection_name
+    
     logger.info("Starting indexing for document: %s", document_id)
+    logger.info("Source: %s.%s, Index target: %s.%s", 
+                database_name, collection_name, index_database_name, index_collection_name)
 
-    model_name = get_embedding_model_name(database_name)
+    # Look up embedding model using index_collection_name as the database_name
+    model_name = get_embedding_model_name(index_collection_name)
     if not model_name:
-        logger.info("Skipping indexing - no embedding model configured for database: %s", database_name)
+        logger.info("Skipping indexing - no embedding model configured for database: %s", index_collection_name)
         return None
 
     logger.info("Chunking document text (length: %d characters)", len(text))
@@ -623,11 +699,13 @@ def index_document_chunks(document_id: str, text: str, database_name: str, colle
     embeddings = model.encode(chunks, convert_to_numpy=True, normalize_embeddings=True)
     logger.info("Embeddings generated successfully (dimension: %d)", embeddings.shape[1])
 
-    db = mongo_client[database_name]
-    chunk_collection = f"{collection_name}_chunks"
+    # Write chunks to the index database/collection
+    index_db = mongo_client[index_database_name]
+    chunk_collection = f"{index_collection_name}_chunks"
 
-    logger.info("Clearing existing chunks for document %s in collection %s", document_id, chunk_collection)
-    delete_result = db[chunk_collection].delete_many({"document_id": document_id})
+    logger.info("Clearing existing chunks for document %s in %s.%s", 
+                document_id, index_database_name, chunk_collection)
+    delete_result = index_db[chunk_collection].delete_many({"document_id": document_id})
     logger.info("Deleted %d existing chunks", delete_result.deleted_count)
 
     chunk_docs = []
@@ -642,8 +720,8 @@ def index_document_chunks(document_id: str, text: str, database_name: str, colle
             }
         )
 
-    logger.info("Inserting %d chunks into collection %s", len(chunk_docs), chunk_collection)
-    db[chunk_collection].insert_many(chunk_docs)
+    logger.info("Inserting %d chunks into %s.%s", len(chunk_docs), index_database_name, chunk_collection)
+    index_db[chunk_collection].insert_many(chunk_docs)
 
     wg_db = mongo_client[WEB_GATHER_DB]
     wg_db[DOCUMENTS_COLLECTION].update_one(
@@ -654,12 +732,14 @@ def index_document_chunks(document_id: str, text: str, database_name: str, colle
                 "chunk_count": len(chunk_docs),
                 "embedding_model": model_name,
                 "chunk_collection": chunk_collection,
+                "index_database_name": index_database_name,
+                "index_collection_name": index_collection_name,
             }
         },
     )
 
-    logger.info("Indexing complete for document %s: %d chunks indexed with model %s",
-                document_id, len(chunk_docs), model_name)
+    logger.info("Indexing complete for document %s: %d chunks indexed with model %s to %s.%s",
+                document_id, len(chunk_docs), model_name, index_database_name, chunk_collection)
 
     return {
         "chunks_indexed": len(chunk_docs),
@@ -949,55 +1029,83 @@ def list_all_collections():
 def index_document():
     logger.info("POST /index - Starting document indexing")
     payload = request.get_json(silent=True) or {}
-    document_id = payload.get("document_id")
-    if not document_id:
-        logger.warning("POST /index - Missing required parameter: document_id")
-        return jsonify({"error": "document_id is required"}), 400
+    
+    # Get required parameters
+    source_database_name = payload.get("source_database_name")
+    source_collection_name = payload.get("source_collection_name")
+    source_document_id = payload.get("source_document_id")
+    index_database_name = payload.get("index_database_name")
+    index_collection_name = payload.get("index_collection_name")
+    
+    # Validate required parameters
+    missing_params = []
+    if not source_database_name:
+        missing_params.append("source_database_name")
+    if not source_collection_name:
+        missing_params.append("source_collection_name")
+    if not source_document_id:
+        missing_params.append("source_document_id")
+    if not index_database_name:
+        missing_params.append("index_database_name")
+    if not index_collection_name:
+        missing_params.append("index_collection_name")
+    
+    if missing_params:
+        logger.warning("POST /index - Missing required parameters: %s", ", ".join(missing_params))
+        return jsonify({
+            "error": f"Missing required parameters: {', '.join(missing_params)}"
+        }), 400
 
-    logger.info("POST /index - Looking up document: %s", document_id)
-    wg_db = mongo_client[WEB_GATHER_DB]
-    doc_record = wg_db[DOCUMENTS_COLLECTION].find_one({"document_id": document_id})
-    if not doc_record:
-        logger.warning("POST /index - Document not found: %s", document_id)
-        return jsonify({"error": "document_id not found"}), 404
+    logger.info("POST /index - Source: %s.%s, Document ID: %s", 
+                source_database_name, source_collection_name, source_document_id)
+    logger.info("POST /index - Index target: %s.%s", index_database_name, index_collection_name)
 
-    database_name = doc_record["database_name"]
-    collection_name = doc_record["collection_name"]
-    logger.info("POST /index - Document found in %s.%s", database_name, collection_name)
-
-    # Check if embedding model is configured
-    model_name = get_embedding_model_name(database_name)
+    # Check if embedding model is configured for index_collection_name
+    model_name = get_embedding_model_name(index_collection_name)
     if not model_name:
-        logger.error("POST /index - No embedding model configured for database: %s", database_name)
-        return jsonify({"error": "embedding model not configured"}), 400
+        logger.error("POST /index - No embedding model configured for database: %s", index_collection_name)
+        return jsonify({
+            "error": f"No embedding model configured for index_collection_name '{index_collection_name}'. "
+                     f"Use POST /embedding-models to configure one."
+        }), 400
 
-    db = mongo_client[database_name]
-    document = db[collection_name].find_one({"_id": document_id})
+    # Fetch the source document
+    source_db = mongo_client[source_database_name]
+    document = source_db[source_collection_name].find_one({"_id": source_document_id})
     if not document:
-        logger.warning("POST /index - Document content not found: %s", document_id)
-        return jsonify({"error": "document not found"}), 404
+        logger.warning("POST /index - Document not found: %s in %s.%s", 
+                       source_document_id, source_database_name, source_collection_name)
+        return jsonify({
+            "error": f"Document not found: {source_document_id} in {source_database_name}.{source_collection_name}"
+        }), 404
 
     text = document.get("text", "")
     if not text:
-        logger.warning("POST /index - Document has no text content: %s", document_id)
+        logger.warning("POST /index - Document has no text content: %s", source_document_id)
         return jsonify({"error": "document has no content"}), 400
 
-    # Use shared indexing function
+    # Use shared indexing function with separate source and index parameters
     index_result = index_document_chunks(
-        document_id=document_id,
+        document_id=source_document_id,
         text=text,
-        database_name=database_name,
-        collection_name=collection_name,
+        database_name=source_database_name,
+        collection_name=source_collection_name,
+        index_database_name=index_database_name,
+        index_collection_name=index_collection_name,
     )
 
     if not index_result:
-        logger.error("POST /index - Indexing failed for document: %s", document_id)
+        logger.error("POST /index - Indexing failed for document: %s", source_document_id)
         return jsonify({"error": "indexing failed"}), 500
 
-    logger.info("POST /index - Successfully indexed document: %s", document_id)
+    logger.info("POST /index - Successfully indexed document: %s", source_document_id)
     return jsonify(
         {
-            "document_id": document_id,
+            "source_database_name": source_database_name,
+            "source_collection_name": source_collection_name,
+            "source_document_id": source_document_id,
+            "index_database_name": index_database_name,
+            "index_collection_name": index_collection_name,
             "chunks_indexed": index_result["chunks_indexed"],
             "embedding_model": index_result["embedding_model"],
             "chunk_collection": index_result["chunk_collection"],
