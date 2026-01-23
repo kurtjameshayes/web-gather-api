@@ -329,9 +329,9 @@ def build_openapi_spec():
                         {
                             "name": "parsing_prompt",
                             "in": "query",
-                            "required": True,
+                            "required": False,
                             "schema": {"type": "string"},
-                            "description": "Instructions for how to parse the document",
+                            "description": "Instructions for how to parse the document. If not provided, defaults to parsing the document into logical sections based on document type.",
                         },
                         {
                             "name": "document_id",
@@ -1110,6 +1110,10 @@ def add_embedding_model():
     return jsonify({"database_name": database_name, "model_name": model_name})
 
 
+DEFAULT_PARSING_PROMPT = """Parse the document into sections logically based on the type of information in the document.
+For example, legal documents should be parsed into section or clauses."""
+
+
 @app.get("/parse_llm")
 def parse_llm():
     logger.info("GET /parse_llm - Starting LLM document parsing")
@@ -1117,9 +1121,14 @@ def parse_llm():
     parsing_prompt = request.args.get("parsing_prompt")
     document_id = request.args.get("document_id", "doc_001")
 
-    if not document or not parsing_prompt:
-        logger.warning("GET /parse_llm - Missing required parameters")
-        return jsonify({"error": "document and parsing_prompt are required"}), 400
+    if not document:
+        logger.warning("GET /parse_llm - Missing required parameter: document")
+        return jsonify({"error": "document is required"}), 400
+
+    # Use default parsing prompt if not provided
+    if not parsing_prompt:
+        parsing_prompt = DEFAULT_PARSING_PROMPT
+        logger.info("GET /parse_llm - Using default parsing prompt")
 
     logger.info("GET /parse_llm - Parsing document (length: %d) with prompt: %s...",
                 len(document), parsing_prompt[:50])
