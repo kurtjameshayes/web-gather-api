@@ -303,9 +303,9 @@ def index_document_chunks(
     embeddings = model.encode(chunks, convert_to_numpy=True, normalize_embeddings=True)
     logger.info("Embeddings generated successfully (dimension: %d)", embeddings.shape[1])
 
-    # Write chunks to the index database/collection
+    # Write chunks to the index database/collection (use collection name verbatim)
     index_db = mongo_client[index_database_name]
-    chunk_collection = f"{index_collection_name}_chunks"
+    chunk_collection = index_collection_name
 
     logger.info("Clearing existing chunks for document %s in %s.%s",
                 document_id, index_database_name, chunk_collection)
@@ -404,6 +404,8 @@ def ingest():
     database_name = payload.get("database")
     collection_name = payload.get("collection")
     mode = payload.get("mode", "append").lower()
+    index_database_name = payload.get("index_database")
+    index_collection_name = payload.get("index_collection")
 
     if not url or not database_name or not collection_name:
         logger.warning("POST /ingest - Missing required parameters")
@@ -509,7 +511,6 @@ def ingest():
 
     db = mongo_client[database_name]
     wg_db = mongo_client[WEB_GATHER_DB]
-    chunk_collection = f"{collection_name}_chunks"
 
     # Track previous document count for response
     previous_document_count = 0
@@ -526,9 +527,12 @@ def ingest():
             # Delete documents from the main collection
             db[collection_name].delete_many({})
 
-            # Delete associated chunks
-            chunks_deleted = db[chunk_collection].delete_many({})
-            logger.info("POST /ingest - Overwrite mode: cleared %d chunks", chunks_deleted.deleted_count)
+            # Delete associated chunks from index collection if provided
+            if index_database_name and index_collection_name:
+                index_db = mongo_client[index_database_name]
+                chunks_deleted = index_db[index_collection_name].delete_many({})
+                logger.info("POST /ingest - Overwrite mode: cleared %d chunks from %s.%s",
+                           chunks_deleted.deleted_count, index_database_name, index_collection_name)
 
             # Delete document metadata records for this collection
             wg_db[DOCUMENTS_COLLECTION].delete_many({
@@ -567,6 +571,24 @@ def ingest():
         }
     )
 
+    # If index_database and index_collection are provided, create vector embeddings
+    index_result = None
+    if index_database_name and index_collection_name:
+        logger.info("POST /ingest - Index parameters provided, creating vector embeddings")
+        logger.info("POST /ingest - Index target: %s.%s", index_database_name, index_collection_name)
+        index_result = index_document_chunks(
+            document_id=document_id,
+            text=combined_text,
+            database_name=database_name,
+            collection_name=collection_name,
+            index_database_name=index_database_name,
+            index_collection_name=index_collection_name,
+        )
+        if index_result:
+            logger.info("POST /ingest - Indexing complete: %d chunks indexed", index_result["chunks_indexed"])
+        else:
+            logger.warning("POST /ingest - Indexing skipped (no embedding model configured for %s)", index_database_name)
+
     response_data = {
         "document_id": document_id,
         "document_type": document_type,
@@ -574,8 +596,18 @@ def ingest():
         "database_name": database_name,
         "collection_name": collection_name,
         "mode": mode,
-        "message": "Document loaded successfully. Use /index endpoint to create vector embeddings.",
     }
+
+    if index_result:
+        response_data["message"] = "Document loaded and indexed successfully."
+        response_data["index_database_name"] = index_database_name
+        response_data["index_collection_name"] = index_collection_name
+        response_data["chunks_indexed"] = index_result["chunks_indexed"]
+        response_data["embedding_model"] = index_result["embedding_model"]
+    elif index_database_name and index_collection_name:
+        response_data["message"] = "Document loaded successfully. Indexing skipped - no embedding model configured for index database."
+    else:
+        response_data["message"] = "Document loaded successfully. Use /index endpoint to create vector embeddings."
 
     if mode == "overwrite":
         response_data["overwritten"] = overwritten
@@ -693,14 +725,18 @@ def search():
 
     database_name = doc_record["database_name"]
     collection_name = doc_record["collection_name"]
-    model_name = get_embedding_model_name(database_name)
+
+    # Use index location from metadata if available, otherwise fall back to source location
+    index_database_name = doc_record.get("index_database_name", database_name)
+    chunk_collection = doc_record.get("chunk_collection", collection_name)
+
+    model_name = get_embedding_model_name(index_database_name)
     if not model_name:
-        logger.error("GET /search - No embedding model configured for database: %s", database_name)
+        logger.error("GET /search - No embedding model configured for database: %s", index_database_name)
         return jsonify({"error": "embedding model not configured"}), 400
 
-    db = mongo_client[database_name]
-    chunk_collection = f"{collection_name}_chunks"
-    logger.info("GET /search - Loading chunks from %s", chunk_collection)
+    db = mongo_client[index_database_name]
+    logger.info("GET /search - Loading chunks from %s.%s", index_database_name, chunk_collection)
     chunks = list(
         db[chunk_collection].find({"document_id": document_id}, {"_id": 0})
     )
