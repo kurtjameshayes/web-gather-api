@@ -17,6 +17,7 @@ def build_openapi_spec():
             "/gather": {
                 "post": {
                     "summary": "Gather web documents based on query",
+                    "description": "Search the web for documents matching the query. Returns search results with URLs that can be selected for crawling via the /ingest endpoint. The response includes a next_step object describing the required and optional parameters for ingestion.",
                     "requestBody": {
                         "required": True,
                         "content": {
@@ -29,7 +30,55 @@ def build_openapi_spec():
                             }
                         },
                     },
-                    "responses": {"200": {"description": "Search results"}},
+                    "responses": {
+                        "200": {
+                            "description": "Search results with next step instructions",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "query": {"type": "string", "description": "The search query"},
+                                            "results": {
+                                                "type": "array",
+                                                "description": "List of search results",
+                                                "items": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "url": {"type": "string"},
+                                                        "title": {"type": "string"},
+                                                        "description": {"type": "string"},
+                                                    },
+                                                },
+                                            },
+                                            "next_step": {
+                                                "type": "object",
+                                                "description": "Instructions for the next step: selecting a URL and calling /ingest",
+                                                "properties": {
+                                                    "action": {"type": "string"},
+                                                    "endpoint": {"type": "string"},
+                                                    "method": {"type": "string"},
+                                                    "required_parameters": {
+                                                        "type": "object",
+                                                        "description": "Parameters that must be provided to /ingest",
+                                                        "properties": {
+                                                            "url": {"type": "object"},
+                                                            "database": {"type": "object"},
+                                                            "collection": {"type": "object"},
+                                                        },
+                                                    },
+                                                    "optional_parameters": {
+                                                        "type": "object",
+                                                        "description": "Optional parameters for /ingest (depth, breadth, mode, index_database, index_collection)",
+                                                    },
+                                                },
+                                            },
+                                        },
+                                    }
+                                }
+                            },
+                        }
+                    },
                 }
             },
             "/ingest": {
