@@ -493,6 +493,20 @@ def ingest():
         page_count = len(pages)
         logger.info("POST /ingest - Crawl returned %d pages", page_count)
 
+        # Check if crawl returned no pages at all
+        if page_count == 0:
+            logger.error("POST /ingest - Crawl returned 0 pages for URL: %s", url)
+            return jsonify({"error": "crawl returned no pages - website may be blocking crawlers"}), 400
+
+        # Log any warnings from crawled pages
+        for idx, page in enumerate(pages):
+            if hasattr(page, 'warning') and page.warning:
+                logger.warning("POST /ingest - Page %d warning: %s", idx, page.warning)
+            if hasattr(page, 'metadata') and page.metadata:
+                status_code = getattr(page.metadata, 'statusCode', None)
+                if status_code and status_code != 200:
+                    logger.warning("POST /ingest - Page %d statusCode: %s", idx, status_code)
+
         combined_text = combine_pages(pages)
         if not combined_text:
             logger.warning("POST /ingest - Crawl returned no content for URL: %s", url)
