@@ -404,8 +404,6 @@ def ingest():
     database_name = payload.get("database")
     collection_name = payload.get("collection")
     mode = payload.get("mode", "append").lower()
-    index_database_name = payload.get("index_database")
-    index_collection_name = payload.get("index_collection")
 
     if not url or not database_name or not collection_name:
         logger.warning("POST /ingest - Missing required parameters")
@@ -429,23 +427,6 @@ def ingest():
             ),
             400,
         )
-
-    # Validate embedding model exists BEFORE starting ingest cycle
-    if index_database_name:
-        logger.info("POST /ingest - Validating embedding model for index_database: %s", index_database_name)
-        model_name = get_embedding_model_name(index_database_name)
-        if not model_name:
-            logger.error("POST /ingest - No embedding model configured for index_database: %s", index_database_name)
-            return (
-                jsonify(
-                    {
-                        "error": f"No embedding model configured for index_database '{index_database_name}'. "
-                                 f"Use POST /embedding-models to configure one before ingesting with indexing."
-                    }
-                ),
-                400,
-            )
-        logger.info("POST /ingest - Embedding model validated: %s", model_name)
 
     # Detect if URL is a PDF file
     is_pdf = is_pdf_url(url)
@@ -544,13 +525,6 @@ def ingest():
             # Delete documents from the main collection
             db[collection_name].delete_many({})
 
-            # Delete associated chunks from index collection if provided
-            if index_database_name and index_collection_name:
-                index_db = mongo_client[index_database_name]
-                chunks_deleted = index_db[index_collection_name].delete_many({})
-                logger.info("POST /ingest - Overwrite mode: cleared %d chunks from %s.%s",
-                           chunks_deleted.deleted_count, index_database_name, index_collection_name)
-
             # Delete document metadata records for this collection
             wg_db[DOCUMENTS_COLLECTION].delete_many({
                 "database_name": database_name,
@@ -588,24 +562,6 @@ def ingest():
         }
     )
 
-    # If index_database and index_collection are provided, create vector embeddings
-    index_result = None
-    if index_database_name and index_collection_name:
-        logger.info("POST /ingest - Index parameters provided, creating vector embeddings")
-        logger.info("POST /ingest - Index target: %s.%s", index_database_name, index_collection_name)
-        index_result = index_document_chunks(
-            document_id=document_id,
-            text=combined_text,
-            database_name=database_name,
-            collection_name=collection_name,
-            index_database_name=index_database_name,
-            index_collection_name=index_collection_name,
-        )
-        if index_result:
-            logger.info("POST /ingest - Indexing complete: %d chunks indexed", index_result["chunks_indexed"])
-        else:
-            logger.warning("POST /ingest - Indexing skipped (no embedding model configured for %s)", index_database_name)
-
     response_data = {
         "document_id": document_id,
         "document_type": document_type,
@@ -613,18 +569,8 @@ def ingest():
         "database_name": database_name,
         "collection_name": collection_name,
         "mode": mode,
+        "message": "Document loaded successfully. Use /index endpoint to create vector embeddings.",
     }
-
-    if index_result:
-        response_data["message"] = "Document loaded and indexed successfully."
-        response_data["index_database_name"] = index_database_name
-        response_data["index_collection_name"] = index_collection_name
-        response_data["chunks_indexed"] = index_result["chunks_indexed"]
-        response_data["embedding_model"] = index_result["embedding_model"]
-    elif index_database_name and index_collection_name:
-        response_data["message"] = "Document loaded successfully. Indexing skipped - no embedding model configured for index database."
-    else:
-        response_data["message"] = "Document loaded successfully. Use /index endpoint to create vector embeddings."
 
     if mode == "overwrite":
         response_data["overwritten"] = overwritten
