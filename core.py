@@ -282,10 +282,10 @@ def index_document_chunks(
     logger.info("Source: %s.%s, Index target: %s.%s",
                 database_name, collection_name, index_database_name, index_collection_name)
 
-    # Look up embedding model using index_collection_name as the database_name
-    model_name = get_embedding_model_name(index_collection_name)
+    # Look up embedding model using the index database name
+    model_name = get_embedding_model_name(index_database_name)
     if not model_name:
-        logger.info("Skipping indexing - no embedding model configured for database: %s", index_collection_name)
+        logger.info("Skipping indexing - no embedding model configured for database: %s", index_database_name)
         return None
 
     logger.info("Chunking document text (length: %d characters)", len(text))
@@ -621,12 +621,12 @@ def index_document():
                 source_database_name, source_collection_name, source_document_id)
     logger.info("POST /index - Index target: %s.%s", index_database_name, index_collection_name)
 
-    # Check if embedding model is configured for index_collection_name
-    model_name = get_embedding_model_name(index_collection_name)
+    # Check if embedding model is configured for index_database_name
+    model_name = get_embedding_model_name(index_database_name)
     if not model_name:
-        logger.error("POST /index - No embedding model configured for database: %s", index_collection_name)
+        logger.error("POST /index - No embedding model configured for database: %s", index_database_name)
         return jsonify({
-            "error": f"No embedding model configured for index_collection_name '{index_collection_name}'. "
+            "error": f"No embedding model configured for index_database_name '{index_database_name}'. "
                      f"Use POST /embedding-models to configure one."
         }), 400
 
