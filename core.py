@@ -116,21 +116,20 @@ def combine_pages(pages):
             logger.info("combine_pages: Page %d direct - url: %s, title: %s", idx, url[:50] if url else "None", title[:50] if title else "None")
 
         # Get content - try markdown first (Firecrawl), then fallbacks
+        # Note: Firecrawl Document fields are: markdown, html, raw_html, summary
         markdown_content = get_page_attr(page, "markdown")
-        raw_content = get_page_attr(page, "raw_content")
-        content_attr = get_page_attr(page, "content")
-        text_attr = get_page_attr(page, "text")
-        html_attr = get_page_attr(page, "html")
+        html_content = get_page_attr(page, "html")
+        raw_html_content = get_page_attr(page, "raw_html")
+        summary_content = get_page_attr(page, "summary")
 
-        logger.info("combine_pages: Page %d content lengths - markdown: %d, raw_content: %d, content: %d, text: %d, html: %d",
+        logger.info("combine_pages: Page %d content lengths - markdown: %d, html: %d, raw_html: %d, summary: %d",
                    idx,
                    len(markdown_content) if markdown_content else 0,
-                   len(raw_content) if raw_content else 0,
-                   len(content_attr) if content_attr else 0,
-                   len(text_attr) if text_attr else 0,
-                   len(html_attr) if html_attr else 0)
+                   len(html_content) if html_content else 0,
+                   len(raw_html_content) if raw_html_content else 0,
+                   len(summary_content) if summary_content else 0)
 
-        content = markdown_content or raw_content or content_attr or text_attr or html_attr
+        content = markdown_content or html_content or raw_html_content or summary_content
         if not content:
             logger.warning("combine_pages: Page %d has no extractable content, skipping", idx)
             continue
@@ -471,7 +470,7 @@ def ingest():
                 max_discovery_depth=depth,
                 limit=breadth,
                 scrape_options=ScrapeOptions(
-                    formats=["markdown", "html"],
+                    formats=["markdown", "html", "rawHtml"],
                     wait_for=5000,  # Wait 5 seconds for JavaScript to render
                     timeout=30000,  # 30 second timeout per page
                 ),
