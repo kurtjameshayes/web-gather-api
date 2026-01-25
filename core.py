@@ -467,13 +467,7 @@ def ingest():
         try:
             crawl_result = firecrawl_client.crawl(
                 url=url,
-                max_discovery_depth=depth,
                 limit=breadth,
-                scrape_options=ScrapeOptions(
-                    formats=["markdown", "html", "rawHtml"],
-                    wait_for=5000,  # Wait 5 seconds for JavaScript to render
-                    timeout=30000,  # 30 second timeout per page
-                ),
             )
         except Exception as exc:
             logger.error("POST /ingest - Crawl failed for URL %s: %s", url, exc)
