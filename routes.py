@@ -35,7 +35,7 @@ def build_openapi_spec():
             "/ingest": {
                 "post": {
                     "summary": "Load a document by crawling a URL or parsing a PDF",
-                    "description": "Supports both web pages (crawled via Firecrawl) and PDF files (downloaded and parsed). PDF files are automatically detected by URL extension or Content-Type header. Optionally provide index_database and index_collection to automatically create vector embeddings during ingestion.",
+                    "description": "Supports both web pages (crawled via Firecrawl) and PDF files (downloaded and parsed). PDF files are automatically detected by URL extension or Content-Type header. Use /index endpoint separately to create vector embeddings.",
                     "requestBody": {
                         "required": True,
                         "content": {
@@ -49,8 +49,6 @@ def build_openapi_spec():
                                         "database": {"type": "string", "description": "Database name for storing raw crawled data"},
                                         "collection": {"type": "string", "description": "Collection name for storing raw crawled data"},
                                         "mode": {"type": "string", "enum": ["append", "overwrite"], "description": "How to handle existing data: 'append' adds to existing data (default), 'overwrite' clears existing data first"},
-                                        "index_database": {"type": "string", "description": "Optional: Database name for storing chunked/vectorized data"},
-                                        "index_collection": {"type": "string", "description": "Optional: Collection name for storing chunked/vectorized data"},
                                     },
                                     "required": ["url", "database", "collection"],
                                 }
@@ -74,17 +72,13 @@ def build_openapi_spec():
                                             "message": {"type": "string"},
                                             "overwritten": {"type": "boolean"},
                                             "previous_document_count": {"type": "integer"},
-                                            "index_database_name": {"type": "string", "description": "Present when indexing was performed"},
-                                            "index_collection_name": {"type": "string", "description": "Present when indexing was performed"},
-                                            "chunks_indexed": {"type": "integer", "description": "Present when indexing was performed"},
-                                            "embedding_model": {"type": "string", "description": "Present when indexing was performed"},
                                         },
                                     }
                                 }
                             },
                         },
                         "400": {
-                            "description": "Bad request - missing required parameters, invalid mode, or no embedding model configured for index_database",
+                            "description": "Bad request - missing required parameters or invalid mode",
                             "content": {
                                 "application/json": {
                                     "schema": {
