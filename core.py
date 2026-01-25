@@ -13,7 +13,6 @@ import requests
 from flask import Blueprint, jsonify, request
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
-from firecrawl.types import ScrapeOptions
 
 from db import (
     WEB_GATHER_DB,
