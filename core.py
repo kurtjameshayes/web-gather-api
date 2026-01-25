@@ -430,6 +430,23 @@ def ingest():
             400,
         )
 
+    # Validate embedding model exists BEFORE starting ingest cycle
+    if index_database_name:
+        logger.info("POST /ingest - Validating embedding model for index_database: %s", index_database_name)
+        model_name = get_embedding_model_name(index_database_name)
+        if not model_name:
+            logger.error("POST /ingest - No embedding model configured for index_database: %s", index_database_name)
+            return (
+                jsonify(
+                    {
+                        "error": f"No embedding model configured for index_database '{index_database_name}'. "
+                                 f"Use POST /embedding-models to configure one before ingesting with indexing."
+                    }
+                ),
+                400,
+            )
+        logger.info("POST /ingest - Embedding model validated: %s", model_name)
+
     # Detect if URL is a PDF file
     is_pdf = is_pdf_url(url)
     if not is_pdf:
