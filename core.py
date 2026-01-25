@@ -390,7 +390,59 @@ def gather():
     normalized = normalize_results(results)
     serialized = [serialize_search_result(r) for r in normalized]
     logger.info("POST /gather - Found %d results for query: %s", len(serialized), query)
-    return jsonify({"query": query, "results": serialized})
+
+    # Build next_step information for the gather->ingest flow
+    next_step = {
+        "action": "Select a URL to crawl and call POST /ingest",
+        "endpoint": "/ingest",
+        "method": "POST",
+        "required_parameters": {
+            "url": {
+                "type": "string",
+                "description": "Select a URL from the results above to crawl",
+            },
+            "database": {
+                "type": "string",
+                "description": "Database name for storing raw crawled data",
+            },
+            "collection": {
+                "type": "string",
+                "description": "Collection name for storing raw crawled data",
+            },
+        },
+        "optional_parameters": {
+            "depth": {
+                "type": "integer",
+                "default": 1,
+                "description": "Crawl depth for web pages",
+            },
+            "breadth": {
+                "type": "integer",
+                "default": 5,
+                "description": "Max pages to crawl for web pages",
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["append", "overwrite"],
+                "default": "append",
+                "description": "How to handle existing data: 'append' adds to existing data, 'overwrite' clears existing data first",
+            },
+            "index_database": {
+                "type": "string",
+                "description": "Database name for storing chunked/vectorized data (enables automatic indexing)",
+            },
+            "index_collection": {
+                "type": "string",
+                "description": "Collection name for storing chunked/vectorized data (enables automatic indexing)",
+            },
+        },
+    }
+
+    return jsonify({
+        "query": query,
+        "results": serialized,
+        "next_step": next_step,
+    })
 
 
 @core_bp.post("/ingest")
