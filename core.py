@@ -13,7 +13,6 @@ import requests
 from flask import Blueprint, jsonify, request
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
-from firecrawl.types import ScrapeOptions
 
 from db import (
     WEB_GATHER_DB,
@@ -54,22 +53,32 @@ def get_model(model_name: str) -> SentenceTransformer:
 
 def normalize_results(raw_result):
     """Normalize Firecrawl results to a list format."""
+    logger.info("normalize_results: input type: %s", type(raw_result))
+
     # Handle Firecrawl CrawlJob response (has .data attribute)
     if hasattr(raw_result, "data") and isinstance(raw_result.data, list):
+        logger.info("normalize_results: returning .data list with %d items", len(raw_result.data))
         return raw_result.data
     # Handle Firecrawl SearchData response (has .web attribute)
     if hasattr(raw_result, "web") and raw_result.web is not None:
+        logger.info("normalize_results: returning .web with %d items", len(raw_result.web))
         return raw_result.web
     # Handle dict responses (legacy compatibility)
     if isinstance(raw_result, dict):
+        logger.info("normalize_results: dict keys: %s", list(raw_result.keys()))
         if "data" in raw_result:
+            logger.info("normalize_results: returning dict['data'] with %d items", len(raw_result["data"]))
             return raw_result["data"]
         if "results" in raw_result:
+            logger.info("normalize_results: returning dict['results']")
             return raw_result["results"]
         if "pages" in raw_result:
+            logger.info("normalize_results: returning dict['pages']")
             return raw_result["pages"]
     if isinstance(raw_result, list):
+        logger.info("normalize_results: returning list with %d items", len(raw_result))
         return raw_result
+    logger.warning("normalize_results: no matching pattern, returning empty list")
     return []
 
 
@@ -84,30 +93,54 @@ def get_page_attr(page, attr, default=""):
 
 def combine_pages(pages):
     """Combine multiple pages into a single text."""
+    logger.info("combine_pages: Processing %d pages", len(pages))
     combined = []
-    for page in pages:
+    for idx, page in enumerate(pages):
+        logger.info("combine_pages: Page %d type: %s", idx, type(page))
+
+        # Debug: log all available attributes
+        if hasattr(page, '__dict__'):
+            logger.info("combine_pages: Page %d attrs: %s", idx, list(vars(page).keys()))
+        elif isinstance(page, dict):
+            logger.info("combine_pages: Page %d dict keys: %s", idx, list(page.keys()))
+
         # Handle Firecrawl Document objects (url/title in metadata)
         if hasattr(page, "metadata") and page.metadata:
             url = getattr(page.metadata, "url", "") or ""
             title = getattr(page.metadata, "title", "") or ""
+            logger.info("combine_pages: Page %d metadata - url: %s, title: %s", idx, url[:50] if url else "None", title[:50] if title else "None")
         else:
             url = get_page_attr(page, "url")
             title = get_page_attr(page, "title")
+            logger.info("combine_pages: Page %d direct - url: %s, title: %s", idx, url[:50] if url else "None", title[:50] if title else "None")
 
         # Get content - try markdown first (Firecrawl), then fallbacks
-        content = (
-            get_page_attr(page, "markdown")
-            or get_page_attr(page, "raw_content")
-            or get_page_attr(page, "content")
-            or get_page_attr(page, "text")
-        )
+        # Note: Firecrawl Document fields are: markdown, html, raw_html, summary
+        markdown_content = get_page_attr(page, "markdown")
+        html_content = get_page_attr(page, "html")
+        raw_html_content = get_page_attr(page, "raw_html")
+        summary_content = get_page_attr(page, "summary")
+
+        logger.info("combine_pages: Page %d content lengths - markdown: %d, html: %d, raw_html: %d, summary: %d",
+                   idx,
+                   len(markdown_content) if markdown_content else 0,
+                   len(html_content) if html_content else 0,
+                   len(raw_html_content) if raw_html_content else 0,
+                   len(summary_content) if summary_content else 0)
+
+        content = markdown_content or html_content or raw_html_content or summary_content
         if not content:
+            logger.warning("combine_pages: Page %d has no extractable content, skipping", idx)
             continue
         header = "Source"
         if title:
             header = f"{title} | Source"
         combined.append(f"{header}: {url}\n{content}".strip())
-    return "\n\n".join(combined).strip()
+        logger.info("combine_pages: Page %d added with content length: %d", idx, len(content))
+
+    result = "\n\n".join(combined).strip()
+    logger.info("combine_pages: Final combined text length: %d", len(result))
+    return result
 
 
 def is_pdf_url(url: str) -> bool:
@@ -433,17 +466,39 @@ def ingest():
         try:
             crawl_result = firecrawl_client.crawl(
                 url=url,
-                max_discovery_depth=depth,
                 limit=breadth,
-                scrape_options=ScrapeOptions(formats=["markdown"]),
             )
         except Exception as exc:
             logger.error("POST /ingest - Crawl failed for URL %s: %s", url, exc)
             return jsonify({"error": f"crawl failed: {exc}"}), 500
 
+        # Debug: log crawl result structure
+        logger.info("POST /ingest - crawl_result type: %s", type(crawl_result))
+        if hasattr(crawl_result, '__dict__'):
+            logger.info("POST /ingest - crawl_result attrs: %s", list(vars(crawl_result).keys()))
+        if hasattr(crawl_result, 'data'):
+            logger.info("POST /ingest - crawl_result.data: type=%s, len=%s",
+                       type(crawl_result.data), len(crawl_result.data) if crawl_result.data else 0)
+        if hasattr(crawl_result, 'status'):
+            logger.info("POST /ingest - crawl_result.status: %s", crawl_result.status)
+
         pages = normalize_results(crawl_result)
         page_count = len(pages)
         logger.info("POST /ingest - Crawl returned %d pages", page_count)
+
+        # Check if crawl returned no pages at all
+        if page_count == 0:
+            logger.error("POST /ingest - Crawl returned 0 pages for URL: %s", url)
+            return jsonify({"error": "crawl returned no pages - website may be blocking crawlers"}), 400
+
+        # Log any warnings from crawled pages
+        for idx, page in enumerate(pages):
+            if hasattr(page, 'warning') and page.warning:
+                logger.warning("POST /ingest - Page %d warning: %s", idx, page.warning)
+            if hasattr(page, 'metadata') and page.metadata:
+                status_code = getattr(page.metadata, 'statusCode', None)
+                if status_code and status_code != 200:
+                    logger.warning("POST /ingest - Page %d statusCode: %s", idx, status_code)
 
         combined_text = combine_pages(pages)
         if not combined_text:
