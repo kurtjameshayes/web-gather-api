@@ -82,7 +82,20 @@ def build_openapi_spec():
                                     }
                                 }
                             },
-                        }
+                        },
+                        "400": {
+                            "description": "Bad request - missing required parameters, invalid mode, or no embedding model configured for index_database",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "error": {"type": "string"},
+                                        },
+                                    }
+                                }
+                            },
+                        },
                     },
                 }
             },
