@@ -945,8 +945,6 @@ def index_document():
         missing_params.append("source_database_name")
     if not source_collection_name:
         missing_params.append("source_collection_name")
-    if not source_document_id:
-        missing_params.append("source_document_id")
     if not index_database_name:
         missing_params.append("index_database_name")
     if not index_collection_name:
@@ -957,6 +955,19 @@ def index_document():
         return jsonify({
             "error": f"Missing required parameters: {', '.join(missing_params)}"
         }), 400
+
+    # If source_document_id not provided, use first document in collection
+    if not source_document_id:
+        source_db = mongo_client[source_database_name]
+        first_doc = source_db[source_collection_name].find_one()
+        if not first_doc:
+            logger.warning("POST /index - No documents found in %s.%s",
+                           source_database_name, source_collection_name)
+            return jsonify({
+                "error": f"No documents found in {source_database_name}.{source_collection_name}"
+            }), 404
+        source_document_id = first_doc["_id"]
+        logger.info("POST /index - No source_document_id provided, using first document: %s", source_document_id)
 
     logger.info("POST /index - Source: %s.%s, Document ID: %s",
                 source_database_name, source_collection_name, source_document_id)
