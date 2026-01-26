@@ -225,8 +225,8 @@ def combine_pdf_pages(pages: list[dict], source_url: str) -> str:
     return "\n\n".join(combined).strip()
 
 
-def chunk_text(text, chunk_size=1200, overlap=200):
-    """Split text into overlapping chunks."""
+def chunk_text_by_character(text, chunk_size=1200, overlap=200):
+    """Split text into overlapping chunks by character count."""
     if not text:
         return []
     chunks = []
@@ -241,6 +241,138 @@ def chunk_text(text, chunk_size=1200, overlap=200):
             break
         start = max(0, end - overlap)
     return chunks
+
+
+def chunk_text_by_sentence(text, chunk_size=1200, overlap=200):
+    """Split text into overlapping chunks by sentence boundaries."""
+    import re
+    if not text:
+        return []
+    
+    # Split text into sentences (handles common sentence endings)
+    sentence_pattern = r'(?<=[.!?])\s+'
+    sentences = re.split(sentence_pattern, text)
+    sentences = [s.strip() for s in sentences if s.strip()]
+    
+    if not sentences:
+        return []
+    
+    chunks = []
+    current_chunk = []
+    current_length = 0
+    
+    for sentence in sentences:
+        sentence_len = len(sentence)
+        
+        # If adding this sentence exceeds chunk_size and we have content, save current chunk
+        if current_length + sentence_len > chunk_size and current_chunk:
+            chunk_text_content = ' '.join(current_chunk)
+            chunks.append(chunk_text_content)
+            
+            # Calculate overlap: keep sentences from the end that fit within overlap
+            overlap_sentences = []
+            overlap_length = 0
+            for s in reversed(current_chunk):
+                if overlap_length + len(s) <= overlap:
+                    overlap_sentences.insert(0, s)
+                    overlap_length += len(s) + 1  # +1 for space
+                else:
+                    break
+            
+            current_chunk = overlap_sentences
+            current_length = sum(len(s) for s in current_chunk) + len(current_chunk) - 1 if current_chunk else 0
+        
+        current_chunk.append(sentence)
+        current_length += sentence_len + 1  # +1 for space
+    
+    # Add the last chunk
+    if current_chunk:
+        chunk_text_content = ' '.join(current_chunk)
+        chunks.append(chunk_text_content)
+    
+    return chunks
+
+
+def chunk_text_by_paragraph(text, chunk_size=1200, overlap=200):
+    """Split text into overlapping chunks by paragraph boundaries."""
+    if not text:
+        return []
+    
+    # Split text into paragraphs (double newlines or more)
+    paragraphs = text.split('\n\n')
+    paragraphs = [p.strip() for p in paragraphs if p.strip()]
+    
+    if not paragraphs:
+        return []
+    
+    chunks = []
+    current_chunk = []
+    current_length = 0
+    
+    for paragraph in paragraphs:
+        para_len = len(paragraph)
+        
+        # If adding this paragraph exceeds chunk_size and we have content, save current chunk
+        if current_length + para_len > chunk_size and current_chunk:
+            chunk_text_content = '\n\n'.join(current_chunk)
+            chunks.append(chunk_text_content)
+            
+            # Calculate overlap: keep paragraphs from the end that fit within overlap
+            overlap_paragraphs = []
+            overlap_length = 0
+            for p in reversed(current_chunk):
+                if overlap_length + len(p) <= overlap:
+                    overlap_paragraphs.insert(0, p)
+                    overlap_length += len(p) + 2  # +2 for \n\n
+                else:
+                    break
+            
+            current_chunk = overlap_paragraphs
+            current_length = sum(len(p) for p in current_chunk) + (len(current_chunk) - 1) * 2 if current_chunk else 0
+        
+        current_chunk.append(paragraph)
+        current_length += para_len + 2  # +2 for \n\n
+    
+    # Add the last chunk
+    if current_chunk:
+        chunk_text_content = '\n\n'.join(current_chunk)
+        chunks.append(chunk_text_content)
+    
+    return chunks
+
+
+# Supported splitting strategies
+SPLITTING_STRATEGIES = {
+    "character": chunk_text_by_character,
+    "sentence": chunk_text_by_sentence,
+    "paragraph": chunk_text_by_paragraph,
+}
+
+# Default values for indexing parameters
+DEFAULT_CHUNK_SIZE = 1200
+DEFAULT_CHUNK_OVERLAP = 200
+DEFAULT_SPLITTING_STRATEGY = "character"
+
+
+def chunk_text(text, chunk_size=DEFAULT_CHUNK_SIZE, overlap=DEFAULT_CHUNK_OVERLAP, strategy=DEFAULT_SPLITTING_STRATEGY):
+    """
+    Split text into overlapping chunks using the specified strategy.
+    
+    Args:
+        text: The text to split
+        chunk_size: Maximum size of each chunk (default: 1200)
+        overlap: Number of characters/content to overlap between chunks (default: 200)
+        strategy: Splitting strategy - 'character', 'sentence', or 'paragraph' (default: 'character')
+    
+    Returns:
+        List of text chunks
+    """
+    if strategy not in SPLITTING_STRATEGIES:
+        logger.warning("Unknown splitting strategy '%s', falling back to 'character'", strategy)
+        strategy = "character"
+    
+    chunk_func = SPLITTING_STRATEGIES[strategy]
+    return chunk_func(text, chunk_size, overlap)
 
 
 def cosine_similarity(query_embedding, chunk_embeddings):
@@ -258,6 +390,9 @@ def index_document_chunks(
     collection_name: str,
     index_database_name: str = None,
     index_collection_name: str = None,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
+    splitting_strategy: str = DEFAULT_SPLITTING_STRATEGY,
 ):
     """
     Create vector-indexed chunks for a document.
@@ -269,6 +404,9 @@ def index_document_chunks(
         collection_name: The source collection name (used for metadata updates)
         index_database_name: The database where chunks will be stored (defaults to database_name)
         index_collection_name: The collection name for chunks (defaults to collection_name)
+        chunk_size: Maximum size of each chunk (default: 1200)
+        chunk_overlap: Number of characters to overlap between chunks (default: 200)
+        splitting_strategy: Strategy for splitting text - 'character', 'sentence', or 'paragraph' (default: 'character')
 
     Returns dict with indexing results or None if embedding model not configured.
     """
@@ -281,6 +419,8 @@ def index_document_chunks(
     logger.info("Starting indexing for document: %s", document_id)
     logger.info("Source: %s.%s, Index target: %s.%s",
                 database_name, collection_name, index_database_name, index_collection_name)
+    logger.info("Indexing parameters: chunk_size=%d, chunk_overlap=%d, splitting_strategy=%s",
+                chunk_size, chunk_overlap, splitting_strategy)
 
     # Look up embedding model using the index database name
     model_name = get_embedding_model_name(index_database_name)
@@ -289,7 +429,7 @@ def index_document_chunks(
         return None
 
     logger.info("Chunking document text (length: %d characters)", len(text))
-    chunks = chunk_text(text)
+    chunks = chunk_text(text, chunk_size=chunk_size, overlap=chunk_overlap, strategy=splitting_strategy)
     if not chunks:
         logger.warning("Document %s has no content to chunk", document_id)
         return None
@@ -338,6 +478,9 @@ def index_document_chunks(
                 "chunk_collection": chunk_collection,
                 "index_database_name": index_database_name,
                 "index_collection_name": index_collection_name,
+                "chunk_size": chunk_size,
+                "chunk_overlap": chunk_overlap,
+                "splitting_strategy": splitting_strategy,
             }
         },
     )
@@ -349,6 +492,9 @@ def index_document_chunks(
         "chunks_indexed": len(chunk_docs),
         "embedding_model": model_name,
         "chunk_collection": chunk_collection,
+        "chunk_size": chunk_size,
+        "chunk_overlap": chunk_overlap,
+        "splitting_strategy": splitting_strategy,
     }
 
 
@@ -645,6 +791,40 @@ def index_document():
     index_database_name = payload.get("index_database_name")
     index_collection_name = payload.get("index_collection_name")
 
+    # Get optional indexing parameters with defaults
+    chunk_size = payload.get("chunk_size", DEFAULT_CHUNK_SIZE)
+    chunk_overlap = payload.get("chunk_overlap", DEFAULT_CHUNK_OVERLAP)
+    splitting_strategy = payload.get("splitting_strategy", DEFAULT_SPLITTING_STRATEGY)
+
+    # Validate chunk_size and chunk_overlap are positive integers
+    try:
+        chunk_size = int(chunk_size)
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+    except (TypeError, ValueError) as e:
+        logger.warning("POST /index - Invalid chunk_size: %s", chunk_size)
+        return jsonify({"error": f"chunk_size must be a positive integer: {e}"}), 400
+
+    try:
+        chunk_overlap = int(chunk_overlap)
+        if chunk_overlap < 0:
+            raise ValueError("chunk_overlap must be non-negative")
+    except (TypeError, ValueError) as e:
+        logger.warning("POST /index - Invalid chunk_overlap: %s", chunk_overlap)
+        return jsonify({"error": f"chunk_overlap must be a non-negative integer: {e}"}), 400
+
+    # Validate chunk_overlap is less than chunk_size
+    if chunk_overlap >= chunk_size:
+        logger.warning("POST /index - chunk_overlap (%d) must be less than chunk_size (%d)", chunk_overlap, chunk_size)
+        return jsonify({"error": "chunk_overlap must be less than chunk_size"}), 400
+
+    # Validate splitting_strategy
+    if splitting_strategy not in SPLITTING_STRATEGIES:
+        logger.warning("POST /index - Invalid splitting_strategy: %s", splitting_strategy)
+        return jsonify({
+            "error": f"Invalid splitting_strategy '{splitting_strategy}'. Must be one of: {', '.join(SPLITTING_STRATEGIES.keys())}"
+        }), 400
+
     # Validate required parameters
     missing_params = []
     if not source_database_name:
@@ -667,6 +847,8 @@ def index_document():
     logger.info("POST /index - Source: %s.%s, Document ID: %s",
                 source_database_name, source_collection_name, source_document_id)
     logger.info("POST /index - Index target: %s.%s", index_database_name, index_collection_name)
+    logger.info("POST /index - Indexing parameters: chunk_size=%d, chunk_overlap=%d, splitting_strategy=%s",
+                chunk_size, chunk_overlap, splitting_strategy)
 
     # Check if embedding model is configured for index_database_name
     model_name = get_embedding_model_name(index_database_name)
@@ -700,6 +882,9 @@ def index_document():
         collection_name=source_collection_name,
         index_database_name=index_database_name,
         index_collection_name=index_collection_name,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        splitting_strategy=splitting_strategy,
     )
 
     if not index_result:
@@ -717,6 +902,9 @@ def index_document():
             "chunks_indexed": index_result["chunks_indexed"],
             "embedding_model": index_result["embedding_model"],
             "chunk_collection": index_result["chunk_collection"],
+            "chunk_size": index_result["chunk_size"],
+            "chunk_overlap": index_result["chunk_overlap"],
+            "splitting_strategy": index_result["splitting_strategy"],
         }
     )
 

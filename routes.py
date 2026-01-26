@@ -259,7 +259,7 @@ def build_openapi_spec():
             "/index": {
                 "post": {
                     "summary": "Index a document by id",
-                    "description": "Index a document from a source collection and write the indexed chunks to an index collection. The embedding model is determined by the index_collection_name.",
+                    "description": "Index a document from a source collection and write the indexed chunks to an index collection. The embedding model is determined by the index_database_name. Supports configurable chunk size, overlap, and splitting strategy.",
                     "requestBody": {
                         "required": True,
                         "content": {
@@ -286,6 +286,24 @@ def build_openapi_spec():
                                         "index_collection_name": {
                                             "type": "string",
                                             "description": "The indexed data will be written to this collection",
+                                        },
+                                        "chunk_size": {
+                                            "type": "integer",
+                                            "description": "Maximum size of each text chunk in characters (default: 1200)",
+                                            "default": 1200,
+                                            "minimum": 1,
+                                        },
+                                        "chunk_overlap": {
+                                            "type": "integer",
+                                            "description": "Number of characters to overlap between consecutive chunks (default: 200). Must be less than chunk_size.",
+                                            "default": 200,
+                                            "minimum": 0,
+                                        },
+                                        "splitting_strategy": {
+                                            "type": "string",
+                                            "description": "Strategy for splitting text into chunks (default: 'character')",
+                                            "enum": ["character", "sentence", "paragraph"],
+                                            "default": "character",
                                         },
                                     },
                                     "required": [
@@ -315,12 +333,24 @@ def build_openapi_spec():
                                             "chunks_indexed": {"type": "integer"},
                                             "embedding_model": {"type": "string"},
                                             "chunk_collection": {"type": "string"},
+                                            "chunk_size": {
+                                                "type": "integer",
+                                                "description": "The chunk size used for indexing",
+                                            },
+                                            "chunk_overlap": {
+                                                "type": "integer",
+                                                "description": "The chunk overlap used for indexing",
+                                            },
+                                            "splitting_strategy": {
+                                                "type": "string",
+                                                "description": "The splitting strategy used for indexing",
+                                            },
                                         },
                                     }
                                 }
                             },
                         },
-                        "400": {"description": "Missing required parameters or embedding model not configured"},
+                        "400": {"description": "Missing required parameters, invalid parameters, or embedding model not configured"},
                         "404": {"description": "Document not found"},
                     },
                 }
