@@ -301,8 +301,8 @@ def build_openapi_spec():
                                         },
                                         "splitting_strategy": {
                                             "type": "string",
-                                            "description": "Strategy for splitting text into chunks (default: 'character')",
-                                            "enum": ["character", "sentence", "paragraph"],
+                                            "description": "Strategy for splitting text into chunks: 'character' (fixed-size), 'sentence' (sentence boundaries), 'paragraph' (paragraph boundaries), or 'semantic' (embedding-based semantic boundaries). Default: 'character'",
+                                            "enum": ["character", "sentence", "paragraph", "semantic"],
                                             "default": "character",
                                         },
                                     },

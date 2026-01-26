@@ -341,11 +341,118 @@ def chunk_text_by_paragraph(text, chunk_size=1200, overlap=200):
     return chunks
 
 
-# Supported splitting strategies
+def chunk_text_by_semantic(text, chunk_size=1200, overlap=200, model=None):
+    """
+    Split text into chunks based on semantic similarity between sentences.
+    
+    This strategy uses embeddings to find natural semantic boundaries in the text,
+    grouping semantically related sentences together while respecting chunk size limits.
+    
+    Args:
+        text: The text to split
+        chunk_size: Maximum size of each chunk (default: 1200)
+        overlap: Number of sentences to overlap between chunks (default: 200, interpreted as ~1-2 sentences)
+        model: SentenceTransformer model for generating embeddings (required)
+    
+    Returns:
+        List of text chunks
+    """
+    import re
+    if not text:
+        return []
+    
+    if model is None:
+        logger.warning("Semantic splitting requires a model, falling back to sentence splitting")
+        return chunk_text_by_sentence(text, chunk_size, overlap)
+    
+    # Split text into sentences
+    sentence_pattern = r'(?<=[.!?])\s+'
+    sentences = re.split(sentence_pattern, text)
+    sentences = [s.strip() for s in sentences if s.strip()]
+    
+    if not sentences:
+        return []
+    
+    if len(sentences) == 1:
+        return sentences
+    
+    # Generate embeddings for all sentences
+    logger.info("Generating embeddings for %d sentences for semantic chunking", len(sentences))
+    embeddings = model.encode(sentences, convert_to_numpy=True, normalize_embeddings=True)
+    
+    # Calculate similarity between adjacent sentences
+    similarities = []
+    for i in range(len(embeddings) - 1):
+        sim = float(np.dot(embeddings[i], embeddings[i + 1]))
+        similarities.append(sim)
+    
+    # Find semantic breakpoints where similarity drops significantly
+    # Use adaptive threshold based on mean and standard deviation
+    if similarities:
+        mean_sim = np.mean(similarities)
+        std_sim = np.std(similarities)
+        # Breakpoint threshold: below mean - 0.5 * std indicates a semantic boundary
+        threshold = mean_sim - 0.5 * std_sim
+        logger.info("Semantic chunking: mean_sim=%.3f, std_sim=%.3f, threshold=%.3f", 
+                   mean_sim, std_sim, threshold)
+    else:
+        threshold = 0.5
+    
+    # Group sentences into chunks based on semantic boundaries and size constraints
+    chunks = []
+    current_chunk = []
+    current_length = 0
+    
+    for i, sentence in enumerate(sentences):
+        sentence_len = len(sentence)
+        
+        # Check if we should start a new chunk
+        should_break = False
+        
+        # Size constraint: if adding this sentence exceeds chunk_size
+        if current_length + sentence_len > chunk_size and current_chunk:
+            should_break = True
+        # Semantic boundary: if similarity with previous sentence is below threshold
+        elif i > 0 and i - 1 < len(similarities) and similarities[i - 1] < threshold:
+            # Only break if current chunk has reasonable size (at least 20% of chunk_size)
+            if current_length > chunk_size * 0.2:
+                should_break = True
+        
+        if should_break:
+            chunk_text_content = ' '.join(current_chunk)
+            chunks.append(chunk_text_content)
+            
+            # Calculate overlap: keep last few sentences that fit within overlap chars
+            overlap_sentences = []
+            overlap_length = 0
+            for s in reversed(current_chunk):
+                if overlap_length + len(s) <= overlap:
+                    overlap_sentences.insert(0, s)
+                    overlap_length += len(s) + 1
+                else:
+                    break
+            
+            current_chunk = overlap_sentences
+            current_length = sum(len(s) for s in current_chunk) + len(current_chunk) - 1 if current_chunk else 0
+        
+        current_chunk.append(sentence)
+        current_length += sentence_len + 1
+    
+    # Add the last chunk
+    if current_chunk:
+        chunk_text_content = ' '.join(current_chunk)
+        chunks.append(chunk_text_content)
+    
+    logger.info("Semantic chunking created %d chunks from %d sentences", len(chunks), len(sentences))
+    return chunks
+
+
+# Supported splitting strategies (semantic handled separately due to model requirement)
 SPLITTING_STRATEGIES = {
     "character": chunk_text_by_character,
     "sentence": chunk_text_by_sentence,
     "paragraph": chunk_text_by_paragraph,
+    "semantic": chunk_text_by_semantic,
 }
 
 # Default values for indexing parameters
@@ -354,7 +461,7 @@ DEFAULT_CHUNK_OVERLAP = 200
 DEFAULT_SPLITTING_STRATEGY = "character"
 
 
-def chunk_text(text, chunk_size=DEFAULT_CHUNK_SIZE, overlap=DEFAULT_CHUNK_OVERLAP, strategy=DEFAULT_SPLITTING_STRATEGY):
+def chunk_text(text, chunk_size=DEFAULT_CHUNK_SIZE, overlap=DEFAULT_CHUNK_OVERLAP, strategy=DEFAULT_SPLITTING_STRATEGY, model=None):
     """
     Split text into overlapping chunks using the specified strategy.
     
@@ -362,7 +469,8 @@ def chunk_text(text, chunk_size=DEFAULT_CHUNK_SIZE, overlap=DEFAULT_CHUNK_OVERLA
         text: The text to split
         chunk_size: Maximum size of each chunk (default: 1200)
         overlap: Number of characters/content to overlap between chunks (default: 200)
-        strategy: Splitting strategy - 'character', 'sentence', or 'paragraph' (default: 'character')
+        strategy: Splitting strategy - 'character', 'sentence', 'paragraph', or 'semantic' (default: 'character')
+        model: SentenceTransformer model (required for 'semantic' strategy)
     
     Returns:
         List of text chunks
@@ -372,6 +480,11 @@ def chunk_text(text, chunk_size=DEFAULT_CHUNK_SIZE, overlap=DEFAULT_CHUNK_OVERLA
         strategy = "character"
     
     chunk_func = SPLITTING_STRATEGIES[strategy]
+    
+    # Semantic strategy requires the model parameter
+    if strategy == "semantic":
+        return chunk_func(text, chunk_size, overlap, model=model)
+    
     return chunk_func(text, chunk_size, overlap)
 
 
@@ -406,7 +519,7 @@ def index_document_chunks(
         index_collection_name: The collection name for chunks (defaults to collection_name)
         chunk_size: Maximum size of each chunk (default: 1200)
         chunk_overlap: Number of characters to overlap between chunks (default: 200)
-        splitting_strategy: Strategy for splitting text - 'character', 'sentence', or 'paragraph' (default: 'character')
+        splitting_strategy: Strategy for splitting text - 'character', 'sentence', 'paragraph', or 'semantic' (default: 'character')
 
     Returns dict with indexing results or None if embedding model not configured.
     """
@@ -428,16 +541,17 @@ def index_document_chunks(
         logger.info("Skipping indexing - no embedding model configured for database: %s", index_database_name)
         return None
 
+    # Load the embedding model (needed for both semantic chunking and final embeddings)
+    logger.info("Loading embedding model: %s", model_name)
+    model = get_model(model_name)
+
     logger.info("Chunking document text (length: %d characters)", len(text))
-    chunks = chunk_text(text, chunk_size=chunk_size, overlap=chunk_overlap, strategy=splitting_strategy)
+    chunks = chunk_text(text, chunk_size=chunk_size, overlap=chunk_overlap, strategy=splitting_strategy, model=model)
     if not chunks:
         logger.warning("Document %s has no content to chunk", document_id)
         return None
 
     logger.info("Created %d chunks from document %s", len(chunks), document_id)
-
-    logger.info("Loading embedding model: %s", model_name)
-    model = get_model(model_name)
 
     logger.info("Generating embeddings for %d chunks", len(chunks))
     embeddings = model.encode(chunks, convert_to_numpy=True, normalize_embeddings=True)
