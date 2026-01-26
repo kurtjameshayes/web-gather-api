@@ -277,7 +277,7 @@ def build_openapi_spec():
                                         },
                                         "source_document_id": {
                                             "type": "string",
-                                            "description": "The id of the document within the source collection",
+                                            "description": "The id of the document within the source collection. If not provided, defaults to the first document in the collection.",
                                         },
                                         "index_database_name": {
                                             "type": "string",
@@ -309,7 +309,6 @@ def build_openapi_spec():
                                     "required": [
                                         "source_database_name",
                                         "source_collection_name",
-                                        "source_document_id",
                                         "index_database_name",
                                         "index_collection_name",
                                     ],
