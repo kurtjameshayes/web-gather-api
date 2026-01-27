@@ -29,6 +29,7 @@ python app.py
 - `POST /ingest`
 - `GET /documents`
 - `GET /collections`
+- `GET /count-documents`
 - `POST /index`
 - `POST /search`
 - `GET /embedding-models`

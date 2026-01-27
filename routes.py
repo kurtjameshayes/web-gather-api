@@ -256,6 +256,61 @@ def build_openapi_spec():
                     },
                 }
             },
+            "/count-documents": {
+                "get": {
+                    "summary": "Count documents in a MongoDB collection",
+                    "description": "Returns the number of documents in the specified database and collection",
+                    "parameters": [
+                        {
+                            "name": "database_name",
+                            "in": "query",
+                            "required": True,
+                            "schema": {"type": "string"},
+                            "description": "The name of the database",
+                        },
+                        {
+                            "name": "collection_name",
+                            "in": "query",
+                            "required": True,
+                            "schema": {"type": "string"},
+                            "description": "The name of the collection",
+                        },
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Document count",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "database_name": {"type": "string"},
+                                            "collection_name": {"type": "string"},
+                                            "count": {
+                                                "type": "integer",
+                                                "description": "The number of documents in the collection",
+                                            },
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                        "400": {
+                            "description": "Bad request - missing required parameters",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "error": {"type": "string"},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                    },
+                }
+            },
             "/index": {
                 "post": {
                     "summary": "Index a document by id",
