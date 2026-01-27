@@ -1,6 +1,6 @@
 """Database-related functions and endpoints.
 
-Includes functionality for endpoints: all-collections, all-databases, collections, databases, and documents.
+Includes functionality for endpoints: all-collections, all-databases, collections, count-documents, databases, and documents.
 """
 import logging
 from datetime import datetime, timezone
@@ -116,3 +116,33 @@ def list_all_collections():
     collections = mongo_client[database_name].list_collection_names()
     logger.info("GET /all-collections - Found %d collections", len(collections))
     return jsonify({"database_name": database_name, "collections": collections})
+
+
+@db_bp.get("/count-documents")
+def count_documents():
+    """Count documents in a MongoDB collection.
+
+    Returns the number of documents in the specified database and collection.
+    """
+    logger.info("GET /count-documents - Counting documents")
+    database_name = request.args.get("database_name")
+    collection_name = request.args.get("collection_name")
+
+    if not database_name or not collection_name:
+        logger.warning("GET /count-documents - Missing required parameters")
+        return jsonify({"error": "database_name and collection_name are required"}), 400
+
+    logger.info(
+        "GET /count-documents - Counting documents in %s.%s",
+        database_name,
+        collection_name,
+    )
+    db = mongo_client[database_name]
+    count = db[collection_name].count_documents({})
+    logger.info("GET /count-documents - Found %d documents", count)
+
+    return jsonify({
+        "database_name": database_name,
+        "collection_name": collection_name,
+        "count": count,
+    })

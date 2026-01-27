@@ -7,3 +7,4 @@ numpy
 anthropic
 pypdf
 requests
+pytest
