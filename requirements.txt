@@ -1,7 +1,10 @@
 flask
 python-dotenv
 pymongo
-tavily-python
+firecrawl-py
 sentence-transformers
 numpy
 anthropic
+pypdf
+requests
+pytest
