@@ -54,9 +54,9 @@ class TestParseLlm:
         ]
         mock_clients["mongo"].__getitem__.return_value.__getitem__.return_value = mock_collection
 
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text='{"parsed_doc": [{"document_id": "doc_001", "parsed_header_text": "Summary", "parsed_text": "Combined content"}]}')]
-        mock_clients["anthropic"].messages.create.return_value = mock_response
+        mock_stream = MagicMock()
+        mock_stream.get_final_text.return_value = '{"parsed_doc": [{"document_id": "doc_001", "parsed_header_text": "Summary", "parsed_text": "Combined content"}]}'
+        mock_clients["anthropic"].messages.stream.return_value.__enter__.return_value = mock_stream
 
         # Act
         response = client.post(
@@ -78,7 +78,7 @@ class TestParseLlm:
         mock_clients["mongo"].__getitem__.assert_called_with("test_db")
 
         # Verify Anthropic was called with concatenated text
-        call_args = mock_clients["anthropic"].messages.create.call_args
+        call_args = mock_clients["anthropic"].messages.stream.call_args
         user_message = call_args[1]["messages"][0]["content"]
         assert "First document text." in user_message
         assert "Second document text." in user_message
@@ -195,9 +195,9 @@ class TestParseLlm:
         ]
         mock_clients["mongo"].__getitem__.return_value.__getitem__.return_value = mock_collection
 
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text='{"parsed_doc": []}')]
-        mock_clients["anthropic"].messages.create.return_value = mock_response
+        mock_stream = MagicMock()
+        mock_stream.get_final_text.return_value = '{"parsed_doc": []}'
+        mock_clients["anthropic"].messages.stream.return_value.__enter__.return_value = mock_stream
 
         # Act
         response = client.post(
@@ -213,7 +213,7 @@ class TestParseLlm:
         assert response.status_code == 200
 
         # Verify all texts are in the LLM input
-        call_args = mock_clients["anthropic"].messages.create.call_args
+        call_args = mock_clients["anthropic"].messages.stream.call_args
         user_message = call_args[1]["messages"][0]["content"]
         assert "Alpha" in user_message
         assert "Beta" in user_message
@@ -226,9 +226,9 @@ class TestParseLlm:
         mock_collection.find.return_value = [{"_id": "1", "text": "Test content"}]
         mock_clients["mongo"].__getitem__.return_value.__getitem__.return_value = mock_collection
 
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text="Not valid JSON")]
-        mock_clients["anthropic"].messages.create.return_value = mock_response
+        mock_stream = MagicMock()
+        mock_stream.get_final_text.return_value = "Not valid JSON"
+        mock_clients["anthropic"].messages.stream.return_value.__enter__.return_value = mock_stream
 
         # Act
         response = client.post(
@@ -252,7 +252,7 @@ class TestParseLlm:
         mock_collection.find.return_value = [{"_id": "1", "text": "Test content"}]
         mock_clients["mongo"].__getitem__.return_value.__getitem__.return_value = mock_collection
 
-        mock_clients["anthropic"].messages.create.side_effect = Exception("API Error")
+        mock_clients["anthropic"].messages.stream.side_effect = Exception("API Error")
 
         # Act
         response = client.post(
@@ -281,9 +281,9 @@ class TestParseLlm:
         ]
         mock_clients["mongo"].__getitem__.return_value.__getitem__.return_value = mock_collection
 
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text='{"parsed_doc": []}')]
-        mock_clients["anthropic"].messages.create.return_value = mock_response
+        mock_stream = MagicMock()
+        mock_stream.get_final_text.return_value = '{"parsed_doc": []}'
+        mock_clients["anthropic"].messages.stream.return_value.__enter__.return_value = mock_stream
 
         # Act
         response = client.post(
@@ -299,7 +299,7 @@ class TestParseLlm:
         assert response.status_code == 200
 
         # Verify only valid texts are in the LLM input
-        call_args = mock_clients["anthropic"].messages.create.call_args
+        call_args = mock_clients["anthropic"].messages.stream.call_args
         user_message = call_args[1]["messages"][0]["content"]
         assert "Valid text" in user_message
         assert "More valid text" in user_message
