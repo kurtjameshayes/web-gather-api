@@ -1160,67 +1160,128 @@ def parse_llm():
     logger.info("POST /parse_llm - Combined %d documents into %d characters",
                 len(text_parts), len(combined_text))
 
-    system_prompt = """You are a document parsing assistant. Your task is to parse documents according to specific instructions and return structured JSON output.
+    # Split into lines and create numbered version for LLM
+    lines = combined_text.split("\n")
+    numbered_lines = [f"{i + 1}: {line}" for i, line in enumerate(lines)]
+    numbered_text = "\n".join(numbered_lines)
 
-You must return ONLY valid JSON with the following structure:
-- A top-level object with a "parsed_doc" key
-- The "parsed_doc" value should be an array of objects
-- Each object in the array represents one parsed section and must contain:
-  - "document_id": A string identifier for the document
-  - "parsed_header_text": A string containing the header, title, or identifying text for this section
-  - "parsed_text": A string containing the main content/body text for this section
+    system_prompt = """You are a document parsing assistant. Your task is to identify section boundaries in documents according to specific instructions.
 
-Important guidelines:
-- Preserve the original text accurately - do not paraphrase or summarize unless explicitly instructed
-- Each section should be complete and meaningful on its own
-- Escape special characters properly in the JSON (quotes, newlines, etc.)
-- The parsed_header_text should be concise but descriptive enough to identify what the section contains
-- The parsed_text should contain the substantive content of that section
-- Return ONLY the JSON object, no additional text or markdown formatting"""
+You will be given a document with line numbers. Your job is to identify where each section begins by providing:
+- A document_id for each section
+- A parsed_header_text that describes/titles the section
+- The start_line number (1-indexed) where that section begins
 
-    user_message = f"""Parse the following document according to the parsing instructions provided.
+Each section is assumed to run from its start_line to the line before the next section's start_line (or end of document for the last section).
+
+Use the identify_sections tool to report your findings."""
+
+    user_message = f"""Analyze the following document and identify the section boundaries according to the parsing instructions.
 
 <document>
-{combined_text}
+{numbered_text}
 </document>
 
 <parse_prompt>
 {parse_prompt}
 </parse_prompt>
 
-Return ONLY the JSON output with the parsed document sections."""
+Use the identify_sections tool to report the sections you identified."""
+
+    # Define the tool for section identification
+    tools = [
+        {
+            "name": "identify_sections",
+            "description": "Report the identified sections in the document with their starting line numbers",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "sections": {
+                        "type": "array",
+                        "description": "Array of identified sections",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "document_id": {
+                                    "type": "string",
+                                    "description": "A unique identifier for this section"
+                                },
+                                "parsed_header_text": {
+                                    "type": "string",
+                                    "description": "The header, title, or identifying text for this section"
+                                },
+                                "start_line": {
+                                    "type": "integer",
+                                    "description": "The 1-indexed line number where this section begins"
+                                }
+                            },
+                            "required": ["document_id", "parsed_header_text", "start_line"]
+                        }
+                    }
+                },
+                "required": ["sections"]
+            }
+        }
+    ]
 
     try:
-        logger.info("POST /parse_llm - Calling Anthropic API with streaming (model: claude-3-5-haiku-20241022)")
+        logger.info("POST /parse_llm - Calling Anthropic API with tool use (model: claude-3-5-haiku-20241022)")
         with anthropic_client.messages.stream(
             model="claude-3-5-haiku-20241022",
-            max_tokens=8192,
+            max_tokens=4096,
             messages=[
                 {"role": "user", "content": user_message}
             ],
             system=system_prompt,
+            tools=tools,
+            tool_choice={"type": "tool", "name": "identify_sections"}
         ) as stream:
-            response_text = stream.get_final_text().strip()
-        logger.info("POST /parse_llm - Received response (length: %d)", len(response_text))
+            response = stream.get_final_message()
 
-        # Try to extract JSON if wrapped in code blocks
-        if response_text.startswith("```"):
-            lines = response_text.split("\n")
-            # Remove first and last lines (code block markers)
-            if lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-            response_text = "\n".join(lines)
+        # Extract tool use from response
+        tool_use_block = None
+        for block in response.content:
+            if block.type == "tool_use" and block.name == "identify_sections":
+                tool_use_block = block
+                break
 
-        parsed_result = json.loads(response_text)
-        section_count = len(parsed_result.get("parsed_doc", []))
-        logger.info("POST /parse_llm - Successfully parsed document into %d sections", section_count)
-        return jsonify(parsed_result)
+        if not tool_use_block:
+            logger.error("POST /parse_llm - LLM did not use the identify_sections tool")
+            return jsonify({"error": "LLM did not return section identification"}), 500
 
-    except json.JSONDecodeError as e:
-        logger.error("POST /parse_llm - Failed to parse LLM response as JSON: %s", e)
-        return jsonify({"error": f"Failed to parse LLM response as JSON: {str(e)}"}), 500
+        sections = tool_use_block.input.get("sections", [])
+        logger.info("POST /parse_llm - LLM identified %d sections", len(sections))
+
+        # Sort sections by start_line
+        sections.sort(key=lambda s: s.get("start_line", 0))
+
+        # Build parsed_doc by extracting text between line numbers
+        parsed_doc = []
+        total_lines = len(lines)
+
+        for i, section in enumerate(sections):
+            start_line = section.get("start_line", 1)
+            # Determine end line (next section's start - 1, or end of document)
+            if i + 1 < len(sections):
+                end_line = sections[i + 1].get("start_line", total_lines + 1) - 1
+            else:
+                end_line = total_lines
+
+            # Convert to 0-indexed and extract lines
+            start_idx = max(0, start_line - 1)
+            end_idx = min(total_lines, end_line)
+            section_lines = lines[start_idx:end_idx]
+            parsed_text = "\n".join(section_lines).strip()
+
+            parsed_doc.append({
+                "document_id": section.get("document_id", f"section_{i + 1}"),
+                "parsed_header_text": section.get("parsed_header_text", ""),
+                "parsed_text": parsed_text
+            })
+
+        logger.info("POST /parse_llm - Successfully parsed document into %d sections", len(parsed_doc))
+        return jsonify({"parsed_doc": parsed_doc})
+
     except Exception as e:
         logger.error("POST /parse_llm - LLM parsing failed: %s", e)
         return jsonify({"error": f"LLM parsing failed: {str(e)}"}), 500

@@ -40,6 +40,18 @@ def mock_clients():
     }
 
 
+def create_tool_use_response(sections):
+    """Helper to create a mock tool use response."""
+    tool_use_block = MagicMock()
+    tool_use_block.type = "tool_use"
+    tool_use_block.name = "identify_sections"
+    tool_use_block.input = {"sections": sections}
+
+    mock_response = MagicMock()
+    mock_response.content = [tool_use_block]
+    return mock_response
+
+
 class TestParseLlm:
     """Tests for the /parse_llm endpoint."""
 
@@ -54,8 +66,13 @@ class TestParseLlm:
         ]
         mock_clients["mongo"].__getitem__.return_value.__getitem__.return_value = mock_collection
 
+        # Create mock tool response - sections start at lines 1 and 3 (with blank line between docs)
+        mock_response = create_tool_use_response([
+            {"document_id": "doc_001", "parsed_header_text": "First Section", "start_line": 1},
+            {"document_id": "doc_002", "parsed_header_text": "Second Section", "start_line": 3},
+        ])
         mock_stream = MagicMock()
-        mock_stream.get_final_text.return_value = '{"parsed_doc": [{"document_id": "doc_001", "parsed_header_text": "Summary", "parsed_text": "Combined content"}]}'
+        mock_stream.get_final_message.return_value = mock_response
         mock_clients["anthropic"].messages.stream.return_value.__enter__.return_value = mock_stream
 
         # Act
@@ -72,18 +89,23 @@ class TestParseLlm:
         assert response.status_code == 200
         data = response.get_json()
         assert "parsed_doc" in data
-        assert len(data["parsed_doc"]) == 1
+        assert len(data["parsed_doc"]) == 2
+        assert data["parsed_doc"][0]["document_id"] == "doc_001"
+        assert data["parsed_doc"][0]["parsed_header_text"] == "First Section"
 
         # Verify the collection was queried
         mock_clients["mongo"].__getitem__.assert_called_with("test_db")
 
-        # Verify Anthropic was called with concatenated text
+        # Verify Anthropic was called with tools and line-numbered text
         call_args = mock_clients["anthropic"].messages.stream.call_args
         user_message = call_args[1]["messages"][0]["content"]
         assert "First document text." in user_message
         assert "Second document text." in user_message
         assert "Third document text." in user_message
         assert "Summarize the documents" in user_message
+        # Verify tools were passed
+        assert "tools" in call_args[1]
+        assert call_args[1]["tools"][0]["name"] == "identify_sections"
 
     def test_parse_llm_missing_database(self, client, mock_clients):
         """Test error when database parameter is missing."""
@@ -184,19 +206,22 @@ class TestParseLlm:
         data = response.get_json()
         assert "error" in data
 
-    def test_parse_llm_concatenates_text_correctly(self, client, mock_clients):
-        """Test that multiple document texts are concatenated correctly."""
-        # Arrange
+    def test_parse_llm_extracts_text_by_line_numbers(self, client, mock_clients):
+        """Test that text is correctly extracted based on line numbers."""
+        # Arrange - document with clear line structure
         mock_collection = MagicMock()
         mock_collection.find.return_value = [
-            {"_id": "1", "text": "Alpha"},
-            {"_id": "2", "text": "Beta"},
-            {"_id": "3", "text": "Gamma"},
+            {"_id": "1", "text": "Line 1\nLine 2\nLine 3\nLine 4\nLine 5"},
         ]
         mock_clients["mongo"].__getitem__.return_value.__getitem__.return_value = mock_collection
 
+        # LLM identifies two sections: lines 1-2 and lines 3-5
+        mock_response = create_tool_use_response([
+            {"document_id": "section_1", "parsed_header_text": "First Part", "start_line": 1},
+            {"document_id": "section_2", "parsed_header_text": "Second Part", "start_line": 3},
+        ])
         mock_stream = MagicMock()
-        mock_stream.get_final_text.return_value = '{"parsed_doc": []}'
+        mock_stream.get_final_message.return_value = mock_response
         mock_clients["anthropic"].messages.stream.return_value.__enter__.return_value = mock_stream
 
         # Act
@@ -205,30 +230,31 @@ class TestParseLlm:
             json={
                 "database": "test_db",
                 "collection": "test_collection",
-                "parse_prompt": "Parse this",
+                "parse_prompt": "Split into sections",
             },
         )
 
         # Assert
         assert response.status_code == 200
+        data = response.get_json()
+        assert len(data["parsed_doc"]) == 2
+        # First section should have lines 1-2
+        assert "Line 1" in data["parsed_doc"][0]["parsed_text"]
+        assert "Line 2" in data["parsed_doc"][0]["parsed_text"]
+        assert "Line 3" not in data["parsed_doc"][0]["parsed_text"]
+        # Second section should have lines 3-5
+        assert "Line 3" in data["parsed_doc"][1]["parsed_text"]
+        assert "Line 4" in data["parsed_doc"][1]["parsed_text"]
+        assert "Line 5" in data["parsed_doc"][1]["parsed_text"]
 
-        # Verify all texts are in the LLM input
-        call_args = mock_clients["anthropic"].messages.stream.call_args
-        user_message = call_args[1]["messages"][0]["content"]
-        assert "Alpha" in user_message
-        assert "Beta" in user_message
-        assert "Gamma" in user_message
-
-    def test_parse_llm_handles_llm_json_error(self, client, mock_clients):
-        """Test error handling when LLM returns invalid JSON."""
+    def test_parse_llm_handles_llm_api_error(self, client, mock_clients):
+        """Test error handling when Anthropic API fails."""
         # Arrange
         mock_collection = MagicMock()
         mock_collection.find.return_value = [{"_id": "1", "text": "Test content"}]
         mock_clients["mongo"].__getitem__.return_value.__getitem__.return_value = mock_collection
 
-        mock_stream = MagicMock()
-        mock_stream.get_final_text.return_value = "Not valid JSON"
-        mock_clients["anthropic"].messages.stream.return_value.__enter__.return_value = mock_stream
+        mock_clients["anthropic"].messages.stream.side_effect = Exception("API Error")
 
         # Act
         response = client.post(
@@ -245,14 +271,22 @@ class TestParseLlm:
         data = response.get_json()
         assert "error" in data
 
-    def test_parse_llm_handles_llm_api_error(self, client, mock_clients):
-        """Test error handling when Anthropic API fails."""
+    def test_parse_llm_handles_no_tool_use(self, client, mock_clients):
+        """Test error handling when LLM doesn't use the tool."""
         # Arrange
         mock_collection = MagicMock()
         mock_collection.find.return_value = [{"_id": "1", "text": "Test content"}]
         mock_clients["mongo"].__getitem__.return_value.__getitem__.return_value = mock_collection
 
-        mock_clients["anthropic"].messages.stream.side_effect = Exception("API Error")
+        # Response without tool_use block
+        mock_response = MagicMock()
+        text_block = MagicMock()
+        text_block.type = "text"
+        mock_response.content = [text_block]
+
+        mock_stream = MagicMock()
+        mock_stream.get_final_message.return_value = mock_response
+        mock_clients["anthropic"].messages.stream.return_value.__enter__.return_value = mock_stream
 
         # Act
         response = client.post(
@@ -281,8 +315,11 @@ class TestParseLlm:
         ]
         mock_clients["mongo"].__getitem__.return_value.__getitem__.return_value = mock_collection
 
+        mock_response = create_tool_use_response([
+            {"document_id": "section_1", "parsed_header_text": "All Content", "start_line": 1},
+        ])
         mock_stream = MagicMock()
-        mock_stream.get_final_text.return_value = '{"parsed_doc": []}'
+        mock_stream.get_final_message.return_value = mock_response
         mock_clients["anthropic"].messages.stream.return_value.__enter__.return_value = mock_stream
 
         # Act
@@ -303,3 +340,38 @@ class TestParseLlm:
         user_message = call_args[1]["messages"][0]["content"]
         assert "Valid text" in user_message
         assert "More valid text" in user_message
+
+    def test_parse_llm_sorts_sections_by_line_number(self, client, mock_clients):
+        """Test that sections are sorted by start_line regardless of order returned."""
+        # Arrange
+        mock_collection = MagicMock()
+        mock_collection.find.return_value = [
+            {"_id": "1", "text": "Line 1\nLine 2\nLine 3\nLine 4"},
+        ]
+        mock_clients["mongo"].__getitem__.return_value.__getitem__.return_value = mock_collection
+
+        # LLM returns sections out of order
+        mock_response = create_tool_use_response([
+            {"document_id": "second", "parsed_header_text": "Second", "start_line": 3},
+            {"document_id": "first", "parsed_header_text": "First", "start_line": 1},
+        ])
+        mock_stream = MagicMock()
+        mock_stream.get_final_message.return_value = mock_response
+        mock_clients["anthropic"].messages.stream.return_value.__enter__.return_value = mock_stream
+
+        # Act
+        response = client.post(
+            "/parse_llm",
+            json={
+                "database": "test_db",
+                "collection": "test_collection",
+                "parse_prompt": "Parse",
+            },
+        )
+
+        # Assert
+        assert response.status_code == 200
+        data = response.get_json()
+        # Sections should be sorted by line number
+        assert data["parsed_doc"][0]["document_id"] == "first"
+        assert data["parsed_doc"][1]["document_id"] == "second"
