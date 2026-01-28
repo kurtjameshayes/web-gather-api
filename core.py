@@ -1191,17 +1191,16 @@ Important guidelines:
 Return ONLY the JSON output with the parsed document sections."""
 
     try:
-        logger.info("POST /parse_llm - Calling Anthropic API (model: claude-3-haiku-20240307)")
-        message = anthropic_client.messages.create(
-            model="claude-3-haiku-20240307",
-            max_tokens=4096,
+        logger.info("POST /parse_llm - Calling Anthropic API with streaming (model: claude-3-5-haiku-20241022)")
+        with anthropic_client.messages.stream(
+            model="claude-3-5-haiku-20241022",
+            max_tokens=8192,
             messages=[
                 {"role": "user", "content": user_message}
             ],
             system=system_prompt,
-        )
-
-        response_text = message.content[0].text.strip()
+        ) as stream:
+            response_text = stream.get_final_text().strip()
         logger.info("POST /parse_llm - Received response (length: %d)", len(response_text))
 
         # Try to extract JSON if wrapped in code blocks
