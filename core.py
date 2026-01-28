@@ -1191,10 +1191,10 @@ Important guidelines:
 Return ONLY the JSON output with the parsed document sections."""
 
     try:
-        logger.info("POST /parse_llm - Calling Anthropic API with streaming (model: claude-3-haiku-20240307)")
+        logger.info("POST /parse_llm - Calling Anthropic API with streaming (model: claude-3-5-haiku-20241022)")
         with anthropic_client.messages.stream(
-            model="claude-3-haiku-20240307",
-            max_tokens=4096,
+            model="claude-3-5-haiku-20241022",
+            max_tokens=8192,
             messages=[
                 {"role": "user", "content": user_message}
             ],
