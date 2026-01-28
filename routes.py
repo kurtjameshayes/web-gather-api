@@ -463,32 +463,34 @@ def build_openapi_spec():
                 },
             },
             "/parse_llm": {
-                "get": {
-                    "summary": "Parse document text using LLM",
-                    "description": "Dynamically parse document text according to specific instructions using a language model. Returns structured JSON with parsed sections.",
-                    "parameters": [
-                        {
-                            "name": "document",
-                            "in": "query",
-                            "required": True,
-                            "schema": {"type": "string"},
-                            "description": "The document text to parse",
+                "post": {
+                    "summary": "Parse document text from a collection using LLM",
+                    "description": "Reads all records from the specified database/collection, concatenates all 'text' attributes into one string, and uses this as input for the LLM along with the parse_prompt. Returns structured JSON with parsed sections.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "database": {
+                                            "type": "string",
+                                            "description": "The name of the database containing the documents to parse",
+                                        },
+                                        "collection": {
+                                            "type": "string",
+                                            "description": "The name of the collection containing the documents to parse",
+                                        },
+                                        "parse_prompt": {
+                                            "type": "string",
+                                            "description": "Instructions for how to parse the combined document text",
+                                        },
+                                    },
+                                    "required": ["database", "collection", "parse_prompt"],
+                                }
+                            }
                         },
-                        {
-                            "name": "parsing_prompt",
-                            "in": "query",
-                            "required": False,
-                            "schema": {"type": "string"},
-                            "description": "Instructions for how to parse the document. If not provided, defaults to parsing the document into logical sections based on document type.",
-                        },
-                        {
-                            "name": "document_id",
-                            "in": "query",
-                            "required": False,
-                            "schema": {"type": "string"},
-                            "description": "Optional document identifier (defaults to doc_001)",
-                        },
-                    ],
+                    },
                     "responses": {
                         "200": {
                             "description": "Parsed document sections",
@@ -513,7 +515,7 @@ def build_openapi_spec():
                                 }
                             },
                         },
-                        "400": {"description": "Missing required parameters"},
+                        "400": {"description": "Missing required parameters or no documents found"},
                         "500": {"description": "LLM parsing failed"},
                     },
                 }
