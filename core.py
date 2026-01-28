@@ -1105,29 +1105,60 @@ def search():
     )
 
 
-DEFAULT_PARSING_PROMPT = """Parse the document into sections logically based on the type of information in the document.
-For example, legal documents should be parsed into section or clauses."""
-
-
-@core_bp.get("/parse_llm")
+@core_bp.post("/parse_llm")
 def parse_llm():
-    """Parse document text using LLM."""
-    logger.info("GET /parse_llm - Starting LLM document parsing")
-    document = request.args.get("document")
-    parsing_prompt = request.args.get("parsing_prompt")
-    document_id = request.args.get("document_id", "doc_001")
+    """Parse document text from a collection using LLM.
 
-    if not document:
-        logger.warning("GET /parse_llm - Missing required parameter: document")
-        return jsonify({"error": "document is required"}), 400
+    Reads all records from the specified database/collection, concatenates
+    all "text" attributes into one string, and uses this as input for the LLM
+    along with the parse_prompt.
+    """
+    logger.info("POST /parse_llm - Starting LLM document parsing")
+    payload = request.get_json(silent=True) or {}
 
-    # Use default parsing prompt if not provided
-    if not parsing_prompt:
-        parsing_prompt = DEFAULT_PARSING_PROMPT
-        logger.info("GET /parse_llm - Using default parsing prompt")
+    database = payload.get("database")
+    collection = payload.get("collection")
+    parse_prompt = payload.get("parse_prompt")
 
-    logger.info("GET /parse_llm - Parsing document (length: %d) with prompt: %s...",
-                len(document), parsing_prompt[:50])
+    # Validate required parameters
+    missing_params = []
+    if not database:
+        missing_params.append("database")
+    if not collection:
+        missing_params.append("collection")
+    if not parse_prompt:
+        missing_params.append("parse_prompt")
+
+    if missing_params:
+        logger.warning("POST /parse_llm - Missing required parameters: %s", ", ".join(missing_params))
+        return jsonify({
+            "error": f"Missing required parameters: {', '.join(missing_params)}"
+        }), 400
+
+    logger.info("POST /parse_llm - Reading documents from %s.%s", database, collection)
+
+    # Read all documents from the collection
+    db = mongo_client[database]
+    documents = list(db[collection].find())
+
+    if not documents:
+        logger.warning("POST /parse_llm - No documents found in %s.%s", database, collection)
+        return jsonify({"error": f"No documents found in {database}.{collection}"}), 400
+
+    # Concatenate all "text" attributes
+    text_parts = []
+    for doc in documents:
+        text = doc.get("text", "")
+        if text and text.strip():
+            text_parts.append(text.strip())
+
+    if not text_parts:
+        logger.warning("POST /parse_llm - No text content found in documents")
+        return jsonify({"error": "No text content found in documents"}), 400
+
+    combined_text = "\n\n".join(text_parts)
+    logger.info("POST /parse_llm - Combined %d documents into %d characters",
+                len(text_parts), len(combined_text))
 
     system_prompt = """You are a document parsing assistant. Your task is to parse documents according to specific instructions and return structured JSON output.
 
@@ -1135,7 +1166,7 @@ You must return ONLY valid JSON with the following structure:
 - A top-level object with a "parsed_doc" key
 - The "parsed_doc" value should be an array of objects
 - Each object in the array represents one parsed section and must contain:
-  - "document_id": A string identifier for the document (use the provided document_id)
+  - "document_id": A string identifier for the document
   - "parsed_header_text": A string containing the header, title, or identifying text for this section
   - "parsed_text": A string containing the main content/body text for this section
 
@@ -1150,19 +1181,17 @@ Important guidelines:
     user_message = f"""Parse the following document according to the parsing instructions provided.
 
 <document>
-{document}
+{combined_text}
 </document>
 
-<parsing_prompt>
-{parsing_prompt}
-</parsing_prompt>
-
-<document_id>{document_id}</document_id>
+<parse_prompt>
+{parse_prompt}
+</parse_prompt>
 
 Return ONLY the JSON output with the parsed document sections."""
 
     try:
-        logger.info("GET /parse_llm - Calling Anthropic API (model: claude-3-haiku-20240307)")
+        logger.info("POST /parse_llm - Calling Anthropic API (model: claude-3-haiku-20240307)")
         message = anthropic_client.messages.create(
             model="claude-3-haiku-20240307",
             max_tokens=4096,
@@ -1173,7 +1202,7 @@ Return ONLY the JSON output with the parsed document sections."""
         )
 
         response_text = message.content[0].text.strip()
-        logger.info("GET /parse_llm - Received response (length: %d)", len(response_text))
+        logger.info("POST /parse_llm - Received response (length: %d)", len(response_text))
 
         # Try to extract JSON if wrapped in code blocks
         if response_text.startswith("```"):
@@ -1187,12 +1216,12 @@ Return ONLY the JSON output with the parsed document sections."""
 
         parsed_result = json.loads(response_text)
         section_count = len(parsed_result.get("parsed_doc", []))
-        logger.info("GET /parse_llm - Successfully parsed document into %d sections", section_count)
+        logger.info("POST /parse_llm - Successfully parsed document into %d sections", section_count)
         return jsonify(parsed_result)
 
     except json.JSONDecodeError as e:
-        logger.error("GET /parse_llm - Failed to parse LLM response as JSON: %s", e)
+        logger.error("POST /parse_llm - Failed to parse LLM response as JSON: %s", e)
         return jsonify({"error": f"Failed to parse LLM response as JSON: {str(e)}"}), 500
     except Exception as e:
-        logger.error("GET /parse_llm - LLM parsing failed: %s", e)
+        logger.error("POST /parse_llm - LLM parsing failed: %s", e)
         return jsonify({"error": f"LLM parsing failed: {str(e)}"}), 500
