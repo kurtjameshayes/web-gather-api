@@ -432,6 +432,107 @@ def build_openapi_spec():
                     },
                 }
             },
+            "/write_to_collection": {
+                "post": {
+                    "summary": "Write a JSON document to a MongoDB collection",
+                    "description": "Insert a new document (append mode) or replace an existing document by _id (replace mode). When using replace mode, the update_id parameter is required to specify which document to update.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "database_name": {
+                                            "type": "string",
+                                            "description": "The name of the database",
+                                        },
+                                        "collection_name": {
+                                            "type": "string",
+                                            "description": "The name of the collection",
+                                        },
+                                        "mode": {
+                                            "type": "string",
+                                            "enum": ["append", "replace"],
+                                            "default": "append",
+                                            "description": "Write mode: 'append' inserts a new document (default), 'replace' updates an existing document by _id",
+                                        },
+                                        "document": {
+                                            "type": "object",
+                                            "description": "The JSON document to write to the collection",
+                                        },
+                                        "update_id": {
+                                            "type": "string",
+                                            "description": "The _id of the document to update (required when mode is 'replace')",
+                                        },
+                                    },
+                                    "required": ["database_name", "collection_name", "document"],
+                                }
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Document written successfully",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "database_name": {"type": "string"},
+                                            "collection_name": {"type": "string"},
+                                            "mode": {"type": "string"},
+                                            "inserted_id": {
+                                                "type": "string",
+                                                "description": "The _id of the inserted document (append mode only)",
+                                            },
+                                            "update_id": {
+                                                "type": "string",
+                                                "description": "The _id of the updated document (replace mode only)",
+                                            },
+                                            "matched_count": {
+                                                "type": "integer",
+                                                "description": "Number of documents matched (replace mode only)",
+                                            },
+                                            "modified_count": {
+                                                "type": "integer",
+                                                "description": "Number of documents modified (replace mode only)",
+                                            },
+                                            "message": {"type": "string"},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                        "400": {
+                            "description": "Bad request - missing required parameters, invalid mode, or invalid update_id",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "error": {"type": "string"},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                        "404": {
+                            "description": "Document not found (replace mode only)",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "error": {"type": "string"},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                    },
+                }
+            },
             "/index": {
                 "post": {
                     "summary": "Index a document by id",
