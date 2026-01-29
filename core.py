@@ -615,6 +615,9 @@ def index_document_chunks(
 def serialize_search_result(result):
     """Convert Firecrawl search result object to dict."""
     if isinstance(result, dict):
+        # For dict results, add percent_match if score exists
+        if "score" in result and result["score"] is not None:
+            result["percent_match"] = round(result["score"] * 100, 1)
         return result
     # Handle SearchResultWeb or Document objects
     data = {}
@@ -629,6 +632,10 @@ def serialize_search_result(result):
     if hasattr(result, "metadata") and result.metadata:
         data["url"] = getattr(result.metadata, "url", None) or data.get("url")
         data["title"] = getattr(result.metadata, "title", None) or data.get("title")
+    # Include relevance score from Firecrawl search
+    if hasattr(result, "score") and result.score is not None:
+        data["score"] = result.score
+        data["percent_match"] = round(result.score * 100, 1)
     return data
 
 

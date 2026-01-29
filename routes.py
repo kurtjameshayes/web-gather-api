@@ -138,7 +138,7 @@ def build_openapi_spec():
             "/gather": {
                 "post": {
                     "summary": "Gather web documents based on query",
-                    "description": "Search the web for documents matching the query. Returns search results with URLs that can be selected for crawling via the /ingest endpoint. The response includes a next_step object describing the required and optional parameters for ingestion.",
+                    "description": "Search the web for documents matching the query. Returns search results with URLs that can be selected for crawling via the /ingest endpoint. Each result includes a relevance score (0-1) and percent_match (0-100) indicating how well the content matches the query for AI consumption. The response includes a next_step object describing the required and optional parameters for ingestion.",
                     "requestBody": {
                         "required": True,
                         "content": {
@@ -162,13 +162,25 @@ def build_openapi_spec():
                                             "query": {"type": "string", "description": "The search query"},
                                             "results": {
                                                 "type": "array",
-                                                "description": "List of search results",
+                                                "description": "List of search results sorted by relevance",
                                                 "items": {
                                                     "type": "object",
                                                     "properties": {
                                                         "url": {"type": "string"},
                                                         "title": {"type": "string"},
                                                         "description": {"type": "string"},
+                                                        "score": {
+                                                            "type": "number",
+                                                            "description": "Relevance score from Firecrawl search (0-1)",
+                                                            "minimum": 0,
+                                                            "maximum": 1,
+                                                        },
+                                                        "percent_match": {
+                                                            "type": "number",
+                                                            "description": "Relevance score as percentage (0-100)",
+                                                            "minimum": 0,
+                                                            "maximum": 100,
+                                                        },
                                                     },
                                                 },
                                             },
