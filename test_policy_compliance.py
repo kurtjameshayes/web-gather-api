@@ -5,7 +5,7 @@ import sys
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from fastapi.testclient import TestClient
+from flask import Flask
 
 # Avoid loading sentence_transformers in unit tests.
 sys.modules["sentence_transformers"] = MagicMock()
@@ -13,8 +13,8 @@ sys.modules["sentence_transformers"] = MagicMock()
 from cache import SimpleLRUCache
 from compliance_config import load_config
 from compliance_evaluator import ComplianceEvaluator
+from compliance_routes import compliance_bp, set_compliance_service
 from compliance_service import ComplianceService
-from fastapi_app import app, get_config, get_service
 from llm_client import build_prompt
 from redactor import Redactor
 from segmenter import PolicySegmenter
@@ -197,10 +197,10 @@ def test_policy_compliance_endpoint_retention_non_compliant():
         rate_limiter=RateLimiter(1000),
     )
 
-    app.dependency_overrides[get_service] = lambda: service
-    app.dependency_overrides[get_config] = lambda: config
-
-    client = TestClient(app)
+    set_compliance_service(service, config)
+    app = Flask(__name__)
+    app.register_blueprint(compliance_bp)
+    client = app.test_client()
     response = client.post(
         "/policy-statute-compliance",
         json={
@@ -221,7 +221,7 @@ def test_policy_compliance_endpoint_retention_non_compliant():
     assert body["sections"][0]["confidence"] >= 0.8
     assert "Reduce retention to 3 years" in body["sections"][0]["remediation_suggestions"][0]
 
-    app.dependency_overrides.clear()
+    set_compliance_service(None)
 
 
 def test_adversarial_ambiguous_language_neither():

@@ -48,11 +48,13 @@ from db import db_bp, init_db
 from core import core_bp, init_core
 from util import util_bp, init_util
 from routes import routes_bp
+from compliance_routes import compliance_bp, init_compliance
 
 # Initialize modules with required clients
 init_db(mongo_client)
 init_core(mongo_client, firecrawl_client, anthropic_client)
 init_util(mongo_client)
+init_compliance(mongo_client)
 
 # Register blueprints
 logger.info("Registering route blueprints")
@@ -60,6 +62,7 @@ app.register_blueprint(db_bp)
 app.register_blueprint(core_bp)
 app.register_blueprint(util_bp)
 app.register_blueprint(routes_bp)
+app.register_blueprint(compliance_bp)
 
 if __name__ == "__main__":
     logger.info("Starting Web Gather API server on port 5000")

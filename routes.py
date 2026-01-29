@@ -13,6 +13,127 @@ def build_openapi_spec():
             "version": "1.0.0",
             "description": "Gather, load, index, and search web documents. The /ingest endpoint loads documents only - use /index separately to create vector embeddings.",
         },
+        "components": {
+            "schemas": {
+                "ConfidenceThresholds": {
+                    "type": "object",
+                    "properties": {
+                        "compliant": {"type": "number", "minimum": 0, "maximum": 1},
+                        "non_compliant": {"type": "number", "minimum": 0, "maximum": 1},
+                    },
+                    "required": ["compliant", "non_compliant"],
+                },
+                "ComplianceOptions": {
+                    "type": "object",
+                    "properties": {
+                        "explainability": {"type": "boolean"},
+                        "redact_pii": {"type": "boolean"},
+                    },
+                },
+                "PolicyStatuteComplianceRequest": {
+                    "type": "object",
+                    "description": "Either policy_id or text must be provided.",
+                    "properties": {
+                        "database": {"type": "string"},
+                        "policy_collection": {"type": "string"},
+                        "policy_id": {"type": "string", "nullable": True},
+                        "text": {"type": "string", "nullable": True},
+                        "jurisdiction": {"type": "string"},
+                        "statute_corpus_id": {"type": "string", "nullable": True},
+                        "top_k_statutes": {"type": "integer", "minimum": 1, "maximum": 50},
+                        "confidence_thresholds": {"$ref": "#/components/schemas/ConfidenceThresholds"},
+                        "options": {"$ref": "#/components/schemas/ComplianceOptions"},
+                    },
+                    "required": ["database", "policy_collection", "jurisdiction"],
+                },
+                "AppliedStatute": {
+                    "type": "object",
+                    "properties": {
+                        "statute_id": {"type": "string"},
+                        "jurisdiction": {"type": "string"},
+                        "title": {"type": "string"},
+                        "section_id": {"type": "string"},
+                        "matched_span": {"type": "string"},
+                        "evidence_score": {"type": "number"},
+                    },
+                    "required": [
+                        "statute_id",
+                        "jurisdiction",
+                        "title",
+                        "section_id",
+                        "matched_span",
+                        "evidence_score",
+                    ],
+                },
+                "PolicySectionResult": {
+                    "type": "object",
+                    "properties": {
+                        "section_id": {"type": "string"},
+                        "section_text": {"type": "string"},
+                        "applied_statutes": {
+                            "type": "array",
+                            "items": {"$ref": "#/components/schemas/AppliedStatute"},
+                        },
+                        "compliance": {
+                            "type": "string",
+                            "enum": ["compliant", "non_compliant", "neither"],
+                        },
+                        "confidence": {"type": "number"},
+                        "rationale": {"type": "string"},
+                        "remediation_suggestions": {"type": "array", "items": {"type": "string"}},
+                        "retrieval_trace": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": [
+                        "section_id",
+                        "section_text",
+                        "applied_statutes",
+                        "compliance",
+                        "confidence",
+                        "rationale",
+                        "remediation_suggestions",
+                        "retrieval_trace",
+                    ],
+                },
+                "SummaryCounts": {
+                    "type": "object",
+                    "properties": {
+                        "compliant": {"type": "integer"},
+                        "non_compliant": {"type": "integer"},
+                        "neither": {"type": "integer"},
+                    },
+                    "required": ["compliant", "non_compliant", "neither"],
+                },
+                "SummaryResult": {
+                    "type": "object",
+                    "properties": {
+                        "overall_compliance": {
+                            "type": "string",
+                            "enum": ["compliant", "non_compliant", "mixed", "unknown"],
+                        },
+                        "counts": {"$ref": "#/components/schemas/SummaryCounts"},
+                    },
+                    "required": ["overall_compliance", "counts"],
+                },
+                "PolicyStatuteComplianceResponse": {
+                    "type": "object",
+                    "properties": {
+                        "policy_id": {"type": "string", "nullable": True},
+                        "jurisdiction": {"type": "string"},
+                        "sections": {
+                            "type": "array",
+                            "items": {"$ref": "#/components/schemas/PolicySectionResult"},
+                        },
+                        "summary": {"$ref": "#/components/schemas/SummaryResult"},
+                        "warnings": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["policy_id", "jurisdiction", "sections", "summary", "warnings"],
+                },
+                "ErrorResponse": {
+                    "type": "object",
+                    "properties": {"error": {"type": "string"}},
+                },
+            }
+        },
         "paths": {
             "/gather": {
                 "post": {
@@ -517,6 +638,134 @@ def build_openapi_spec():
                         },
                         "400": {"description": "Missing required parameters or no documents found"},
                         "500": {"description": "LLM parsing failed"},
+                    },
+                }
+            },
+            "/policy-statute-compliance": {
+                "post": {
+                    "summary": "Compare policy sections to statutes for compliance",
+                    "description": "Segments a policy into sections, retrieves relevant statutes, and returns compliance determinations with evidence.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/PolicyStatuteComplianceRequest"}
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Compliance analysis response",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/PolicyStatuteComplianceResponse"}
+                                }
+                            },
+                        },
+                        "400": {
+                            "description": "Bad request",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/ErrorResponse"}
+                                }
+                            },
+                        },
+                        "401": {
+                            "description": "Missing API key",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/ErrorResponse"}
+                                }
+                            },
+                        },
+                        "403": {
+                            "description": "Unauthorized",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/ErrorResponse"}
+                                }
+                            },
+                        },
+                        "422": {
+                            "description": "Validation error",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/ErrorResponse"}
+                                }
+                            },
+                        },
+                        "500": {
+                            "description": "Internal server error",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/ErrorResponse"}
+                                }
+                            },
+                        },
+                    },
+                }
+            },
+            "/api/v1/compare-policy": {
+                "post": {
+                    "summary": "Compare policy sections to statutes for compliance",
+                    "description": "Alias for /policy-statute-compliance.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/PolicyStatuteComplianceRequest"}
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Compliance analysis response",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/PolicyStatuteComplianceResponse"}
+                                }
+                            },
+                        },
+                        "400": {
+                            "description": "Bad request",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/ErrorResponse"}
+                                }
+                            },
+                        },
+                        "401": {
+                            "description": "Missing API key",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/ErrorResponse"}
+                                }
+                            },
+                        },
+                        "403": {
+                            "description": "Unauthorized",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/ErrorResponse"}
+                                }
+                            },
+                        },
+                        "422": {
+                            "description": "Validation error",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/ErrorResponse"}
+                                }
+                            },
+                        },
+                        "500": {
+                            "description": "Internal server error",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/ErrorResponse"}
+                                }
+                            },
+                        },
                     },
                 }
             },

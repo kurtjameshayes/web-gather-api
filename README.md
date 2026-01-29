@@ -23,9 +23,9 @@ pip install -r requirements.txt
 python app.py
 ```
 
-## Policy Statute Compliance API (FastAPI)
+## Policy Statute Compliance API (Flask)
 
-This repository also includes a FastAPI service for comparing privacy policy sections
+This repository includes a Flask endpoint for comparing privacy policy sections
 against statute excerpts with compliance determinations.
 
 ### Required environment variables
@@ -47,13 +47,7 @@ LLM_MODEL_NAME=claude-3-5-haiku-20241022
 AUDIT_LOG_KEY=base64_fernet_key
 ```
 
-### Run the FastAPI server
-
-```
-uvicorn fastapi_app:app --host 0.0.0.0 --port 8000
-```
-
-### Compliance endpoint
+### Compliance endpoint (served by Flask)
 
 ```
 POST /policy-statute-compliance
@@ -89,3 +83,5 @@ pytest
 - `POST /search`
 - `GET /embedding-models`
 - `POST /embedding-models`
+- `POST /policy-statute-compliance`
+- `POST /api/v1/compare-policy`
