@@ -81,7 +81,6 @@ def _get_config() -> ComplianceConfig:
 
 
 @compliance_bp.post("/policy-statute-compliance")
-@compliance_bp.post("/api/v1/compare-policy")
 async def policy_statute_compliance():
     payload = request.get_json(silent=True) or {}
 

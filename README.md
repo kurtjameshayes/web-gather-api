@@ -51,7 +51,6 @@ AUDIT_LOG_KEY=base64_fernet_key
 
 ```
 POST /policy-statute-compliance
-POST /api/v1/compare-policy
 ```
 
 Example request/response JSON files are provided in:
@@ -84,4 +83,3 @@ pytest
 - `GET /embedding-models`
 - `POST /embedding-models`
 - `POST /policy-statute-compliance`
-- `POST /api/v1/compare-policy`
