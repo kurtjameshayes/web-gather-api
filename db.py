@@ -1,10 +1,12 @@
 """Database-related functions and endpoints.
 
-Includes functionality for endpoints: all-collections, all-databases, collections, count-documents, databases, and documents.
+Includes functionality for endpoints: all-collections, all-databases, collections, count-documents, databases, documents, and write_to_collection.
 """
 import logging
 from datetime import datetime, timezone
 
+from bson import ObjectId
+from bson.errors import InvalidId
 from flask import Blueprint, jsonify, request
 
 logger = logging.getLogger("web-gather-api")
@@ -146,3 +148,85 @@ def count_documents():
         "collection_name": collection_name,
         "count": count,
     })
+
+
+@db_bp.post("/write_to_collection")
+def write_to_collection():
+    """Write a JSON document to a MongoDB collection.
+
+    Supports two modes:
+    - append (default): Insert a new document into the collection
+    - replace: Update an existing document by _id (requires update_id)
+    """
+    logger.info("POST /write_to_collection - Writing document to collection")
+    data = request.get_json()
+
+    database_name = data.get("database_name")
+    collection_name = data.get("collection_name")
+    mode = data.get("mode", "append")
+    document = data.get("document")
+    update_id = data.get("update_id")
+
+    if not database_name or not collection_name:
+        logger.warning("POST /write_to_collection - Missing required parameters")
+        return jsonify({"error": "database_name and collection_name are required"}), 400
+
+    if not document:
+        logger.warning("POST /write_to_collection - Missing document")
+        return jsonify({"error": "document is required"}), 400
+
+    if mode not in ("append", "replace"):
+        logger.warning("POST /write_to_collection - Invalid mode: %s", mode)
+        return jsonify({"error": "mode must be 'append' or 'replace'"}), 400
+
+    if mode == "replace" and not update_id:
+        logger.warning("POST /write_to_collection - replace mode requires update_id")
+        return jsonify({"error": "update_id is required when mode is 'replace'"}), 400
+
+    logger.info(
+        "POST /write_to_collection - Writing to %s.%s (mode=%s)",
+        database_name,
+        collection_name,
+        mode,
+    )
+
+    db = mongo_client[database_name]
+    collection = db[collection_name]
+
+    if mode == "append":
+        result = collection.insert_one(document)
+        logger.info("POST /write_to_collection - Inserted document with _id: %s", result.inserted_id)
+        return jsonify({
+            "database_name": database_name,
+            "collection_name": collection_name,
+            "mode": mode,
+            "inserted_id": str(result.inserted_id),
+            "message": "Document inserted successfully",
+        })
+    else:  # mode == "replace"
+        try:
+            object_id = ObjectId(update_id)
+        except InvalidId:
+            logger.warning("POST /write_to_collection - Invalid update_id: %s", update_id)
+            return jsonify({"error": f"Invalid update_id: {update_id}"}), 400
+
+        result = collection.replace_one({"_id": object_id}, document)
+
+        if result.matched_count == 0:
+            logger.warning("POST /write_to_collection - Document not found with _id: %s", update_id)
+            return jsonify({"error": f"Document not found with _id: {update_id}"}), 404
+
+        logger.info(
+            "POST /write_to_collection - Replaced document with _id: %s (modified: %d)",
+            update_id,
+            result.modified_count,
+        )
+        return jsonify({
+            "database_name": database_name,
+            "collection_name": collection_name,
+            "mode": mode,
+            "update_id": update_id,
+            "matched_count": result.matched_count,
+            "modified_count": result.modified_count,
+            "message": "Document replaced successfully",
+        })
