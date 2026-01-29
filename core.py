@@ -1334,7 +1334,7 @@ def crawl():
         crawl_result = firecrawl_client.crawl(
             url=url,
             limit=breadth,
-            max_depth=depth,
+            max_discovery_depth=depth,
         )
     except Exception as exc:
         logger.error("POST /crawl - Crawl failed for URL %s: %s", url, exc)
