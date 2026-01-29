@@ -1,0 +1,15 @@
+{
+  "database": "privacy_db",
+  "policy_collection": "policies",
+  "text": "We retain user data for 10 years for analytics.",
+  "jurisdiction": "US",
+  "top_k_statutes": 5,
+  "confidence_thresholds": {
+    "compliant": 0.75,
+    "non_compliant": 0.75
+  },
+  "options": {
+    "explainability": true,
+    "redact_pii": true
+  }
+}
