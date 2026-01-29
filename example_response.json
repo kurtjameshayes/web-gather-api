@@ -1,0 +1,38 @@
+{
+  "policy_id": null,
+  "jurisdiction": "US",
+  "sections": [
+    {
+      "section_id": "section_1",
+      "section_text": "We retain user data for 10 years for analytics.",
+      "applied_statutes": [
+        {
+          "statute_id": "statute_901",
+          "jurisdiction": "US",
+          "title": "Data Retention Limits",
+          "section_id": "DR-3",
+          "matched_span": "retain user data for 10 years",
+          "evidence_score": 0.92
+        }
+      ],
+      "compliance": "non_compliant",
+      "confidence": 0.86,
+      "rationale": "The policy states a 10-year retention period for analytics. The cited statute limits analytics retention to 3 years, making the policy exceed the statutory limit. The policy does not provide an exception or justification.",
+      "remediation_suggestions": [
+        "Reduce retention to 3 years for analytics or document a statutory exception."
+      ],
+      "retrieval_trace": [
+        "statute_901:DR-3:0.9200"
+      ]
+    }
+  ],
+  "summary": {
+    "overall_compliance": "non_compliant",
+    "counts": {
+      "compliant": 0,
+      "non_compliant": 1,
+      "neither": 0
+    }
+  },
+  "warnings": []
+}

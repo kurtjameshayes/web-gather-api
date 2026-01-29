@@ -23,6 +23,61 @@ pip install -r requirements.txt
 python app.py
 ```
 
+## Policy Statute Compliance API (FastAPI)
+
+This repository also includes a FastAPI service for comparing privacy policy sections
+against statute excerpts with compliance determinations.
+
+### Required environment variables
+
+```
+MONGODB_URI=mongodb://localhost:27017
+ANTHROPIC_API_KEY=your_anthropic_key
+COMPLIANCE_API_KEY=your_api_key
+```
+
+Optional configuration (see `policy_compliance_config.json`):
+
+```
+COMPLIANCE_CONFIG_PATH=/workspace/policy_compliance_config.json
+COMPLIANCE_AUTH_REQUIRED=true
+COMPLIANCE_ALLOWED_ROLES=admin,compliance
+EMBEDDING_MODEL_NAME=all-MiniLM-L6-v2
+LLM_MODEL_NAME=claude-3-5-haiku-20241022
+AUDIT_LOG_KEY=base64_fernet_key
+```
+
+### Run the FastAPI server
+
+```
+uvicorn fastapi_app:app --host 0.0.0.0 --port 8000
+```
+
+### Compliance endpoint
+
+```
+POST /policy-statute-compliance
+POST /api/v1/compare-policy
+```
+
+Example request/response JSON files are provided in:
+
+- `example_request.json`
+- `example_response.json`
+
+When `COMPLIANCE_AUTH_REQUIRED=true`, include headers:
+
+```
+x-api-key: your_api_key
+x-role: admin
+```
+
+### Tests
+
+```
+pytest
+```
+
 ## Endpoints
 
 - `POST /gather`

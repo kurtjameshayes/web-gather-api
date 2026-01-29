@@ -1,4 +1,6 @@
 flask
+fastapi
+uvicorn
 python-dotenv
 pymongo
 firecrawl-py
@@ -7,4 +9,5 @@ numpy
 anthropic
 pypdf
 requests
+cryptography
 pytest
