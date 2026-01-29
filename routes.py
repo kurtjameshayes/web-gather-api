@@ -806,6 +806,110 @@ def build_openapi_spec():
                     },
                 }
             },
+            "/crawl": {
+                "post": {
+                    "summary": "Crawl a URL with specified depth and breadth",
+                    "description": "Crawl a URL and return combined text from all pages visited. Use depth to control how many levels of links to follow, and breadth to limit the maximum number of pages crawled.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "url": {
+                                            "type": "string",
+                                            "description": "The URL to start crawling from",
+                                        },
+                                        "depth": {
+                                            "type": "integer",
+                                            "description": "How deep to follow links from the starting URL (default: 2)",
+                                            "default": 2,
+                                            "minimum": 1,
+                                        },
+                                        "breadth": {
+                                            "type": "integer",
+                                            "description": "Maximum number of pages to crawl (default: 10)",
+                                            "default": 10,
+                                            "minimum": 1,
+                                        },
+                                    },
+                                    "required": ["url"],
+                                }
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Crawl results with combined page text",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "url": {
+                                                "type": "string",
+                                                "description": "The starting URL that was crawled",
+                                            },
+                                            "depth": {
+                                                "type": "integer",
+                                                "description": "The depth parameter used",
+                                            },
+                                            "breadth": {
+                                                "type": "integer",
+                                                "description": "The breadth parameter used",
+                                            },
+                                            "pages_crawled": {
+                                                "type": "integer",
+                                                "description": "Number of pages successfully crawled",
+                                            },
+                                            "urls_crawled": {
+                                                "type": "array",
+                                                "items": {"type": "string"},
+                                                "description": "List of URLs that were crawled",
+                                            },
+                                            "combined_text": {
+                                                "type": "string",
+                                                "description": "Combined text content from all crawled pages",
+                                            },
+                                            "text_length": {
+                                                "type": "integer",
+                                                "description": "Length of the combined text in characters",
+                                            },
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                        "400": {
+                            "description": "Bad request - missing URL, invalid parameters, or no content returned",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "error": {"type": "string"},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                        "500": {
+                            "description": "Crawl failed",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "error": {"type": "string"},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                    },
+                }
+            },
         },
     }
 
