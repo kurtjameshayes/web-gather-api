@@ -1,6 +1,6 @@
 """Core endpoints for the Web Gather API.
 
-Includes endpoints: gather, ingest, parse-llm, search, and index.
+Includes endpoints: gather, ingest, parse-llm, search, index, and crawl.
 """
 import io
 import json
@@ -1285,3 +1285,102 @@ Use the identify_sections tool to report the sections you identified."""
     except Exception as e:
         logger.error("POST /parse_llm - LLM parsing failed: %s", e)
         return jsonify({"error": f"LLM parsing failed: {str(e)}"}), 500
+
+
+@core_bp.post("/crawl")
+def crawl():
+    """Crawl a URL with specified depth and breadth, returning combined page text.
+
+    Parameters:
+        url (str): The URL to start crawling from (required)
+        depth (int): How deep to follow links from the starting URL (default: 2)
+        breadth (int): Maximum number of pages to crawl (default: 10)
+
+    Returns:
+        JSON with combined text from all crawled pages, page count, and URLs visited.
+    """
+    logger.info("POST /crawl - Starting web crawl")
+    payload = request.get_json(silent=True) or {}
+
+    url = payload.get("url")
+    depth = payload.get("depth", 2)
+    breadth = payload.get("breadth", 10)
+
+    # Validate required parameter
+    if not url:
+        logger.warning("POST /crawl - Missing required parameter: url")
+        return jsonify({"error": "url is required"}), 400
+
+    # Validate and convert depth and breadth to integers
+    try:
+        depth = int(depth)
+        if depth < 1:
+            raise ValueError("depth must be at least 1")
+    except (TypeError, ValueError) as e:
+        logger.warning("POST /crawl - Invalid depth parameter: %s", depth)
+        return jsonify({"error": f"depth must be a positive integer: {e}"}), 400
+
+    try:
+        breadth = int(breadth)
+        if breadth < 1:
+            raise ValueError("breadth must be at least 1")
+    except (TypeError, ValueError) as e:
+        logger.warning("POST /crawl - Invalid breadth parameter: %s", breadth)
+        return jsonify({"error": f"breadth must be a positive integer: {e}"}), 400
+
+    logger.info("POST /crawl - Crawling URL: %s (depth=%d, breadth=%d)", url, depth, breadth)
+
+    try:
+        crawl_result = firecrawl_client.crawl(
+            url=url,
+            limit=breadth,
+            max_depth=depth,
+        )
+    except Exception as exc:
+        logger.error("POST /crawl - Crawl failed for URL %s: %s", url, exc)
+        return jsonify({"error": f"crawl failed: {exc}"}), 500
+
+    # Debug: log crawl result structure
+    logger.info("POST /crawl - crawl_result type: %s", type(crawl_result))
+    if hasattr(crawl_result, '__dict__'):
+        logger.info("POST /crawl - crawl_result attrs: %s", list(vars(crawl_result).keys()))
+    if hasattr(crawl_result, 'data'):
+        logger.info("POST /crawl - crawl_result.data: type=%s, len=%s",
+                   type(crawl_result.data), len(crawl_result.data) if crawl_result.data else 0)
+    if hasattr(crawl_result, 'status'):
+        logger.info("POST /crawl - crawl_result.status: %s", crawl_result.status)
+
+    pages = normalize_results(crawl_result)
+    page_count = len(pages)
+    logger.info("POST /crawl - Crawl returned %d pages", page_count)
+
+    if page_count == 0:
+        logger.warning("POST /crawl - Crawl returned 0 pages for URL: %s", url)
+        return jsonify({"error": "crawl returned no pages - website may be blocking crawlers"}), 400
+
+    # Extract URLs from crawled pages
+    urls_crawled = []
+    for page in pages:
+        if hasattr(page, "metadata") and page.metadata:
+            page_url = getattr(page.metadata, "url", None)
+        else:
+            page_url = get_page_attr(page, "url")
+        if page_url:
+            urls_crawled.append(page_url)
+
+    combined_text = combine_pages(pages)
+    if not combined_text:
+        logger.warning("POST /crawl - Crawl returned no content for URL: %s", url)
+        return jsonify({"error": "crawl returned no content"}), 400
+
+    logger.info("POST /crawl - Combined text length: %d characters from %d pages", len(combined_text), page_count)
+
+    return jsonify({
+        "url": url,
+        "depth": depth,
+        "breadth": breadth,
+        "pages_crawled": page_count,
+        "urls_crawled": urls_crawled,
+        "combined_text": combined_text,
+        "text_length": len(combined_text),
+    })
