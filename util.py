@@ -31,6 +31,7 @@ def list_embedding_models():
     """List embedding models."""
     logger.info("GET /embedding-models - Listing embedding models")
     database_name = request.args.get("database_name")
+    logger.info("GET /embedding-models - Parameters: database_name=%s", database_name)
     wg_db = mongo_client[WEB_GATHER_DB]
     query = {"database_name": database_name} if database_name else {}
     models = list(wg_db[EMBEDDING_MODEL_COLLECTION].find(query, {"_id": 0}))
@@ -45,6 +46,7 @@ def add_embedding_model():
     payload = request.get_json(silent=True) or {}
     database_name = payload.get("database_name")
     model_name = payload.get("model_name")
+    logger.info("POST /embedding-models - Parameters: database_name=%s, model_name=%s", database_name, model_name)
     if not database_name or not model_name:
         logger.warning("POST /embedding-models - Missing required parameters")
         return jsonify({"error": "database_name and model_name are required"}), 400

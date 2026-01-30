@@ -704,6 +704,7 @@ def gather():
     logger.info("POST /gather - Starting web search")
     payload = request.get_json(silent=True) or {}
     query = payload.get("query")
+    logger.info("POST /gather - Parameters: query=%s", query)
     if not query:
         logger.warning("POST /gather - Missing required parameter: query")
         return jsonify({"error": "query is required"}), 400
@@ -782,6 +783,8 @@ def ingest():
     database_name = payload.get("database")
     collection_name = payload.get("collection")
     mode = payload.get("mode", "append").lower()
+    logger.info("POST /ingest - Parameters: url=%s, depth=%d, breadth=%d, database=%s, collection=%s, mode=%s",
+                url, depth, breadth, database_name, collection_name, mode)
 
     if not url or not database_name or not collection_name:
         logger.warning("POST /ingest - Missing required parameters")
@@ -976,6 +979,12 @@ def index_document():
     chunk_overlap = payload.get("chunk_overlap", DEFAULT_CHUNK_OVERLAP)
     splitting_strategy = payload.get("splitting_strategy", DEFAULT_SPLITTING_STRATEGY)
 
+    logger.info("POST /index - Parameters: source_database_name=%s, source_collection_name=%s, "
+                "source_document_id=%s, index_database_name=%s, index_collection_name=%s, "
+                "chunk_size=%s, chunk_overlap=%s, splitting_strategy=%s",
+                source_database_name, source_collection_name, source_document_id,
+                index_database_name, index_collection_name, chunk_size, chunk_overlap, splitting_strategy)
+
     # Validate chunk_size and chunk_overlap are positive integers
     try:
         chunk_size = int(chunk_size)
@@ -1106,6 +1115,7 @@ def search():
     logger.info("GET /search - Starting vector search")
     document_id = request.args.get("document_id")
     query = request.args.get("query")
+    logger.info("GET /search - Parameters: document_id=%s, query=%s", document_id, query)
     if not document_id or not query:
         logger.warning("GET /search - Missing required parameters")
         return jsonify({"error": "document_id and query are required"}), 400
@@ -1185,6 +1195,8 @@ def parse_llm():
     database = payload.get("database")
     collection = payload.get("collection")
     parse_prompt = payload.get("parse_prompt")
+    logger.info("POST /parse_llm - Parameters: database=%s, collection=%s, parse_prompt=%s",
+                database, collection, parse_prompt[:100] if parse_prompt else None)
 
     # Validate required parameters
     missing_params = []
@@ -1371,6 +1383,7 @@ def crawl():
     url = payload.get("url")
     depth = payload.get("depth", 2)
     breadth = payload.get("breadth", 10)
+    logger.info("POST /crawl - Parameters: url=%s, depth=%s, breadth=%s", url, depth, breadth)
 
     # Validate required parameter
     if not url:

@@ -52,6 +52,7 @@ def list_documents():
     logger.info("GET /documents - Listing documents")
     database_name = request.args.get("database_name")
     collection_name = request.args.get("collection_name")
+    logger.info("GET /documents - Parameters: database_name=%s, collection_name=%s", database_name, collection_name)
     if not database_name or not collection_name:
         logger.warning("GET /documents - Missing required parameters")
         return jsonify({"error": "database_name and collection_name are required"}), 400
@@ -72,6 +73,7 @@ def list_documents():
 def list_databases():
     """List all databases with uploaded documents."""
     logger.info("GET /databases - Listing databases")
+    logger.info("GET /databases - Parameters: (none)")
     wg_db = mongo_client[WEB_GATHER_DB]
     databases = wg_db[DOCUMENTS_COLLECTION].distinct("database_name")
     logger.info("GET /databases - Found %d databases", len(databases))
@@ -82,6 +84,7 @@ def list_databases():
 def list_all_databases():
     """List all databases in MongoDB."""
     logger.info("GET /all-databases - Listing all MongoDB databases")
+    logger.info("GET /all-databases - Parameters: (none)")
     databases = mongo_client.list_database_names()
     logger.info("GET /all-databases - Found %d databases", len(databases))
     return jsonify({"databases": databases})
@@ -92,6 +95,7 @@ def list_collections():
     """List collections with uploaded documents."""
     logger.info("GET /collections - Listing collections")
     database_name = request.args.get("database_name")
+    logger.info("GET /collections - Parameters: database_name=%s", database_name)
     if not database_name:
         logger.warning("GET /collections - Missing required parameter: database_name")
         return jsonify({"error": "database_name is required"}), 400
@@ -110,6 +114,7 @@ def list_all_collections():
     """List all collections in a MongoDB database."""
     logger.info("GET /all-collections - Listing all MongoDB collections")
     database_name = request.args.get("database_name")
+    logger.info("GET /all-collections - Parameters: database_name=%s", database_name)
     if not database_name:
         logger.warning("GET /all-collections - Missing required parameter: database_name")
         return jsonify({"error": "database_name is required"}), 400
@@ -129,6 +134,7 @@ def count_documents():
     logger.info("GET /count-documents - Counting documents")
     database_name = request.args.get("database_name")
     collection_name = request.args.get("collection_name")
+    logger.info("GET /count-documents - Parameters: database_name=%s, collection_name=%s", database_name, collection_name)
 
     if not database_name or not collection_name:
         logger.warning("GET /count-documents - Missing required parameters")
@@ -166,6 +172,8 @@ def write_to_collection():
     mode = data.get("mode", "append")
     document = data.get("document")
     update_id = data.get("update_id")
+    logger.info("POST /write_to_collection - Parameters: database_name=%s, collection_name=%s, mode=%s, update_id=%s, document=%s",
+                database_name, collection_name, mode, update_id, "provided" if document else None)
 
     if not database_name or not collection_name:
         logger.warning("POST /write_to_collection - Missing required parameters")

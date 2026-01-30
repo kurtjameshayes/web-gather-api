@@ -82,7 +82,15 @@ def _get_config() -> ComplianceConfig:
 
 @compliance_bp.post("/policy-statute-compliance")
 async def policy_statute_compliance():
+    logger.info("POST /policy-statute-compliance - Starting compliance check")
     payload = request.get_json(silent=True) or {}
+    logger.info("POST /policy-statute-compliance - Parameters: database=%s, policy_collection=%s, "
+                "policy_id=%s, text=%s, jurisdiction=%s, statute_corpus_id=%s, top_k_statutes=%s, "
+                "confidence_thresholds=%s, options=%s",
+                payload.get("database"), payload.get("policy_collection"), payload.get("policy_id"),
+                "provided" if payload.get("text") else None, payload.get("jurisdiction"),
+                payload.get("statute_corpus_id"), payload.get("top_k_statutes"),
+                payload.get("confidence_thresholds"), payload.get("options"))
 
     try:
         request_model = PolicyStatuteComplianceRequest.model_validate(payload)
