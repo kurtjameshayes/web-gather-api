@@ -5,6 +5,7 @@ Includes endpoints: gather, ingest, parse-llm, search, index, and crawl.
 import io
 import json
 import logging
+import re
 import uuid
 from urllib.parse import urlparse
 
@@ -27,6 +28,54 @@ logger = logging.getLogger("web-gather-api")
 mongo_client = None
 firecrawl_client = None
 anthropic_client = None
+
+
+def calculate_relevance_score(query, title, description):
+    """Calculate relevance score based on query term matching.
+
+    Scores content based on how well query terms match the title and description.
+    Title matches are weighted higher than description matches.
+
+    Args:
+        query: The search query string
+        title: The result title
+        description: The result description
+
+    Returns:
+        float: Relevance score between 0.0 and 1.0
+    """
+    if not query:
+        return 0.0
+
+    # Normalize and tokenize query
+    query_lower = query.lower()
+    query_terms = set(re.findall(r'\b\w+\b', query_lower))
+    if not query_terms:
+        return 0.0
+
+    # Normalize title and description
+    title_lower = (title or "").lower()
+    desc_lower = (description or "").lower()
+
+    # Count term matches
+    title_matches = sum(1 for term in query_terms if term in title_lower)
+    desc_matches = sum(1 for term in query_terms if term in desc_lower)
+
+    # Calculate weighted score (title matches worth 2x description matches)
+    # Max possible score: all terms in title (2 points each) + all in description (1 point each)
+    max_score = len(query_terms) * 3  # 2 for title + 1 for description
+    actual_score = (title_matches * 2) + desc_matches
+
+    # Normalize to 0-1 range
+    score = min(actual_score / max_score, 1.0) if max_score > 0 else 0.0
+
+    # Boost for exact phrase match
+    if query_lower in title_lower:
+        score = min(score + 0.2, 1.0)
+    elif query_lower in desc_lower:
+        score = min(score + 0.1, 1.0)
+
+    return round(score, 3)
 
 # Model cache for sentence transformers
 _model_cache = {}
@@ -612,30 +661,40 @@ def index_document_chunks(
     }
 
 
-def serialize_search_result(result):
-    """Convert Firecrawl search result object to dict."""
+def serialize_search_result(result, query=None):
+    """Convert Firecrawl search result object to dict with relevance scoring.
+
+    Args:
+        result: Firecrawl search result (object or dict)
+        query: Optional search query for calculating relevance score
+    """
     if isinstance(result, dict):
-        # For dict results, add percent_match if score exists
-        if "score" in result and result["score"] is not None:
-            result["percent_match"] = round(result["score"] * 100, 1)
-        return result
-    # Handle SearchResultWeb or Document objects
-    data = {}
-    if hasattr(result, "url"):
-        data["url"] = result.url
-    if hasattr(result, "title"):
-        data["title"] = result.title
-    if hasattr(result, "description"):
-        data["description"] = result.description
-    if hasattr(result, "markdown"):
-        data["markdown"] = result.markdown
-    if hasattr(result, "metadata") and result.metadata:
-        data["url"] = getattr(result.metadata, "url", None) or data.get("url")
-        data["title"] = getattr(result.metadata, "title", None) or data.get("title")
-    # Include relevance score from Firecrawl search
-    if hasattr(result, "score") and result.score is not None:
-        data["score"] = result.score
-        data["percent_match"] = round(result.score * 100, 1)
+        data = result.copy()
+    else:
+        # Handle SearchResultWeb or Document objects
+        data = {}
+        if hasattr(result, "url"):
+            data["url"] = result.url
+        if hasattr(result, "title"):
+            data["title"] = result.title
+        if hasattr(result, "description"):
+            data["description"] = result.description
+        if hasattr(result, "markdown"):
+            data["markdown"] = result.markdown
+        if hasattr(result, "metadata") and result.metadata:
+            data["url"] = getattr(result.metadata, "url", None) or data.get("url")
+            data["title"] = getattr(result.metadata, "title", None) or data.get("title")
+
+    # Calculate relevance score based on query matching
+    if query:
+        score = calculate_relevance_score(
+            query,
+            data.get("title", ""),
+            data.get("description", "")
+        )
+        data["score"] = score
+        data["percent_match"] = round(score * 100, 1)
+
     return data
 
 
@@ -655,7 +714,7 @@ def gather():
         limit=10,
     )
     normalized = normalize_results(results)
-    serialized = [serialize_search_result(r) for r in normalized]
+    serialized = [serialize_search_result(r, query=query) for r in normalized]
     logger.info("POST /gather - Found %d results for query: %s", len(serialized), query)
 
     # Build next_step information for the gather->ingest flow
