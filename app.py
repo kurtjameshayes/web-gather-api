@@ -65,5 +65,5 @@ app.register_blueprint(routes_bp)
 app.register_blueprint(compliance_bp)
 
 if __name__ == "__main__":
-    logger.info("Starting Web Gather API server on port 5000")
-    app.run(debug=True, port=5000)
+    logger.info("Starting Web Gather API server on port 6000")
+    app.run(debug=True, port=6000)
