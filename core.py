@@ -2,14 +2,16 @@
 
 Includes endpoints: gather, ingest, parse-llm, search, index, and crawl.
 """
+import asyncio
 import io
 import json
 import logging
 import re
 import uuid
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 import numpy as np
+import pyppeteer
 import requests
 from flask import Blueprint, jsonify, request
 from pypdf import PdfReader
@@ -216,6 +218,155 @@ def detect_content_type(url: str) -> str:
     except Exception as exc:
         logger.warning("Failed to detect content type for %s: %s", url, exc)
         return ""
+
+
+async def _puppeteer_crawl_async(start_url: str, depth: int, breadth: int) -> list[dict]:
+    """Crawl pages using Puppeteer (async implementation).
+
+    Args:
+        start_url: The URL to start crawling from
+        depth: How deep to follow links (1 = only start page)
+        breadth: Maximum number of pages to crawl
+
+    Returns:
+        List of page dicts with 'url', 'title', and 'markdown' keys
+    """
+    logger.info("Puppeteer crawl starting: url=%s, depth=%d, breadth=%d", start_url, depth, breadth)
+
+    visited = set()
+    pages = []
+    to_visit = [(start_url, 0)]  # (url, current_depth)
+
+    browser = None
+    try:
+        browser = await pyppeteer.launch(
+            headless=True,
+            args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+        )
+        page = await browser.newPage()
+        await page.setUserAgent(
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+            '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        )
+
+        while to_visit and len(pages) < breadth:
+            current_url, current_depth = to_visit.pop(0)
+
+            # Normalize URL and skip if already visited
+            parsed = urlparse(current_url)
+            normalized_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+            if normalized_url in visited:
+                continue
+            visited.add(normalized_url)
+
+            logger.info("Puppeteer crawling: %s (depth=%d)", current_url, current_depth)
+
+            try:
+                response = await page.goto(current_url, {
+                    'waitUntil': 'networkidle2',
+                    'timeout': 30000
+                })
+
+                if not response or response.status >= 400:
+                    logger.warning("Puppeteer: Failed to load %s (status=%s)",
+                                   current_url, response.status if response else 'no response')
+                    continue
+
+                # Get page title
+                title = await page.title() or ""
+
+                # Extract text content from body
+                content = await page.evaluate('''() => {
+                    // Remove script and style elements
+                    const scripts = document.querySelectorAll('script, style, noscript');
+                    scripts.forEach(el => el.remove());
+
+                    // Get text content
+                    const body = document.body;
+                    if (!body) return '';
+
+                    // Get text with some structure preserved
+                    function getText(element) {
+                        let text = '';
+                        for (const node of element.childNodes) {
+                            if (node.nodeType === Node.TEXT_NODE) {
+                                text += node.textContent.trim() + ' ';
+                            } else if (node.nodeType === Node.ELEMENT_NODE) {
+                                const tagName = node.tagName.toLowerCase();
+                                if (['h1', 'h2', 'h3', 'h4', 'h5', 'h6'].includes(tagName)) {
+                                    text += '\\n\\n## ' + getText(node) + '\\n\\n';
+                                } else if (['p', 'div', 'section', 'article'].includes(tagName)) {
+                                    text += getText(node) + '\\n\\n';
+                                } else if (tagName === 'li') {
+                                    text += '- ' + getText(node) + '\\n';
+                                } else if (tagName === 'br') {
+                                    text += '\\n';
+                                } else if (!['script', 'style', 'noscript'].includes(tagName)) {
+                                    text += getText(node);
+                                }
+                            }
+                        }
+                        return text;
+                    }
+
+                    return getText(body).replace(/\\n{3,}/g, '\\n\\n').trim();
+                }''')
+
+                if content:
+                    pages.append({
+                        'url': current_url,
+                        'title': title,
+                        'markdown': content
+                    })
+                    logger.info("Puppeteer: Extracted %d chars from %s", len(content), current_url)
+
+                # If we haven't reached max depth, extract links to follow
+                if current_depth < depth - 1 and len(pages) < breadth:
+                    links = await page.evaluate('''() => {
+                        const anchors = document.querySelectorAll('a[href]');
+                        return Array.from(anchors)
+                            .map(a => a.href)
+                            .filter(href => href && href.startsWith('http'));
+                    }''')
+
+                    # Filter to same domain and add to queue
+                    base_parsed = urlparse(start_url)
+                    for link in links:
+                        link_parsed = urlparse(link)
+                        if link_parsed.netloc == base_parsed.netloc:
+                            normalized_link = f"{link_parsed.scheme}://{link_parsed.netloc}{link_parsed.path}"
+                            if normalized_link not in visited:
+                                to_visit.append((link, current_depth + 1))
+
+            except Exception as page_exc:
+                logger.warning("Puppeteer: Error crawling %s: %s", current_url, page_exc)
+                continue
+
+        logger.info("Puppeteer crawl complete: %d pages extracted", len(pages))
+        return pages
+
+    finally:
+        if browser:
+            await browser.close()
+
+
+def puppeteer_crawl(start_url: str, depth: int, breadth: int) -> list[dict]:
+    """Crawl pages using Puppeteer (sync wrapper).
+
+    Args:
+        start_url: The URL to start crawling from
+        depth: How deep to follow links (1 = only start page)
+        breadth: Maximum number of pages to crawl
+
+    Returns:
+        List of page dicts with 'url', 'title', and 'markdown' keys
+    """
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(_puppeteer_crawl_async(start_url, depth, breadth))
+    finally:
+        loop.close()
 
 
 def download_pdf(url: str) -> bytes:
@@ -1409,29 +1560,56 @@ def crawl():
 
     logger.info("POST /crawl - Crawling URL: %s (depth=%d, breadth=%d)", url, depth, breadth)
 
+    pages = []
+    crawl_method = None
+    puppeteer_error = None
+
+    # Try Puppeteer first
+    logger.info("POST /crawl - Attempting Puppeteer crawl first")
     try:
-        crawl_result = firecrawl_client.crawl(
-            url=url,
-            limit=breadth,
-            max_discovery_depth=depth,
-        )
+        puppeteer_pages = puppeteer_crawl(url, depth, breadth)
+        if puppeteer_pages:
+            pages = puppeteer_pages
+            crawl_method = "puppeteer"
+            logger.info("POST /crawl - Puppeteer crawl succeeded with %d pages", len(pages))
+        else:
+            logger.warning("POST /crawl - Puppeteer returned no pages, falling back to Firecrawl")
+            puppeteer_error = "no pages returned"
     except Exception as exc:
-        logger.error("POST /crawl - Crawl failed for URL %s: %s", url, exc)
-        return jsonify({"error": f"crawl failed: {exc}"}), 500
+        logger.warning("POST /crawl - Puppeteer crawl failed: %s, falling back to Firecrawl", exc)
+        puppeteer_error = str(exc)
 
-    # Debug: log crawl result structure
-    logger.info("POST /crawl - crawl_result type: %s", type(crawl_result))
-    if hasattr(crawl_result, '__dict__'):
-        logger.info("POST /crawl - crawl_result attrs: %s", list(vars(crawl_result).keys()))
-    if hasattr(crawl_result, 'data'):
-        logger.info("POST /crawl - crawl_result.data: type=%s, len=%s",
-                   type(crawl_result.data), len(crawl_result.data) if crawl_result.data else 0)
-    if hasattr(crawl_result, 'status'):
-        logger.info("POST /crawl - crawl_result.status: %s", crawl_result.status)
+    # Fall back to Firecrawl if Puppeteer failed or returned no pages
+    if not pages:
+        logger.info("POST /crawl - Attempting Firecrawl as fallback")
+        try:
+            crawl_result = firecrawl_client.crawl(
+                url=url,
+                limit=breadth,
+                max_discovery_depth=depth,
+            )
 
-    pages = normalize_results(crawl_result)
+            # Debug: log crawl result structure
+            logger.info("POST /crawl - crawl_result type: %s", type(crawl_result))
+            if hasattr(crawl_result, '__dict__'):
+                logger.info("POST /crawl - crawl_result attrs: %s", list(vars(crawl_result).keys()))
+            if hasattr(crawl_result, 'data'):
+                logger.info("POST /crawl - crawl_result.data: type=%s, len=%s",
+                           type(crawl_result.data), len(crawl_result.data) if crawl_result.data else 0)
+            if hasattr(crawl_result, 'status'):
+                logger.info("POST /crawl - crawl_result.status: %s", crawl_result.status)
+
+            pages = normalize_results(crawl_result)
+            if pages:
+                crawl_method = "firecrawl"
+                logger.info("POST /crawl - Firecrawl succeeded with %d pages", len(pages))
+        except Exception as exc:
+            logger.error("POST /crawl - Firecrawl also failed for URL %s: %s", url, exc)
+            error_msg = f"crawl failed - puppeteer: {puppeteer_error}, firecrawl: {exc}"
+            return jsonify({"error": error_msg}), 500
+
     page_count = len(pages)
-    logger.info("POST /crawl - Crawl returned %d pages", page_count)
+    logger.info("POST /crawl - Crawl returned %d pages using %s", page_count, crawl_method)
 
     if page_count == 0:
         logger.warning("POST /crawl - Crawl returned 0 pages for URL: %s", url)
@@ -1442,17 +1620,36 @@ def crawl():
     for page in pages:
         if hasattr(page, "metadata") and page.metadata:
             page_url = getattr(page.metadata, "url", None)
+        elif isinstance(page, dict):
+            page_url = page.get("url")
         else:
             page_url = get_page_attr(page, "url")
         if page_url:
             urls_crawled.append(page_url)
 
-    combined_text = combine_pages(pages)
+    # Combine pages - handle both Puppeteer dicts and Firecrawl objects
+    if crawl_method == "puppeteer":
+        # Puppeteer returns dicts, combine directly
+        combined_parts = []
+        for p in pages:
+            title = p.get("title", "")
+            page_url = p.get("url", "")
+            content = p.get("markdown", "")
+            if content:
+                header = "Source"
+                if title:
+                    header = f"{title} | Source"
+                combined_parts.append(f"{header}: {page_url}\n{content}".strip())
+        combined_text = "\n\n".join(combined_parts).strip()
+    else:
+        combined_text = combine_pages(pages)
+
     if not combined_text:
         logger.warning("POST /crawl - Crawl returned no content for URL: %s", url)
         return jsonify({"error": "crawl returned no content"}), 400
 
-    logger.info("POST /crawl - Combined text length: %d characters from %d pages", len(combined_text), page_count)
+    logger.info("POST /crawl - Combined text length: %d characters from %d pages (method=%s)",
+                len(combined_text), page_count, crawl_method)
 
     return jsonify({
         "url": url,
@@ -1462,4 +1659,5 @@ def crawl():
         "urls_crawled": urls_crawled,
         "combined_text": combined_text,
         "text_length": len(combined_text),
+        "crawl_method": crawl_method,
     })
