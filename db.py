@@ -48,7 +48,7 @@ def get_embedding_model_name(database_name: str):
 
 @db_bp.get("/documents")
 def list_documents():
-    """List uploaded documents for a collection."""
+    """List documents in a MongoDB collection."""
     logger.info("GET /documents - Listing documents")
     database_name = request.args.get("database_name")
     collection_name = request.args.get("collection_name")
@@ -58,10 +58,10 @@ def list_documents():
         return jsonify({"error": "database_name and collection_name are required"}), 400
 
     logger.info("GET /documents - Querying %s.%s", database_name, collection_name)
-    wg_db = mongo_client[WEB_GATHER_DB]
+    db = mongo_client[database_name]
     docs = list(
-        wg_db[DOCUMENTS_COLLECTION].find(
-            {"database_name": database_name, "collection_name": collection_name},
+        db[collection_name].find(
+            {},
             {"_id": 0},
         )
     )
