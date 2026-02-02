@@ -17,6 +17,7 @@ from flask import Blueprint, jsonify, request
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
 
+from bson import ObjectId
 from db import (
     WEB_GATHER_DB,
     DOCUMENTS_COLLECTION,
@@ -1346,8 +1347,9 @@ def parse_llm():
     database = payload.get("database")
     collection = payload.get("collection")
     parse_prompt = payload.get("parse_prompt")
-    logger.info("POST /parse-llm - Parameters: database=%s, collection=%s, parse_prompt=%s",
-                database, collection, parse_prompt[:100] if parse_prompt else None)
+    document_id = payload.get("document_id")
+    logger.info("POST /parse-llm - Parameters: database=%s, collection=%s, parse_prompt=%s, document_id=%s",
+                database, collection, parse_prompt[:100] if parse_prompt else None, document_id)
 
     # Validate required parameters
     missing_params = []
@@ -1366,9 +1368,22 @@ def parse_llm():
 
     logger.info("POST /parse-llm - Reading documents from %s.%s", database, collection)
 
-    # Read all documents from the collection
+    # Read documents from the collection
     db = mongo_client[database]
-    documents = list(db[collection].find())
+    if document_id:
+        # Query for specific document by _id
+        try:
+            doc = db[collection].find_one({"_id": ObjectId(document_id)})
+        except Exception as e:
+            logger.warning("POST /parse-llm - Invalid document_id format: %s", document_id)
+            return jsonify({"error": f"Invalid document_id format: {document_id}"}), 400
+        if not doc:
+            logger.warning("POST /parse-llm - Document not found with _id: %s", document_id)
+            return jsonify({"error": f"Document not found with _id: {document_id}"}), 400
+        documents = [doc]
+    else:
+        # Query all documents in the collection
+        documents = list(db[collection].find())
 
     if not documents:
         logger.warning("POST /parse-llm - No documents found in %s.%s", database, collection)

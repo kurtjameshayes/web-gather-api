@@ -375,3 +375,128 @@ class TestParseLlm:
         # Sections should be sorted by line number
         assert data["parsed_doc"][0]["document_id"] == "first"
         assert data["parsed_doc"][1]["document_id"] == "second"
+
+    def test_parse_llm_with_document_id_success(self, client, mock_clients):
+        """Test successful LLM parsing with a specific document_id."""
+        from bson import ObjectId
+
+        # Arrange
+        test_object_id = ObjectId()
+        mock_collection = MagicMock()
+        mock_collection.find_one.return_value = {
+            "_id": test_object_id,
+            "text": "Specific document text content.",
+        }
+        mock_clients["mongo"].__getitem__.return_value.__getitem__.return_value = mock_collection
+
+        mock_response = create_tool_use_response([
+            {"document_id": "doc_001", "parsed_header_text": "Content", "start_line": 1},
+        ])
+        mock_stream = MagicMock()
+        mock_stream.get_final_message.return_value = mock_response
+        mock_clients["anthropic"].messages.stream.return_value.__enter__.return_value = mock_stream
+
+        # Act
+        response = client.post(
+            "/parse-llm",
+            json={
+                "database": "test_db",
+                "collection": "test_collection",
+                "parse_prompt": "Summarize the document",
+                "document_id": str(test_object_id),
+            },
+        )
+
+        # Assert
+        assert response.status_code == 200
+        data = response.get_json()
+        assert "parsed_doc" in data
+        assert len(data["parsed_doc"]) == 1
+        assert data["parsed_doc"][0]["document_id"] == "doc_001"
+
+        # Verify find_one was called with the ObjectId
+        mock_collection.find_one.assert_called_once()
+        call_args = mock_collection.find_one.call_args[0][0]
+        assert "_id" in call_args
+        assert call_args["_id"] == test_object_id
+
+        # Verify the specific document text is in the LLM input
+        call_args = mock_clients["anthropic"].messages.stream.call_args
+        user_message = call_args[1]["messages"][0]["content"]
+        assert "Specific document text content." in user_message
+
+    def test_parse_llm_with_document_id_not_found(self, client, mock_clients):
+        """Test error when document_id is not found in the collection."""
+        from bson import ObjectId
+
+        # Arrange
+        test_object_id = ObjectId()
+        mock_collection = MagicMock()
+        mock_collection.find_one.return_value = None
+        mock_clients["mongo"].__getitem__.return_value.__getitem__.return_value = mock_collection
+
+        # Act
+        response = client.post(
+            "/parse-llm",
+            json={
+                "database": "test_db",
+                "collection": "test_collection",
+                "parse_prompt": "Summarize",
+                "document_id": str(test_object_id),
+            },
+        )
+
+        # Assert
+        assert response.status_code == 400
+        data = response.get_json()
+        assert "error" in data
+        assert "not found" in data["error"].lower()
+
+    def test_parse_llm_with_invalid_document_id_format(self, client, mock_clients):
+        """Test error when document_id has invalid ObjectId format."""
+        # Act
+        response = client.post(
+            "/parse-llm",
+            json={
+                "database": "test_db",
+                "collection": "test_collection",
+                "parse_prompt": "Summarize",
+                "document_id": "invalid-object-id",
+            },
+        )
+
+        # Assert
+        assert response.status_code == 400
+        data = response.get_json()
+        assert "error" in data
+        assert "invalid" in data["error"].lower()
+
+    def test_parse_llm_with_document_id_no_text(self, client, mock_clients):
+        """Test error when document found by document_id has no text attribute."""
+        from bson import ObjectId
+
+        # Arrange
+        test_object_id = ObjectId()
+        mock_collection = MagicMock()
+        mock_collection.find_one.return_value = {
+            "_id": test_object_id,
+            "title": "Document without text",
+        }
+        mock_clients["mongo"].__getitem__.return_value.__getitem__.return_value = mock_collection
+
+        # Act
+        response = client.post(
+            "/parse-llm",
+            json={
+                "database": "test_db",
+                "collection": "test_collection",
+                "parse_prompt": "Summarize",
+                "document_id": str(test_object_id),
+            },
+        )
+
+        # Assert
+        assert response.status_code == 400
+        data = response.get_json()
+        assert "error" in data
+        assert "no text" in data["error"].lower()
