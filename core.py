@@ -1332,7 +1332,7 @@ def search():
     )
 
 
-@core_bp.post("/parse_llm")
+@core_bp.post("/parse-llm")
 def parse_llm():
     """Parse document text from a collection using LLM.
 
@@ -1340,13 +1340,13 @@ def parse_llm():
     all "text" attributes into one string, and uses this as input for the LLM
     along with the parse_prompt.
     """
-    logger.info("POST /parse_llm - Starting LLM document parsing")
+    logger.info("POST /parse-llm - Starting LLM document parsing")
     payload = request.get_json(silent=True) or {}
 
     database = payload.get("database")
     collection = payload.get("collection")
     parse_prompt = payload.get("parse_prompt")
-    logger.info("POST /parse_llm - Parameters: database=%s, collection=%s, parse_prompt=%s",
+    logger.info("POST /parse-llm - Parameters: database=%s, collection=%s, parse_prompt=%s",
                 database, collection, parse_prompt[:100] if parse_prompt else None)
 
     # Validate required parameters
@@ -1359,19 +1359,19 @@ def parse_llm():
         missing_params.append("parse_prompt")
 
     if missing_params:
-        logger.warning("POST /parse_llm - Missing required parameters: %s", ", ".join(missing_params))
+        logger.warning("POST /parse-llm - Missing required parameters: %s", ", ".join(missing_params))
         return jsonify({
             "error": f"Missing required parameters: {', '.join(missing_params)}"
         }), 400
 
-    logger.info("POST /parse_llm - Reading documents from %s.%s", database, collection)
+    logger.info("POST /parse-llm - Reading documents from %s.%s", database, collection)
 
     # Read all documents from the collection
     db = mongo_client[database]
     documents = list(db[collection].find())
 
     if not documents:
-        logger.warning("POST /parse_llm - No documents found in %s.%s", database, collection)
+        logger.warning("POST /parse-llm - No documents found in %s.%s", database, collection)
         return jsonify({"error": f"No documents found in {database}.{collection}"}), 400
 
     # Concatenate all "text" attributes
@@ -1382,11 +1382,11 @@ def parse_llm():
             text_parts.append(text.strip())
 
     if not text_parts:
-        logger.warning("POST /parse_llm - No text content found in documents")
+        logger.warning("POST /parse-llm - No text content found in documents")
         return jsonify({"error": "No text content found in documents"}), 400
 
     combined_text = "\n\n".join(text_parts)
-    logger.info("POST /parse_llm - Combined %d documents into %d characters",
+    logger.info("POST /parse-llm - Combined %d documents into %d characters",
                 len(text_parts), len(combined_text))
 
     # Split into lines and create numbered version for LLM
@@ -1454,7 +1454,7 @@ Use the identify_sections tool to report the sections you identified."""
     ]
 
     try:
-        logger.info("POST /parse_llm - Calling Anthropic API with tool use (model: claude-3-5-haiku-20241022)")
+        logger.info("POST /parse-llm - Calling Anthropic API with tool use (model: claude-3-5-haiku-20241022)")
         with anthropic_client.messages.stream(
             model="claude-3-5-haiku-20241022",
             max_tokens=4096,
@@ -1475,11 +1475,11 @@ Use the identify_sections tool to report the sections you identified."""
                 break
 
         if not tool_use_block:
-            logger.error("POST /parse_llm - LLM did not use the identify_sections tool")
+            logger.error("POST /parse-llm - LLM did not use the identify_sections tool")
             return jsonify({"error": "LLM did not return section identification"}), 500
 
         sections = tool_use_block.input.get("sections", [])
-        logger.info("POST /parse_llm - LLM identified %d sections", len(sections))
+        logger.info("POST /parse-llm - LLM identified %d sections", len(sections))
 
         # Sort sections by start_line
         sections.sort(key=lambda s: s.get("start_line", 0))
@@ -1508,11 +1508,11 @@ Use the identify_sections tool to report the sections you identified."""
                 "parsed_text": parsed_text
             })
 
-        logger.info("POST /parse_llm - Successfully parsed document into %d sections", len(parsed_doc))
+        logger.info("POST /parse-llm - Successfully parsed document into %d sections", len(parsed_doc))
         return jsonify({"parsed_doc": parsed_doc})
 
     except Exception as e:
-        logger.error("POST /parse_llm - LLM parsing failed: %s", e)
+        logger.error("POST /parse-llm - LLM parsing failed: %s", e)
         return jsonify({"error": f"LLM parsing failed: {str(e)}"}), 500
 
 

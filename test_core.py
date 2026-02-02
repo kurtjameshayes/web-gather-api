@@ -1,4 +1,4 @@
-"""Unit tests for parse_llm endpoint in core.py."""
+"""Unit tests for parse-llm endpoint in core.py."""
 import json
 import sys
 import pytest
@@ -53,7 +53,7 @@ def create_tool_use_response(sections):
 
 
 class TestParseLlm:
-    """Tests for the /parse_llm endpoint."""
+    """Tests for the /parse-llm endpoint."""
 
     def test_parse_llm_success(self, client, mock_clients):
         """Test successful LLM parsing with database and collection."""
@@ -77,7 +77,7 @@ class TestParseLlm:
 
         # Act
         response = client.post(
-            "/parse_llm",
+            "/parse-llm",
             json={
                 "database": "test_db",
                 "collection": "test_collection",
@@ -111,7 +111,7 @@ class TestParseLlm:
         """Test error when database parameter is missing."""
         # Act
         response = client.post(
-            "/parse_llm",
+            "/parse-llm",
             json={
                 "collection": "test_collection",
                 "parse_prompt": "Summarize",
@@ -128,7 +128,7 @@ class TestParseLlm:
         """Test error when collection parameter is missing."""
         # Act
         response = client.post(
-            "/parse_llm",
+            "/parse-llm",
             json={
                 "database": "test_db",
                 "parse_prompt": "Summarize",
@@ -145,7 +145,7 @@ class TestParseLlm:
         """Test error when parse_prompt parameter is missing."""
         # Act
         response = client.post(
-            "/parse_llm",
+            "/parse-llm",
             json={
                 "database": "test_db",
                 "collection": "test_collection",
@@ -167,7 +167,7 @@ class TestParseLlm:
 
         # Act
         response = client.post(
-            "/parse_llm",
+            "/parse-llm",
             json={
                 "database": "test_db",
                 "collection": "empty_collection",
@@ -193,7 +193,7 @@ class TestParseLlm:
 
         # Act
         response = client.post(
-            "/parse_llm",
+            "/parse-llm",
             json={
                 "database": "test_db",
                 "collection": "test_collection",
@@ -226,7 +226,7 @@ class TestParseLlm:
 
         # Act
         response = client.post(
-            "/parse_llm",
+            "/parse-llm",
             json={
                 "database": "test_db",
                 "collection": "test_collection",
@@ -258,7 +258,7 @@ class TestParseLlm:
 
         # Act
         response = client.post(
-            "/parse_llm",
+            "/parse-llm",
             json={
                 "database": "test_db",
                 "collection": "test_collection",
@@ -290,7 +290,7 @@ class TestParseLlm:
 
         # Act
         response = client.post(
-            "/parse_llm",
+            "/parse-llm",
             json={
                 "database": "test_db",
                 "collection": "test_collection",
@@ -324,7 +324,7 @@ class TestParseLlm:
 
         # Act
         response = client.post(
-            "/parse_llm",
+            "/parse-llm",
             json={
                 "database": "test_db",
                 "collection": "test_collection",
@@ -361,7 +361,7 @@ class TestParseLlm:
 
         # Act
         response = client.post(
-            "/parse_llm",
+            "/parse-llm",
             json={
                 "database": "test_db",
                 "collection": "test_collection",
