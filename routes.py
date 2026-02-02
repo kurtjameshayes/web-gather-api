@@ -699,7 +699,7 @@ def build_openapi_spec():
             "/parse-llm": {
                 "post": {
                     "summary": "Parse document text from a collection using LLM",
-                    "description": "Reads all records from the specified database/collection, concatenates all 'text' attributes into one string, and uses this as input for the LLM along with the parse_prompt. Returns structured JSON with parsed sections.",
+                    "description": "Reads records from the specified database/collection and uses this as input for the LLM along with the parse_prompt. If document_id is provided, only that specific document is parsed; otherwise, all documents in the collection are concatenated. Returns structured JSON with parsed sections.",
                     "requestBody": {
                         "required": True,
                         "content": {
@@ -718,6 +718,10 @@ def build_openapi_spec():
                                         "parse_prompt": {
                                             "type": "string",
                                             "description": "Instructions for how to parse the combined document text",
+                                        },
+                                        "document_id": {
+                                            "type": "string",
+                                            "description": "Optional MongoDB ObjectId of a specific document to parse. If not provided, all documents in the collection are concatenated for parsing.",
                                         },
                                     },
                                     "required": ["database", "collection", "parse_prompt"],
