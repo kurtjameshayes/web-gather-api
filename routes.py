@@ -696,7 +696,7 @@ def build_openapi_spec():
                     "responses": {"200": {"description": "Embedding model saved"}},
                 },
             },
-            "/parse_llm": {
+            "/parse-llm": {
                 "post": {
                     "summary": "Parse document text from a collection using LLM",
                     "description": "Reads all records from the specified database/collection, concatenates all 'text' attributes into one string, and uses this as input for the LLM along with the parse_prompt. Returns structured JSON with parsed sections.",
