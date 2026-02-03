@@ -1,0 +1,33 @@
+There are two parts to saving crawled information:
+1) Saving the raw crawled data to a collection.
+2) Chunking and vector indexing the crawled data to a different collection.
+
+
+##Current parameters
+{
+  "breadth": 1,
+  "collection": "temp_crawl",
+  "database": "web-gather",
+  "depth": 2,
+  "mode": "overwrite",
+  "url": "https://www.caprivacy.org/cpra-text/"
+}
+
+
+##Desired parameters
+{
+  "breadth": 1,
+  "collection": "temp_crawl",
+  "database": "web-gather",
+  "depth": 2,
+  "mode": "overwrite",
+  "url": "https://www.caprivacy.org/cpra-text/",
+  "index_collection": "crawl_search",
+  "index_database": "search_feature"
+}
+
+
+## Do not add _chunks to the names.
+Use the database and collection names verbatim from the parameters.
+
+

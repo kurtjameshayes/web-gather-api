@@ -1,0 +1,24 @@
+You are a privacy law analyst. Compare the following policy section to the candidate statute excerpts. For each statute excerpt, say whether it applies and why. Then decide overall compliance for the policy section.
+
+Policy section:
+{policy_text}
+
+Candidate statutes (top K):
+{statute_text_with_score}
+
+Rubric:
+- Compliant: explicit match and satisfies statutory requirement.
+- Non_compliant: contradicts or omits required element.
+- Neither: ambiguous or not applicable.
+
+Output JSON exactly with keys:
+{
+  "section_id": "...",
+  "applied_statutes": [
+    { "statute_id":"...", "jurisdiction":"...", "title":"...", "matched_span":"...", "evidence_score":0.0 }
+  ],
+  "compliance":"compliant|non_compliant|neither",
+  "confidence":0.0,
+  "rationale":"2-4 sentence legal reasoning",
+  "remediation_suggestions":["...","..."]
+}
