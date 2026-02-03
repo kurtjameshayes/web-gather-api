@@ -278,21 +278,62 @@ def build_openapi_spec():
             "/documents": {
                 "get": {
                     "summary": "List uploaded documents for a collection",
+                    "description": "Retrieve documents from a MongoDB collection. Optionally filter results using a MongoDB query.",
                     "parameters": [
                         {
                             "name": "database_name",
                             "in": "query",
                             "required": True,
                             "schema": {"type": "string"},
+                            "description": "The name of the database",
                         },
                         {
                             "name": "collection_name",
                             "in": "query",
                             "required": True,
                             "schema": {"type": "string"},
+                            "description": "The name of the collection",
+                        },
+                        {
+                            "name": "query",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "string"},
+                            "description": "MongoDB query as JSON string to filter documents (e.g., '{\"status\": \"active\"}' or '{\"age\": {\"$gt\": 25}}')",
                         },
                     ],
-                    "responses": {"200": {"description": "Documents list"}},
+                    "responses": {
+                        "200": {
+                            "description": "Documents list",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "documents": {
+                                                "type": "array",
+                                                "items": {"type": "object"},
+                                                "description": "List of documents matching the query",
+                                            }
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                        "400": {
+                            "description": "Bad request - missing required parameters or invalid query JSON",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "error": {"type": "string"},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                    },
                 }
             },
             "/databases": {

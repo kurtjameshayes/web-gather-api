@@ -2,6 +2,7 @@
 
 Includes functionality for endpoints: all-collections, all-databases, collections, count-documents, databases, documents, and write_to_collection.
 """
+import json
 import logging
 from datetime import datetime, timezone
 
@@ -52,16 +53,29 @@ def list_documents():
     logger.info("GET /documents - Listing documents")
     database_name = request.args.get("database_name")
     collection_name = request.args.get("collection_name")
-    logger.info("GET /documents - Parameters: database_name=%s, collection_name=%s", database_name, collection_name)
+    query_param = request.args.get("query")
+    logger.info("GET /documents - Parameters: database_name=%s, collection_name=%s, query=%s", database_name, collection_name, query_param)
     if not database_name or not collection_name:
         logger.warning("GET /documents - Missing required parameters")
         return jsonify({"error": "database_name and collection_name are required"}), 400
 
-    logger.info("GET /documents - Querying %s.%s", database_name, collection_name)
+    # Parse the query parameter if provided
+    mongo_query = {}
+    if query_param:
+        try:
+            mongo_query = json.loads(query_param)
+            if not isinstance(mongo_query, dict):
+                logger.warning("GET /documents - Query must be a JSON object")
+                return jsonify({"error": "query must be a JSON object"}), 400
+        except json.JSONDecodeError as e:
+            logger.warning("GET /documents - Invalid JSON in query parameter: %s", str(e))
+            return jsonify({"error": f"Invalid JSON in query parameter: {str(e)}"}), 400
+
+    logger.info("GET /documents - Querying %s.%s with query: %s", database_name, collection_name, mongo_query)
     db = mongo_client[database_name]
     docs = list(
         db[collection_name].find(
-            {},
+            mongo_query,
             {"_id": 0},
         )
     )
