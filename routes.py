@@ -344,7 +344,68 @@ def build_openapi_spec():
                             },
                         },
                     },
-                }
+                },
+                "delete": {
+                    "summary": "Delete documents from a collection",
+                    "description": "Delete documents from a MongoDB collection. Optionally filter deletions using a MongoDB query.",
+                    "parameters": [
+                        {
+                            "name": "database_name",
+                            "in": "query",
+                            "required": True,
+                            "schema": {"type": "string"},
+                            "description": "The name of the database",
+                        },
+                        {
+                            "name": "collection_name",
+                            "in": "query",
+                            "required": True,
+                            "schema": {"type": "string"},
+                            "description": "The name of the collection",
+                        },
+                        {
+                            "name": "query",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "string"},
+                            "description": "MongoDB query as JSON string to filter documents (e.g., '{\"status\": \"inactive\"}' or '{\"age\": {\"$lt\": 18}}')",
+                        },
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Deletion result",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "database_name": {"type": "string"},
+                                            "collection_name": {"type": "string"},
+                                            "deleted_count": {
+                                                "type": "integer",
+                                                "description": "Number of documents deleted",
+                                            },
+                                            "message": {"type": "string"},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                        "400": {
+                            "description": "Bad request - missing required parameters or invalid query JSON",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "error": {"type": "string"},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                    },
+                },
             },
             "/databases": {
                 "get": {
@@ -622,6 +683,12 @@ def build_openapi_spec():
                                         "index_collection_name": {
                                             "type": "string",
                                             "description": "The indexed data will be written to this collection",
+                                        },
+                                        "source_query": {
+                                            "type": "string",
+                                            "description": (
+                                                "Optional Mongo query as JSON text to filter source rows"
+                                            ),
                                         },
                                     },
                                     "required": [
