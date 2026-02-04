@@ -11,7 +11,11 @@ def build_openapi_spec():
         "info": {
             "title": "Web Gather API",
             "version": "1.0.0",
-            "description": "Gather, load, index, and search web documents. The /ingest endpoint loads documents only - use /index separately to create vector embeddings.",
+            "description": (
+                "Gather, load, index, and search web documents. The /ingest "
+                "endpoint loads documents only - use /vector-index separately "
+                "to create vector embeddings."
+            ),
         },
         "components": {
             "schemas": {
@@ -217,7 +221,13 @@ def build_openapi_spec():
             "/ingest": {
                 "post": {
                     "summary": "Load a document by crawling a URL or parsing a PDF",
-                    "description": "Supports both web pages (crawled via Firecrawl) and PDF files (downloaded and parsed). PDF files are automatically detected by URL extension or Content-Type header. Use /index endpoint separately to create vector embeddings.",
+                    "description": (
+                        "Supports both web pages (crawled via Firecrawl) and PDF "
+                        "files (downloaded and parsed). PDF files are "
+                        "automatically detected by URL extension or Content-Type "
+                        "header. Use /vector-index endpoint separately to "
+                        "create vector embeddings."
+                    ),
                     "requestBody": {
                         "required": True,
                         "content": {
@@ -586,7 +596,7 @@ def build_openapi_spec():
                     },
                 }
             },
-            "/index": {
+            "/vector-index": {
                 "post": {
                     "summary": "Index collection rows by chunk_text",
                     "description": "Index all rows in a source collection by embedding the chunk_text field and writing the results to an index collection. The embedding model is determined by the index_database_name.",

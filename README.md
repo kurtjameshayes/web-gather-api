@@ -78,7 +78,7 @@ pytest
 - `GET /documents`
 - `GET /collections`
 - `GET /count-documents`
-- `POST /index`
+- `POST /vector-index`
 - `POST /search`
 - `GET /embedding-models`
 - `POST /embedding-models`

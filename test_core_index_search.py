@@ -60,7 +60,7 @@ def _wire_mongo(mock_mongo: MagicMock) -> Dict[str, MagicMock]:
 
 
 def test_index_missing_required_params(client, mock_clients) -> None:
-    response = client.post("/index", json={})
+    response = client.post("/vector-index", json={})
     assert response.status_code == 400
     payload = response.get_json()
     assert "Missing required parameters" in payload["error"]
@@ -69,7 +69,7 @@ def test_index_embedding_model_not_configured(client, mock_clients) -> None:
     _wire_mongo(mock_clients["mongo"])
     with patch("core.get_embedding_model_name", return_value=None):
         response = client.post(
-            "/index",
+            "/vector-index",
             json={
                 "source_database_name": "src",
                 "source_collection_name": "docs",
@@ -97,7 +97,7 @@ def test_index_success(client, mock_clients) -> None:
         "core.get_model", return_value=DummyModel()
     ):
         response = client.post(
-            "/index",
+            "/vector-index",
             json={
                 "source_database_name": "src",
                 "source_collection_name": "docs",

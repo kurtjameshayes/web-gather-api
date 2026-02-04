@@ -1102,7 +1102,10 @@ def ingest():
         "database_name": database_name,
         "collection_name": collection_name,
         "mode": mode,
-        "message": "Document loaded successfully. Use /index endpoint to create vector embeddings.",
+        "message": (
+            "Document loaded successfully. Use /vector-index endpoint to create "
+            "vector embeddings."
+        ),
     }
 
     if mode == "overwrite":
@@ -1113,10 +1116,10 @@ def ingest():
     return jsonify(response_data)
 
 
-@core_bp.post("/index")
+@core_bp.post("/vector-index")
 def index_document():
     """Index collection rows using the chunk_text field."""
-    logger.info("POST /index - Starting document indexing")
+    logger.info("POST /vector-index - Starting document indexing")
     payload = request.get_json(silent=True) or {}
 
     # Get required parameters
@@ -1125,9 +1128,15 @@ def index_document():
     index_database_name = payload.get("index_database_name")
     index_collection_name = payload.get("index_collection_name")
 
-    logger.info("POST /index - Parameters: source_database_name=%s, source_collection_name=%s, "
-                "index_database_name=%s, index_collection_name=%s",
-                source_database_name, source_collection_name, index_database_name, index_collection_name)
+    logger.info(
+        "POST /vector-index - Parameters: source_database_name=%s, "
+        "source_collection_name=%s, index_database_name=%s, "
+        "index_collection_name=%s",
+        source_database_name,
+        source_collection_name,
+        index_database_name,
+        index_collection_name,
+    )
 
     # Validate required parameters
     missing_params = []
@@ -1141,18 +1150,32 @@ def index_document():
         missing_params.append("index_collection_name")
 
     if missing_params:
-        logger.warning("POST /index - Missing required parameters: %s", ", ".join(missing_params))
+        logger.warning(
+            "POST /vector-index - Missing required parameters: %s",
+            ", ".join(missing_params),
+        )
         return jsonify({
             "error": f"Missing required parameters: {', '.join(missing_params)}"
         }), 400
 
-    logger.info("POST /index - Source: %s.%s", source_database_name, source_collection_name)
-    logger.info("POST /index - Index target: %s.%s", index_database_name, index_collection_name)
+    logger.info(
+        "POST /vector-index - Source: %s.%s",
+        source_database_name,
+        source_collection_name,
+    )
+    logger.info(
+        "POST /vector-index - Index target: %s.%s",
+        index_database_name,
+        index_collection_name,
+    )
 
     # Check if embedding model is configured for index_database_name
     model_name = get_embedding_model_name(index_database_name)
     if not model_name:
-        logger.error("POST /index - No embedding model configured for database: %s", index_database_name)
+        logger.error(
+            "POST /vector-index - No embedding model configured for database: %s",
+            index_database_name,
+        )
         return jsonify({
             "error": f"No embedding model configured for index_database_name '{index_database_name}'. "
                      f"Use POST /embedding-models to configure one."
@@ -1161,8 +1184,11 @@ def index_document():
     source_db = mongo_client[source_database_name]
     source_docs = list(source_db[source_collection_name].find())
     if not source_docs:
-        logger.warning("POST /index - No documents found in %s.%s",
-                       source_database_name, source_collection_name)
+        logger.warning(
+            "POST /vector-index - No documents found in %s.%s",
+            source_database_name,
+            source_collection_name,
+        )
         return jsonify({
             "error": f"No documents found in {source_database_name}.{source_collection_name}"
         }), 404
@@ -1180,14 +1206,20 @@ def index_document():
         chunk_texts.append(chunk_text)
 
     if not docs_to_index:
-        logger.warning("POST /index - No rows with chunk_text found in %s.%s",
-                       source_database_name, source_collection_name)
+        logger.warning(
+            "POST /vector-index - No rows with chunk_text found in %s.%s",
+            source_database_name,
+            source_collection_name,
+        )
         return jsonify({"error": "no rows with chunk_text to index"}), 400
 
-    logger.info("POST /index - Loading embedding model: %s", model_name)
+    logger.info("POST /vector-index - Loading embedding model: %s", model_name)
     model = get_model(model_name)
 
-    logger.info("POST /index - Generating embeddings for %d rows", len(chunk_texts))
+    logger.info(
+        "POST /vector-index - Generating embeddings for %d rows",
+        len(chunk_texts),
+    )
     embeddings = model.encode(
         chunk_texts, convert_to_numpy=True, normalize_embeddings=True
     )
@@ -1215,9 +1247,13 @@ def index_document():
                 },
             )
     else:
-        logger.info("POST /index - Clearing existing index rows for %s.%s in %s.%s",
-                    source_database_name, source_collection_name,
-                    index_database_name, index_collection_name)
+        logger.info(
+            "POST /vector-index - Clearing existing index rows for %s.%s in %s.%s",
+            source_database_name,
+            source_collection_name,
+            index_database_name,
+            index_collection_name,
+        )
         index_collection.delete_many({
             "source_database_name": source_database_name,
             "source_collection_name": source_collection_name,
@@ -1236,11 +1272,18 @@ def index_document():
                     "source_collection_name": source_collection_name,
                 }
             )
-        logger.info("POST /index - Inserting %d rows into %s.%s",
-                    len(index_docs), index_database_name, index_collection_name)
+        logger.info(
+            "POST /vector-index - Inserting %d rows into %s.%s",
+            len(index_docs),
+            index_database_name,
+            index_collection_name,
+        )
         index_collection.insert_many(index_docs)
 
-    logger.info("POST /index - Successfully indexed %d rows", len(docs_to_index))
+    logger.info(
+        "POST /vector-index - Successfully indexed %d rows",
+        len(docs_to_index),
+    )
     return jsonify(
         {
             "source_database_name": source_database_name,

@@ -25,7 +25,7 @@ This document is derived from the current codebase behavior and structure.
 
 ### 2) Document Indexing & Vector Search
 
-- FR-2.1 Document Indexing (`POST /index`)
+- FR-2.1 Document Indexing (`POST /vector-index`)
   - Generate vector embeddings from ingested documents.
   - Support chunking strategies: character, sentence, paragraph, semantic.
   - Configurable `chunk_size` and `chunk_overlap`.
