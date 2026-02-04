@@ -73,12 +73,10 @@ def list_documents():
 
     logger.info("GET /documents - Querying %s.%s with query: %s", database_name, collection_name, mongo_query)
     db = mongo_client[database_name]
-    docs = list(
-        db[collection_name].find(
-            mongo_query,
-            {"_id": 0},
-        )
-    )
+    docs = list(db[collection_name].find(mongo_query))
+    for doc in docs:
+        if "_id" in doc:
+            doc["_id"] = str(doc["_id"])
     logger.info("GET /documents - Found %d documents", len(docs))
     return jsonify({"documents": docs})
 

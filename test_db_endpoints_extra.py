@@ -6,6 +6,7 @@ from typing import Any, Dict
 from unittest.mock import MagicMock
 
 import pytest
+from bson import ObjectId
 from flask import Flask
 
 from db import DOCUMENTS_COLLECTION, WEB_GATHER_DB, db_bp, init_db
@@ -45,9 +46,11 @@ def _wire_mongo(mock_mongo: MagicMock) -> Dict[str, Any]:
 
 def test_list_documents_success(client, mock_mongo_client) -> None:
     dbs = _wire_mongo(mock_mongo_client)
+    first_id = ObjectId()
+    second_id = ObjectId()
     dbs["user_db"].__getitem__.return_value.find.return_value = [
-        {"name": "doc1"},
-        {"name": "doc2"},
+        {"_id": first_id, "name": "doc1"},
+        {"_id": second_id, "name": "doc2"},
     ]
     response = client.get(
         "/documents?database_name=test_db&collection_name=test_collection"
@@ -55,6 +58,8 @@ def test_list_documents_success(client, mock_mongo_client) -> None:
     assert response.status_code == 200
     payload = response.get_json()
     assert len(payload["documents"]) == 2
+    assert payload["documents"][0]["_id"] == str(first_id)
+    assert payload["documents"][1]["_id"] == str(second_id)
 
 
 def test_list_documents_invalid_query_json(client, mock_mongo_client) -> None:
