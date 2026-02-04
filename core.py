@@ -1115,56 +1115,19 @@ def ingest():
 
 @core_bp.post("/index")
 def index_document():
-    """Index a document by id."""
+    """Index collection rows using the chunk_text field."""
     logger.info("POST /index - Starting document indexing")
     payload = request.get_json(silent=True) or {}
 
     # Get required parameters
     source_database_name = payload.get("source_database_name")
     source_collection_name = payload.get("source_collection_name")
-    source_document_id = payload.get("source_document_id")
     index_database_name = payload.get("index_database_name")
     index_collection_name = payload.get("index_collection_name")
 
-    # Get optional indexing parameters with defaults
-    chunk_size = payload.get("chunk_size", DEFAULT_CHUNK_SIZE)
-    chunk_overlap = payload.get("chunk_overlap", DEFAULT_CHUNK_OVERLAP)
-    splitting_strategy = payload.get("splitting_strategy", DEFAULT_SPLITTING_STRATEGY)
-
     logger.info("POST /index - Parameters: source_database_name=%s, source_collection_name=%s, "
-                "source_document_id=%s, index_database_name=%s, index_collection_name=%s, "
-                "chunk_size=%s, chunk_overlap=%s, splitting_strategy=%s",
-                source_database_name, source_collection_name, source_document_id,
-                index_database_name, index_collection_name, chunk_size, chunk_overlap, splitting_strategy)
-
-    # Validate chunk_size and chunk_overlap are positive integers
-    try:
-        chunk_size = int(chunk_size)
-        if chunk_size <= 0:
-            raise ValueError("chunk_size must be positive")
-    except (TypeError, ValueError) as e:
-        logger.warning("POST /index - Invalid chunk_size: %s", chunk_size)
-        return jsonify({"error": f"chunk_size must be a positive integer: {e}"}), 400
-
-    try:
-        chunk_overlap = int(chunk_overlap)
-        if chunk_overlap < 0:
-            raise ValueError("chunk_overlap must be non-negative")
-    except (TypeError, ValueError) as e:
-        logger.warning("POST /index - Invalid chunk_overlap: %s", chunk_overlap)
-        return jsonify({"error": f"chunk_overlap must be a non-negative integer: {e}"}), 400
-
-    # Validate chunk_overlap is less than chunk_size
-    if chunk_overlap >= chunk_size:
-        logger.warning("POST /index - chunk_overlap (%d) must be less than chunk_size (%d)", chunk_overlap, chunk_size)
-        return jsonify({"error": "chunk_overlap must be less than chunk_size"}), 400
-
-    # Validate splitting_strategy
-    if splitting_strategy not in SPLITTING_STRATEGIES:
-        logger.warning("POST /index - Invalid splitting_strategy: %s", splitting_strategy)
-        return jsonify({
-            "error": f"Invalid splitting_strategy '{splitting_strategy}'. Must be one of: {', '.join(SPLITTING_STRATEGIES.keys())}"
-        }), 400
+                "index_database_name=%s, index_collection_name=%s",
+                source_database_name, source_collection_name, index_database_name, index_collection_name)
 
     # Validate required parameters
     missing_params = []
@@ -1183,24 +1146,8 @@ def index_document():
             "error": f"Missing required parameters: {', '.join(missing_params)}"
         }), 400
 
-    # If source_document_id not provided, use first document in collection
-    if not source_document_id:
-        source_db = mongo_client[source_database_name]
-        first_doc = source_db[source_collection_name].find_one()
-        if not first_doc:
-            logger.warning("POST /index - No documents found in %s.%s",
-                           source_database_name, source_collection_name)
-            return jsonify({
-                "error": f"No documents found in {source_database_name}.{source_collection_name}"
-            }), 404
-        source_document_id = first_doc["_id"]
-        logger.info("POST /index - No source_document_id provided, using first document: %s", source_document_id)
-
-    logger.info("POST /index - Source: %s.%s, Document ID: %s",
-                source_database_name, source_collection_name, source_document_id)
+    logger.info("POST /index - Source: %s.%s", source_database_name, source_collection_name)
     logger.info("POST /index - Index target: %s.%s", index_database_name, index_collection_name)
-    logger.info("POST /index - Indexing parameters: chunk_size=%d, chunk_overlap=%d, splitting_strategy=%s",
-                chunk_size, chunk_overlap, splitting_strategy)
 
     # Check if embedding model is configured for index_database_name
     model_name = get_embedding_model_name(index_database_name)
@@ -1211,52 +1158,98 @@ def index_document():
                      f"Use POST /embedding-models to configure one."
         }), 400
 
-    # Fetch the source document
     source_db = mongo_client[source_database_name]
-    document = source_db[source_collection_name].find_one({"_id": source_document_id})
-    if not document:
-        logger.warning("POST /index - Document not found: %s in %s.%s",
-                       source_document_id, source_database_name, source_collection_name)
+    source_docs = list(source_db[source_collection_name].find())
+    if not source_docs:
+        logger.warning("POST /index - No documents found in %s.%s",
+                       source_database_name, source_collection_name)
         return jsonify({
-            "error": f"Document not found: {source_document_id} in {source_database_name}.{source_collection_name}"
+            "error": f"No documents found in {source_database_name}.{source_collection_name}"
         }), 404
 
-    text = document.get("text", "")
-    if not text:
-        logger.warning("POST /index - Document has no text content: %s", source_document_id)
-        return jsonify({"error": "document has no content"}), 400
+    docs_to_index = []
+    chunk_texts = []
+    skipped_rows = 0
+    for doc in source_docs:
+        raw_chunk_text = doc.get("chunk_text")
+        chunk_text = str(raw_chunk_text) if raw_chunk_text is not None else ""
+        if not chunk_text.strip():
+            skipped_rows += 1
+            continue
+        docs_to_index.append(doc)
+        chunk_texts.append(chunk_text)
 
-    # Use shared indexing function with separate source and index parameters
-    index_result = index_document_chunks(
-        document_id=source_document_id,
-        text=text,
-        database_name=source_database_name,
-        collection_name=source_collection_name,
-        index_database_name=index_database_name,
-        index_collection_name=index_collection_name,
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        splitting_strategy=splitting_strategy,
+    if not docs_to_index:
+        logger.warning("POST /index - No rows with chunk_text found in %s.%s",
+                       source_database_name, source_collection_name)
+        return jsonify({"error": "no rows with chunk_text to index"}), 400
+
+    logger.info("POST /index - Loading embedding model: %s", model_name)
+    model = get_model(model_name)
+
+    logger.info("POST /index - Generating embeddings for %d rows", len(chunk_texts))
+    embeddings = model.encode(
+        chunk_texts, convert_to_numpy=True, normalize_embeddings=True
     )
 
-    if not index_result:
-        logger.error("POST /index - Indexing failed for document: %s", source_document_id)
-        return jsonify({"error": "indexing failed"}), 500
+    index_db = mongo_client[index_database_name]
+    index_collection = index_db[index_collection_name]
+    same_target = (
+        source_database_name == index_database_name
+        and source_collection_name == index_collection_name
+    )
 
-    logger.info("POST /index - Successfully indexed document: %s", source_document_id)
+    if same_target:
+        for doc, embedding, chunk_text in zip(docs_to_index, embeddings, chunk_texts):
+            index_collection.update_one(
+                {"_id": doc["_id"]},
+                {
+                    "$set": {
+                        "embedding": embedding.tolist(),
+                        "chunk_text": chunk_text,
+                        "indexed_at": utc_now(),
+                        "source_id": str(doc.get("_id")),
+                        "source_database_name": source_database_name,
+                        "source_collection_name": source_collection_name,
+                    }
+                },
+            )
+    else:
+        logger.info("POST /index - Clearing existing index rows for %s.%s in %s.%s",
+                    source_database_name, source_collection_name,
+                    index_database_name, index_collection_name)
+        index_collection.delete_many({
+            "source_database_name": source_database_name,
+            "source_collection_name": source_collection_name,
+        })
+        index_docs = []
+        for doc, embedding, chunk_text in zip(docs_to_index, embeddings, chunk_texts):
+            base_doc = {key: value for key, value in doc.items() if key != "_id"}
+            index_docs.append(
+                {
+                    **base_doc,
+                    "source_id": str(doc.get("_id")),
+                    "chunk_text": chunk_text,
+                    "embedding": embedding.tolist(),
+                    "indexed_at": utc_now(),
+                    "source_database_name": source_database_name,
+                    "source_collection_name": source_collection_name,
+                }
+            )
+        logger.info("POST /index - Inserting %d rows into %s.%s",
+                    len(index_docs), index_database_name, index_collection_name)
+        index_collection.insert_many(index_docs)
+
+    logger.info("POST /index - Successfully indexed %d rows", len(docs_to_index))
     return jsonify(
         {
             "source_database_name": source_database_name,
             "source_collection_name": source_collection_name,
-            "source_document_id": source_document_id,
             "index_database_name": index_database_name,
             "index_collection_name": index_collection_name,
-            "chunks_indexed": index_result["chunks_indexed"],
-            "embedding_model": index_result["embedding_model"],
-            "chunk_collection": index_result["chunk_collection"],
-            "chunk_size": index_result["chunk_size"],
-            "chunk_overlap": index_result["chunk_overlap"],
-            "splitting_strategy": index_result["splitting_strategy"],
+            "chunks_indexed": len(docs_to_index),
+            "skipped_rows": skipped_rows,
+            "embedding_model": model_name,
         }
     )
 

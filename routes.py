@@ -588,8 +588,8 @@ def build_openapi_spec():
             },
             "/index": {
                 "post": {
-                    "summary": "Index a document by id",
-                    "description": "Index a document from a source collection and write the indexed chunks to an index collection. The embedding model is determined by the index_database_name. Supports configurable chunk size, overlap, and splitting strategy.",
+                    "summary": "Index collection rows by chunk_text",
+                    "description": "Index all rows in a source collection by embedding the chunk_text field and writing the results to an index collection. The embedding model is determined by the index_database_name.",
                     "requestBody": {
                         "required": True,
                         "content": {
@@ -605,10 +605,6 @@ def build_openapi_spec():
                                             "type": "string",
                                             "description": "The name of the collection containing the data to be indexed",
                                         },
-                                        "source_document_id": {
-                                            "type": "string",
-                                            "description": "The id of the document within the source collection. If not provided, defaults to the first document in the collection.",
-                                        },
                                         "index_database_name": {
                                             "type": "string",
                                             "description": "The database of the index collection",
@@ -616,24 +612,6 @@ def build_openapi_spec():
                                         "index_collection_name": {
                                             "type": "string",
                                             "description": "The indexed data will be written to this collection",
-                                        },
-                                        "chunk_size": {
-                                            "type": "integer",
-                                            "description": "Maximum size of each text chunk in characters (default: 1200)",
-                                            "default": 1200,
-                                            "minimum": 1,
-                                        },
-                                        "chunk_overlap": {
-                                            "type": "integer",
-                                            "description": "Number of characters to overlap between consecutive chunks (default: 200). Must be less than chunk_size.",
-                                            "default": 200,
-                                            "minimum": 0,
-                                        },
-                                        "splitting_strategy": {
-                                            "type": "string",
-                                            "description": "Strategy for splitting text into chunks: 'character' (fixed-size), 'sentence' (sentence boundaries), 'paragraph' (paragraph boundaries), or 'semantic' (embedding-based semantic boundaries). Default: 'character'",
-                                            "enum": ["character", "sentence", "paragraph", "semantic"],
-                                            "default": "character",
                                         },
                                     },
                                     "required": [
@@ -656,24 +634,11 @@ def build_openapi_spec():
                                         "properties": {
                                             "source_database_name": {"type": "string"},
                                             "source_collection_name": {"type": "string"},
-                                            "source_document_id": {"type": "string"},
                                             "index_database_name": {"type": "string"},
                                             "index_collection_name": {"type": "string"},
                                             "chunks_indexed": {"type": "integer"},
                                             "embedding_model": {"type": "string"},
-                                            "chunk_collection": {"type": "string"},
-                                            "chunk_size": {
-                                                "type": "integer",
-                                                "description": "The chunk size used for indexing",
-                                            },
-                                            "chunk_overlap": {
-                                                "type": "integer",
-                                                "description": "The chunk overlap used for indexing",
-                                            },
-                                            "splitting_strategy": {
-                                                "type": "string",
-                                                "description": "The splitting strategy used for indexing",
-                                            },
+                                            "skipped_rows": {"type": "integer"},
                                         },
                                     }
                                 }

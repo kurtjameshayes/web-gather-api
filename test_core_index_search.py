@@ -65,24 +65,6 @@ def test_index_missing_required_params(client, mock_clients) -> None:
     payload = response.get_json()
     assert "Missing required parameters" in payload["error"]
 
-
-def test_index_invalid_overlap(client, mock_clients) -> None:
-    response = client.post(
-        "/index",
-        json={
-            "source_database_name": "src",
-            "source_collection_name": "docs",
-            "index_database_name": "index_db",
-            "index_collection_name": "chunks",
-            "chunk_size": 100,
-            "chunk_overlap": 100,
-        },
-    )
-    assert response.status_code == 400
-    payload = response.get_json()
-    assert "chunk_overlap must be less than chunk_size" in payload["error"]
-
-
 def test_index_embedding_model_not_configured(client, mock_clients) -> None:
     _wire_mongo(mock_clients["mongo"])
     with patch("core.get_embedding_model_name", return_value=None):
@@ -102,20 +84,17 @@ def test_index_embedding_model_not_configured(client, mock_clients) -> None:
 
 def test_index_success(client, mock_clients) -> None:
     dbs = _wire_mongo(mock_clients["mongo"])
-    dbs["source_db"].__getitem__.return_value.find_one.return_value = {
-        "_id": "doc-1",
-        "text": "Sample text",
-    }
+    dbs["source_db"].__getitem__.return_value.find.return_value = [
+        {"_id": "row-1", "chunk_text": "Sample text"},
+        {"_id": "row-2", "chunk_text": "More text"},
+    ]
+
+    class DummyModel:
+        def encode(self, inputs, **kwargs: object) -> np.ndarray:
+            return np.array([[1.0, 0.0] for _ in inputs])
+
     with patch("core.get_embedding_model_name", return_value="model"), patch(
-        "core.index_document_chunks",
-        return_value={
-            "chunks_indexed": 2,
-            "embedding_model": "model",
-            "chunk_collection": "chunks",
-            "chunk_size": 1200,
-            "chunk_overlap": 200,
-            "splitting_strategy": "character",
-        },
+        "core.get_model", return_value=DummyModel()
     ):
         response = client.post(
             "/index",
@@ -124,7 +103,6 @@ def test_index_success(client, mock_clients) -> None:
                 "source_collection_name": "docs",
                 "index_database_name": "index_db",
                 "index_collection_name": "chunks",
-                "source_document_id": "doc-1",
             },
         )
     assert response.status_code == 200
