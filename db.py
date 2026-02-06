@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from bson import ObjectId
 from bson.errors import InvalidId
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, Response, jsonify, request
 
 logger = logging.getLogger("web-gather-api")
 
@@ -79,6 +79,63 @@ def list_documents():
             doc["_id"] = str(doc["_id"])
     logger.info("GET /documents - Found %d documents", len(docs))
     return jsonify({"documents": docs})
+
+
+@db_bp.delete("/documents")
+def delete_documents() -> Response:
+    """Delete documents in a MongoDB collection."""
+    logger.info("DELETE /documents - Deleting documents")
+    database_name = request.args.get("database_name")
+    collection_name = request.args.get("collection_name")
+    query_param = request.args.get("query")
+    logger.info(
+        "DELETE /documents - Parameters: database_name=%s, collection_name=%s, "
+        "query=%s",
+        database_name,
+        collection_name,
+        query_param,
+    )
+
+    if not database_name or not collection_name:
+        logger.warning("DELETE /documents - Missing required parameters")
+        return jsonify({"error": "database_name and collection_name are required"}), 400
+
+    mongo_query = {}
+    if query_param:
+        try:
+            mongo_query = json.loads(query_param)
+            if not isinstance(mongo_query, dict):
+                logger.warning("DELETE /documents - Query must be a JSON object")
+                return jsonify({"error": "query must be a JSON object"}), 400
+        except json.JSONDecodeError as exc:
+            logger.warning(
+                "DELETE /documents - Invalid JSON in query parameter: %s",
+                str(exc),
+            )
+            return (
+                jsonify({"error": f"Invalid JSON in query parameter: {str(exc)}"}),
+                400,
+            )
+
+    logger.info(
+        "DELETE /documents - Deleting from %s.%s with query: %s",
+        database_name,
+        collection_name,
+        mongo_query,
+    )
+    db = mongo_client[database_name]
+    result = db[collection_name].delete_many(mongo_query)
+    logger.info(
+        "DELETE /documents - Deleted %d documents",
+        result.deleted_count,
+    )
+
+    return jsonify({
+        "database_name": database_name,
+        "collection_name": collection_name,
+        "deleted_count": result.deleted_count,
+        "message": "Documents deleted successfully",
+    })
 
 
 @db_bp.get("/databases")

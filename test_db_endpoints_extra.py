@@ -71,6 +71,39 @@ def test_list_documents_invalid_query_json(client, mock_mongo_client) -> None:
     assert "Invalid JSON" in payload["error"]
 
 
+def test_delete_documents_success(client, mock_mongo_client) -> None:
+    dbs = _wire_mongo(mock_mongo_client)
+    delete_result = MagicMock()
+    delete_result.deleted_count = 3
+    dbs["user_db"].__getitem__.return_value.delete_many.return_value = delete_result
+    response = client.delete(
+        "/documents?database_name=test_db&collection_name=test_collection"
+        "&query=%7B%22status%22%3A%20%22inactive%22%7D"
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["deleted_count"] == 3
+    dbs["user_db"].__getitem__.return_value.delete_many.assert_called_with(
+        {"status": "inactive"}
+    )
+
+
+def test_delete_documents_invalid_query_json(client, mock_mongo_client) -> None:
+    response = client.delete(
+        "/documents?database_name=test_db&collection_name=test_collection&query={bad}"
+    )
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert "Invalid JSON" in payload["error"]
+
+
+def test_delete_documents_missing_params(client, mock_mongo_client) -> None:
+    response = client.delete("/documents")
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert "database_name" in payload["error"]
+
+
 def test_list_collections_success(client, mock_mongo_client) -> None:
     dbs = _wire_mongo(mock_mongo_client)
     dbs["wg_db"].__getitem__.return_value.distinct.return_value = [

@@ -825,7 +825,9 @@ def build_openapi_spec():
                                                 "items": {
                                                     "type": "object",
                                                     "properties": {
-                                                        "document_id": {"type": "string"},
+                                                        "section": {"type": "string"},
+                                                        "code_name": {"type": "string"},
+                                                        "jurisdiction": {"type": "string"},
                                                         "parsed_header_text": {"type": "string"},
                                                         "parsed_text": {"type": "string"},
                                                     },

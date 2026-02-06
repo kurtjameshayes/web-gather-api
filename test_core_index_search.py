@@ -82,6 +82,51 @@ def test_index_embedding_model_not_configured(client, mock_clients) -> None:
     assert "embedding model" in payload["error"]
 
 
+def test_index_invalid_source_query(client, mock_clients) -> None:
+    _wire_mongo(mock_clients["mongo"])
+    response = client.post(
+        "/vector-index",
+        json={
+            "source_database_name": "src",
+            "source_collection_name": "docs",
+            "index_database_name": "index_db",
+            "index_collection_name": "chunks",
+            "source_query": "{not-json}",
+        },
+    )
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert "source_query" in payload["error"]
+
+
+def test_index_applies_source_query(client, mock_clients) -> None:
+    dbs = _wire_mongo(mock_clients["mongo"])
+    source_collection = dbs["source_db"].__getitem__.return_value
+    source_collection.find.return_value = [
+        {"_id": "row-1", "chunk_text": "Sample text"},
+    ]
+
+    class DummyModel:
+        def encode(self, inputs, **kwargs: object) -> np.ndarray:
+            return np.array([[1.0, 0.0] for _ in inputs])
+
+    with patch("core.get_embedding_model_name", return_value="model"), patch(
+        "core.get_model", return_value=DummyModel()
+    ):
+        response = client.post(
+            "/vector-index",
+            json={
+                "source_database_name": "src",
+                "source_collection_name": "docs",
+                "index_database_name": "index_db",
+                "index_collection_name": "chunks",
+                "source_query": '{"document_id": "doc-1"}',
+            },
+        )
+    assert response.status_code == 200
+    source_collection.find.assert_called_once_with({"document_id": "doc-1"})
+
+
 def test_index_success(client, mock_clients) -> None:
     dbs = _wire_mongo(mock_clients["mongo"])
     dbs["source_db"].__getitem__.return_value.find.return_value = [

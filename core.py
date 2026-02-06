@@ -1127,6 +1127,31 @@ def index_document():
     source_collection_name = payload.get("source_collection_name")
     index_database_name = payload.get("index_database_name")
     index_collection_name = payload.get("index_collection_name")
+    source_query_param = payload.get("source_query")
+
+    source_query = {}
+    if source_query_param is not None:
+        if isinstance(source_query_param, dict):
+            source_query = source_query_param
+        elif isinstance(source_query_param, str):
+            try:
+                source_query = json.loads(source_query_param)
+            except json.JSONDecodeError as exc:
+                logger.warning(
+                    "POST /vector-index - Invalid JSON in source_query: %s",
+                    str(exc),
+                )
+                return (
+                    jsonify({"error": f"Invalid JSON in source_query: {str(exc)}"}),
+                    400,
+                )
+        else:
+            logger.warning("POST /vector-index - source_query must be a JSON object")
+            return jsonify({"error": "source_query must be a JSON object"}), 400
+
+        if not isinstance(source_query, dict):
+            logger.warning("POST /vector-index - source_query must be a JSON object")
+            return jsonify({"error": "source_query must be a JSON object"}), 400
 
     logger.info(
         "POST /vector-index - Parameters: source_database_name=%s, "
@@ -1137,6 +1162,13 @@ def index_document():
         index_database_name,
         index_collection_name,
     )
+    if source_query:
+        logger.info(
+            "POST /vector-index - source_query for %s.%s: %s",
+            source_database_name,
+            source_collection_name,
+            source_query,
+        )
 
     # Validate required parameters
     missing_params = []
@@ -1182,7 +1214,7 @@ def index_document():
         }), 400
 
     source_db = mongo_client[source_database_name]
-    source_docs = list(source_db[source_collection_name].find())
+    source_docs = list(source_db[source_collection_name].find(source_query))
     if not source_docs:
         logger.warning(
             "POST /vector-index - No documents found in %s.%s",
@@ -1445,16 +1477,53 @@ def parse_llm():
     numbered_lines = [f"{i + 1}: {line}" for i, line in enumerate(lines)]
     numbered_text = "\n".join(numbered_lines)
 
-    system_prompt = """You are a document parsing assistant. Your task is to identify section boundaries in documents according to specific instructions.
+    system_prompt = """You are a legal text parser specializing in statutory interpretation.
 
-You will be given a document with line numbers. Your job is to identify where each section begins by providing:
-- A document_id for each section
-- A parsed_header_text that describes/titles the section
-- The start_line number (1-indexed) where that section begins
+Task:
+Parse the provided legal statute into a structured, machine-readable format by
+identifying and extracting its hierarchical sections.
 
-Each section is assumed to run from its start_line to the line before the next section's start_line (or end of document for the last section).
+Instructions:
+- Preserve the original statutory language verbatim.
+- Do NOT summarize, paraphrase, or interpret the text.
+- Do NOT infer missing structure; rely only on explicit markers in the text.
+- Maintain the original order of sections.
 
-Use the identify_sections tool to report your findings."""
+Identify and extract the following elements when present:
+- Jurisdiction (e.g., California, United States)
+- Code name (e.g., Civil Code, Health and Safety Code)
+- Section citation (e.g., § 1798.100)
+- Title or Act name
+- Chapter or Division
+- Article
+- Section number
+- Subsection (e.g., (a), (b), (1), (A))
+- Heading or caption
+- Body text
+
+Output Format:
+Return a JSON array where each object represents the smallest logical statutory
+unit (typically a section or subsection).
+
+Each object must include:
+- "jurisdiction": string
+- "code_name": string
+- "level": one of ["title", "chapter", "article", "section", "subsection"]
+- "identifier": the official number or label (e.g., "§ 1798.100", "(a)",
+  "Chapter 3")
+- "heading": the heading text if present, otherwise null
+- "text": the full statutory text for that unit
+- "parent_identifier": the identifier of the immediately enclosing unit, or
+  null if top-level
+
+The document includes line numbers at the start of each line. Use those line
+numbers to identify section boundaries. Call the identify_sections tool and
+return an array of sections with:
+- section
+- code_name
+- jurisdiction
+- parsed_header_text
+- start_line (1-indexed)."""
 
     user_message = f"""Analyze the following document and identify the section boundaries according to the parsing instructions.
 
@@ -1482,9 +1551,17 @@ Use the identify_sections tool to report the sections you identified."""
                         "items": {
                             "type": "object",
                             "properties": {
-                                "document_id": {
+                                "section": {
                                     "type": "string",
-                                    "description": "A unique identifier for this section"
+                                    "description": "The formal section citation (e.g., \u00a7 1798.100)"
+                                },
+                                "code_name": {
+                                    "type": "string",
+                                    "description": "The legal code name (e.g., Civil Code)"
+                                },
+                                "jurisdiction": {
+                                    "type": "string",
+                                    "description": "The jurisdiction for this section (e.g., California)"
                                 },
                                 "parsed_header_text": {
                                     "type": "string",
@@ -1495,7 +1572,13 @@ Use the identify_sections tool to report the sections you identified."""
                                     "description": "The 1-indexed line number where this section begins"
                                 }
                             },
-                            "required": ["document_id", "parsed_header_text", "start_line"]
+                            "required": [
+                                "section",
+                                "code_name",
+                                "jurisdiction",
+                                "parsed_header_text",
+                                "start_line"
+                            ]
                         }
                     }
                 },
@@ -1554,7 +1637,9 @@ Use the identify_sections tool to report the sections you identified."""
             parsed_text = "\n".join(section_lines).strip()
 
             parsed_doc.append({
-                "document_id": section.get("document_id", f"section_{i + 1}"),
+                "section": section.get("section"),
+                "code_name": section.get("code_name"),
+                "jurisdiction": section.get("jurisdiction"),
                 "parsed_header_text": section.get("parsed_header_text", ""),
                 "parsed_text": parsed_text
             })

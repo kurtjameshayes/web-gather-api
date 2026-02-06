@@ -68,8 +68,20 @@ class TestParseLlm:
 
         # Create mock tool response - sections start at lines 1 and 3 (with blank line between docs)
         mock_response = create_tool_use_response([
-            {"document_id": "doc_001", "parsed_header_text": "First Section", "start_line": 1},
-            {"document_id": "doc_002", "parsed_header_text": "Second Section", "start_line": 3},
+            {
+                "section": "\u00a7 1",
+                "code_name": "Civil Code",
+                "jurisdiction": "California",
+                "parsed_header_text": "First Section",
+                "start_line": 1,
+            },
+            {
+                "section": "\u00a7 2",
+                "code_name": "Civil Code",
+                "jurisdiction": "California",
+                "parsed_header_text": "Second Section",
+                "start_line": 3,
+            },
         ])
         mock_stream = MagicMock()
         mock_stream.get_final_message.return_value = mock_response
@@ -90,7 +102,7 @@ class TestParseLlm:
         data = response.get_json()
         assert "parsed_doc" in data
         assert len(data["parsed_doc"]) == 2
-        assert data["parsed_doc"][0]["document_id"] == "doc_001"
+        assert data["parsed_doc"][0]["section"] == "\u00a7 1"
         assert data["parsed_doc"][0]["parsed_header_text"] == "First Section"
 
         # Verify the collection was queried
@@ -103,6 +115,12 @@ class TestParseLlm:
         assert "Second document text." in user_message
         assert "Third document text." in user_message
         assert "Summarize the documents" in user_message
+        system_prompt = call_args[1]["system"]
+        assert "legal text parser specializing in statutory interpretation" in system_prompt
+        assert "Output Format" in system_prompt
+        assert "line numbers at the start of each line" in system_prompt
+        assert "identify_sections tool" in system_prompt
+        assert "start_line (1-indexed)" in system_prompt
         # Verify tools were passed
         assert "tools" in call_args[1]
         assert call_args[1]["tools"][0]["name"] == "identify_sections"
@@ -217,8 +235,20 @@ class TestParseLlm:
 
         # LLM identifies two sections: lines 1-2 and lines 3-5
         mock_response = create_tool_use_response([
-            {"document_id": "section_1", "parsed_header_text": "First Part", "start_line": 1},
-            {"document_id": "section_2", "parsed_header_text": "Second Part", "start_line": 3},
+            {
+                "section": "\u00a7 1",
+                "code_name": "Civil Code",
+                "jurisdiction": "California",
+                "parsed_header_text": "First Part",
+                "start_line": 1,
+            },
+            {
+                "section": "\u00a7 2",
+                "code_name": "Civil Code",
+                "jurisdiction": "California",
+                "parsed_header_text": "Second Part",
+                "start_line": 3,
+            },
         ])
         mock_stream = MagicMock()
         mock_stream.get_final_message.return_value = mock_response
@@ -316,7 +346,13 @@ class TestParseLlm:
         mock_clients["mongo"].__getitem__.return_value.__getitem__.return_value = mock_collection
 
         mock_response = create_tool_use_response([
-            {"document_id": "section_1", "parsed_header_text": "All Content", "start_line": 1},
+            {
+                "section": "\u00a7 1",
+                "code_name": "Civil Code",
+                "jurisdiction": "California",
+                "parsed_header_text": "All Content",
+                "start_line": 1,
+            },
         ])
         mock_stream = MagicMock()
         mock_stream.get_final_message.return_value = mock_response
@@ -352,8 +388,20 @@ class TestParseLlm:
 
         # LLM returns sections out of order
         mock_response = create_tool_use_response([
-            {"document_id": "second", "parsed_header_text": "Second", "start_line": 3},
-            {"document_id": "first", "parsed_header_text": "First", "start_line": 1},
+            {
+                "section": "\u00a7 2",
+                "code_name": "Civil Code",
+                "jurisdiction": "California",
+                "parsed_header_text": "Second",
+                "start_line": 3,
+            },
+            {
+                "section": "\u00a7 1",
+                "code_name": "Civil Code",
+                "jurisdiction": "California",
+                "parsed_header_text": "First",
+                "start_line": 1,
+            },
         ])
         mock_stream = MagicMock()
         mock_stream.get_final_message.return_value = mock_response
@@ -373,8 +421,8 @@ class TestParseLlm:
         assert response.status_code == 200
         data = response.get_json()
         # Sections should be sorted by line number
-        assert data["parsed_doc"][0]["document_id"] == "first"
-        assert data["parsed_doc"][1]["document_id"] == "second"
+        assert data["parsed_doc"][0]["section"] == "\u00a7 1"
+        assert data["parsed_doc"][1]["section"] == "\u00a7 2"
 
     def test_parse_llm_with_document_id_success(self, client, mock_clients):
         """Test successful LLM parsing with a specific document_id."""
@@ -390,7 +438,13 @@ class TestParseLlm:
         mock_clients["mongo"].__getitem__.return_value.__getitem__.return_value = mock_collection
 
         mock_response = create_tool_use_response([
-            {"document_id": "doc_001", "parsed_header_text": "Content", "start_line": 1},
+            {
+                "section": "\u00a7 1",
+                "code_name": "Civil Code",
+                "jurisdiction": "California",
+                "parsed_header_text": "Content",
+                "start_line": 1,
+            },
         ])
         mock_stream = MagicMock()
         mock_stream.get_final_message.return_value = mock_response
@@ -412,7 +466,7 @@ class TestParseLlm:
         data = response.get_json()
         assert "parsed_doc" in data
         assert len(data["parsed_doc"]) == 1
-        assert data["parsed_doc"][0]["document_id"] == "doc_001"
+        assert data["parsed_doc"][0]["section"] == "\u00a7 1"
 
         # Verify find_one was called with the ObjectId
         mock_collection.find_one.assert_called_once()
