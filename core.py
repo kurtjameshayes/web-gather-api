@@ -2,6 +2,8 @@
 
 Includes endpoints: gather, ingest, parse-llm, search, index, and crawl.
 """
+from __future__ import annotations
+
 import asyncio
 import io
 import json
