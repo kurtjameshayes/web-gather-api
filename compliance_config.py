@@ -76,6 +76,20 @@ class ComplianceConfig:
     embedding_model_name: str
     llm_model_name: str
     statute_collection_tag: str
+    # Compliance suite (gap analysis, health score, drift)
+    compliance_database: str
+    policies_collection: str
+    policy_chunks_collection: str
+    statute_chunk_header_field: str
+    compliance_results_collection: str
+    compliance_alerts_collection: str
+    compliance_run_log_collection: str
+    statute_index_version_field: str
+    default_jurisdictions: List[str]
+    conflict_penalty_multiplier: float
+    requirement_weights: Dict[str, float]
+    canonical_requirement_ids: List[str]
+    disclosure_queries: List[str]
 
 
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -114,8 +128,33 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "allowed_roles": ["admin", "compliance"],
     "default_role_header": "x-role",
     "embedding_model_name": "all-MiniLM-L6-v2",
-    "llm_model_name": "claude-3-5-haiku-20241022",
+    "llm_model_name": "claude-3-5-sonnet-20241022",
     "statute_collection_tag": "statutes",
+    # Compliance suite
+    "compliance_database": "privacy-compliance",
+    "policies_collection": "policies",
+    "policy_chunks_collection": "policy_chunks",
+    "statute_chunk_header_field": "chunk_header_text",
+    "compliance_results_collection": "compliance_results",
+    "compliance_alerts_collection": "compliance_alerts",
+    "compliance_run_log_collection": "compliance_run_log",
+    "statute_index_version_field": "indexed_at",
+    "default_jurisdictions": ["CA", "VA", "CO", "CT"],
+    "conflict_penalty_multiplier": 0.7,
+    "requirement_weights": {},
+    "canonical_requirement_ids": [
+        "right_to_know",
+        "right_to_delete",
+        "opt_out_of_sale",
+        "sensitive_data",
+        "non_discrimination",
+    ],
+    "disclosure_queries": [
+        "right to know what personal information is collected",
+        "right to delete personal information",
+        "opt out of sale of personal data",
+        "sensitive data disclosure and consent",
+    ],
 }
 
 
@@ -225,4 +264,19 @@ def load_config() -> ComplianceConfig:
         embedding_model_name=data["embedding_model_name"],
         llm_model_name=data["llm_model_name"],
         statute_collection_tag=data["statute_collection_tag"],
+        compliance_database=data.get("compliance_database", DEFAULT_CONFIG["compliance_database"]),
+        policies_collection=data.get("policies_collection", DEFAULT_CONFIG["policies_collection"]),
+        policy_chunks_collection=data.get("policy_chunks_collection", DEFAULT_CONFIG["policy_chunks_collection"]),
+        statute_chunk_header_field=data.get("statute_chunk_header_field", DEFAULT_CONFIG["statute_chunk_header_field"]),
+        compliance_results_collection=data.get("compliance_results_collection", DEFAULT_CONFIG["compliance_results_collection"]),
+        compliance_alerts_collection=data.get("compliance_alerts_collection", DEFAULT_CONFIG["compliance_alerts_collection"]),
+        compliance_run_log_collection=data.get("compliance_run_log_collection", DEFAULT_CONFIG["compliance_run_log_collection"]),
+        statute_index_version_field=data.get("statute_index_version_field", DEFAULT_CONFIG["statute_index_version_field"]),
+        default_jurisdictions=data.get("default_jurisdictions", DEFAULT_CONFIG["default_jurisdictions"]),
+        conflict_penalty_multiplier=_to_float(
+            os.getenv("COMPLIANCE_CONFLICT_PENALTY"), data.get("conflict_penalty_multiplier", DEFAULT_CONFIG["conflict_penalty_multiplier"])
+        ),
+        requirement_weights=data.get("requirement_weights", DEFAULT_CONFIG["requirement_weights"]) or {},
+        canonical_requirement_ids=data.get("canonical_requirement_ids", DEFAULT_CONFIG["canonical_requirement_ids"]),
+        disclosure_queries=data.get("disclosure_queries", DEFAULT_CONFIG["disclosure_queries"]),
     )
