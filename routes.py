@@ -21,32 +21,86 @@ def build_openapi_spec():
             "schemas": {
                 "ConfidenceThresholds": {
                     "type": "object",
+                    "description": "Minimum confidence scores (0-1) for compliant and non_compliant determinations.",
                     "properties": {
-                        "compliant": {"type": "number", "minimum": 0, "maximum": 1},
-                        "non_compliant": {"type": "number", "minimum": 0, "maximum": 1},
+                        "compliant": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1,
+                            "default": 0.75,
+                            "description": "Lower bound for a compliant determination (0-1).",
+                        },
+                        "non_compliant": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1,
+                            "default": 0.75,
+                            "description": "Lower bound for a non-compliant determination (0-1).",
+                        },
                     },
-                    "required": ["compliant", "non_compliant"],
                 },
                 "ComplianceOptions": {
                     "type": "object",
+                    "description": "Request options for explainability and PII redaction.",
                     "properties": {
-                        "explainability": {"type": "boolean"},
-                        "redact_pii": {"type": "boolean"},
+                        "explainability": {
+                            "type": "boolean",
+                            "default": True,
+                            "description": "Include rationale and remediation suggestions in the response.",
+                        },
+                        "redact_pii": {
+                            "type": "boolean",
+                            "default": True,
+                            "description": "Redact PII in returned text.",
+                        },
                     },
                 },
                 "PolicyStatuteComplianceRequest": {
                     "type": "object",
-                    "description": "Either policy_id or text must be provided.",
+                    "description": "Request body for policy statute compliance. Either policy_id or text must be provided.",
                     "properties": {
-                        "database": {"type": "string"},
-                        "policy_collection": {"type": "string"},
-                        "policy_id": {"type": "string", "nullable": True},
-                        "text": {"type": "string", "nullable": True},
-                        "jurisdiction": {"type": "string"},
-                        "statute_corpus_id": {"type": "string", "nullable": True},
-                        "top_k_statutes": {"type": "integer", "minimum": 1, "maximum": 50},
-                        "confidence_thresholds": {"$ref": "#/components/schemas/ConfidenceThresholds"},
-                        "options": {"$ref": "#/components/schemas/ComplianceOptions"},
+                        "database": {
+                            "type": "string",
+                            "description": "MongoDB database name containing the policy document.",
+                        },
+                        "policy_collection": {
+                            "type": "string",
+                            "description": "Collection name that holds the policy document.",
+                        },
+                        "policy_id": {
+                            "type": "string",
+                            "nullable": True,
+                            "description": "Document ID of the policy in the database. Required if text is not provided.",
+                        },
+                        "text": {
+                            "type": "string",
+                            "nullable": True,
+                            "description": "Raw policy text when not using a stored document. Required if policy_id is not provided.",
+                        },
+                        "jurisdiction": {
+                            "type": "string",
+                            "description": "Jurisdiction for statute comparison (e.g. GDPR, CCPA).",
+                        },
+                        "statute_corpus_id": {
+                            "type": "string",
+                            "nullable": True,
+                            "description": "Identifier for which statute corpus to use.",
+                        },
+                        "top_k_statutes": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 50,
+                            "description": "Maximum number of statute candidates to consider (1-50).",
+                            "example": 50,
+                        },
+                        "confidence_thresholds": {
+                            "$ref": "#/components/schemas/ConfidenceThresholds",
+                            "description": "Optional thresholds for compliant/non-compliant confidence.",
+                        },
+                        "options": {
+                            "$ref": "#/components/schemas/ComplianceOptions",
+                            "description": "Optional request options (explainability, redact_pii).",
+                        },
                     },
                     "required": ["database", "policy_collection", "jurisdiction"],
                 },
@@ -851,7 +905,24 @@ def build_openapi_spec():
                         "required": True,
                         "content": {
                             "application/json": {
-                                "schema": {"$ref": "#/components/schemas/PolicyStatuteComplianceRequest"}
+                                "schema": {"$ref": "#/components/schemas/PolicyStatuteComplianceRequest"},
+                                "example": {
+                                    "database": "string",
+                                    "policy_collection": "string",
+                                    "policy_id": "string",
+                                    "text": "string",
+                                    "jurisdiction": "string",
+                                    "statute_corpus_id": "string",
+                                    "top_k_statutes": 50,
+                                    "confidence_thresholds": {
+                                        "compliant": 1,
+                                        "non_compliant": 1,
+                                    },
+                                    "options": {
+                                        "explainability": True,
+                                        "redact_pii": True,
+                                    },
+                                },
                             }
                         },
                     },
