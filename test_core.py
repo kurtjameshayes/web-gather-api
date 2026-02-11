@@ -1,4 +1,6 @@
 """Unit tests for parse-llm endpoint in core.py."""
+from __future__ import annotations
+
 import json
 import sys
 import pytest

@@ -2,6 +2,8 @@
 
 Includes endpoints: embedding-models POST and GET.
 """
+from __future__ import annotations
+
 import logging
 
 from flask import Blueprint, jsonify, request

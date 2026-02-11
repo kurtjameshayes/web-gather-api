@@ -1,0 +1,159 @@
+"""Pydantic request/response models for the compliance suite API (gap analysis, health score, drift, etc.)."""
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel, Field, model_validator
+
+
+# ----- Applicability (6.1) -----
+
+
+class ApplicabilityRequest(BaseModel):
+    policy_document_id: Optional[str] = None
+    text: Optional[str] = None
+    database: Optional[str] = None
+    policy_collection: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_source(self) -> "ApplicabilityRequest":
+        if not self.policy_document_id and not self.text:
+            raise ValueError("Either policy_document_id or text must be provided.")
+        return self
+
+
+class ApplicabilityResponse(BaseModel):
+    applicable_jurisdictions: List[str] = Field(default_factory=list)
+    confidence: Optional[Dict[str, float]] = None
+
+
+# ----- Gap Analysis (2.x) -----
+
+
+class GapItem(BaseModel):
+    jurisdiction: str
+    statute_reference: str
+    requirement_summary: str
+    status: str = Field(..., pattern="^(missing|addressed|conflict)$")
+    policy_quote: Optional[str] = None
+    conflict_description: Optional[str] = None
+    analysis_failed: bool = False
+
+
+class GapSummary(BaseModel):
+    total_requirements: int = 0
+    missing: int = 0
+    addressed: int = 0
+    conflicts: int = 0
+
+
+class GapAnalysisRequest(BaseModel):
+    policy_document_id: Optional[str] = None
+    company_name: Optional[str] = None
+    applicable_jurisdictions: Optional[List[str]] = None
+    database: Optional[str] = None
+    policy_collection: Optional[str] = None
+
+
+class GapAnalysisResponse(BaseModel):
+    policy_document_id: str
+    company_name: Optional[str] = None
+    applicable_jurisdictions: List[str] = Field(default_factory=list)
+    analyzed_at: str  # ISO8601
+    gaps: List[GapItem] = Field(default_factory=list)
+    summary: GapSummary = Field(default_factory=GapSummary)
+
+
+# ----- Multi-Jurisdictional (3.x) -----
+
+
+class StrictestDenominatorItem(BaseModel):
+    canonical_requirement_id: str
+    label: str
+    strictest_jurisdiction: str
+    strictest_description: str
+    all_jurisdictions: List[str] = Field(default_factory=list)
+    policy_alignment: str = Field(
+        default="not_provided",
+        pattern="^(satisfies_all|satisfies_strictest_only|conflict_between_jurisdictions|not_provided|unclear)$",
+    )
+    policy_note: Optional[str] = None
+
+
+class ConflictBetweenJurisdictionsItem(BaseModel):
+    canonical_requirement_id: str
+    jurisdiction_a: str
+    jurisdiction_b: str
+    conflict_summary: str
+
+
+class MultiJurisdictionalRequest(BaseModel):
+    applicable_jurisdictions: List[str] = Field(..., min_length=1)
+    policy_document_id: Optional[str] = None
+    database: Optional[str] = None
+    policy_collection: Optional[str] = None
+
+
+class MultiJurisdictionalResponse(BaseModel):
+    applicable_jurisdictions: List[str] = Field(default_factory=list)
+    analyzed_at: str  # ISO8601
+    strictest_common_denominator: List[StrictestDenominatorItem] = Field(default_factory=list)
+    conflicts_between_jurisdictions: List[ConflictBetweenJurisdictionsItem] = Field(default_factory=list)
+
+
+# ----- Health Score (4.x) -----
+
+
+class HealthScoreRequest(BaseModel):
+    policy_document_id: str = Field(..., min_length=1)
+    applicable_jurisdictions: Optional[List[str]] = None
+    weights: Optional[Dict[str, float]] = None
+    database: Optional[str] = None
+    policy_collection: Optional[str] = None
+
+
+class HealthScoreResponse(BaseModel):
+    policy_document_id: str
+    company_name: Optional[str] = None
+    privacy_health_score: Optional[int] = None  # 0-100 or null if error
+    score_breakdown: Dict[str, Any] = Field(default_factory=dict)  # by_jurisdiction, by_category
+    components: Dict[str, Any] = Field(default_factory=dict)
+    analyzed_at: str  # ISO8601
+    error: Optional[str] = None  # e.g. "no_applicable_statutes", "insufficient_analysis"
+
+
+# ----- Drift (5.x) -----
+
+
+class DriftGapItem(BaseModel):
+    jurisdiction: str
+    requirement_summary: str
+    statute_reference: str
+
+
+class DriftAlertItem(BaseModel):
+    alert_id: str
+    type: str = "regulatory_drift"
+    policy_document_id: str
+    company_name: Optional[str] = None
+    trigger: str
+    affected_jurisdictions: List[str] = Field(default_factory=list)
+    new_gaps: List[DriftGapItem] = Field(default_factory=list)
+    resolved_gaps: List[DriftGapItem] = Field(default_factory=list)
+    score_delta: Optional[int] = None
+    previous_score: Optional[int] = None
+    current_score: Optional[int] = None
+    detected_at: str  # ISO8601
+
+
+class DriftCheckRequest(BaseModel):
+    since: Optional[str] = None  # ISO8601 timestamp
+    policy_document_ids: Optional[List[str]] = None
+    full_rebaseline: bool = False
+
+
+class DriftCheckResponse(BaseModel):
+    alerts: List[DriftAlertItem] = Field(default_factory=list)
+    policies_checked: int = 0
+    alerts_written: int = 0
