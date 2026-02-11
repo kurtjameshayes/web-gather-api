@@ -95,4 +95,5 @@ pytest
 - `POST /search`
 - `GET /embedding-models`
 - `POST /embedding-models`
+- `POST /create-vector-index` (create Atlas vector index from web-gather embedding_model)
 - `POST /policy-statute-compliance`

@@ -791,6 +791,43 @@ def build_openapi_spec():
                 },
                 "post": {
                     "summary": "Add embedding model",
+                    "description": "Upsert an embedding_model document by database_name. Requires database_name, model_name, and fields (vector index definitions). Any additional top-level keys are stored as-is.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": True,
+                                    "properties": {
+                                        "database_name": {"type": "string"},
+                                        "model_name": {"type": "string"},
+                                        "fields": {
+                                            "type": "array",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "type": {"type": "string", "enum": ["vector"]},
+                                                    "path": {"type": "string"},
+                                                    "numDimensions": {"type": "number"},
+                                                    "similarity": {"type": "string", "enum": ["euclidean", "cosine", "dotProduct"]},
+                                                },
+                                                "required": ["type", "path", "numDimensions", "similarity"],
+                                            },
+                                        },
+                                    },
+                                    "required": ["database_name", "model_name", "fields"],
+                                }
+                            }
+                        },
+                    },
+                    "responses": {"200": {"description": "Embedding model saved"}},
+                },
+            },
+            "/create-vector-index": {
+                "post": {
+                    "summary": "Create vector search index from embedding_model",
+                    "description": "Create an Atlas vector search index on a collection using the embedding_model document from web-gather (database_name). Body: database_name, collection_name, optional index_name (default vector_index). Requires Atlas.",
                     "requestBody": {
                         "required": True,
                         "content": {
@@ -799,14 +836,19 @@ def build_openapi_spec():
                                     "type": "object",
                                     "properties": {
                                         "database_name": {"type": "string"},
-                                        "model_name": {"type": "string"},
+                                        "collection_name": {"type": "string"},
+                                        "index_name": {"type": "string"},
                                     },
-                                    "required": ["database_name", "model_name"],
+                                    "required": ["database_name", "collection_name"],
                                 }
                             }
                         },
                     },
-                    "responses": {"200": {"description": "Embedding model saved"}},
+                    "responses": {
+                        "200": {"description": "Index creation started"},
+                        "400": {"description": "Missing embedding_model or invalid body"},
+                        "500": {"description": "createSearchIndexes failed"},
+                    },
                 },
             },
             "/parse-llm": {

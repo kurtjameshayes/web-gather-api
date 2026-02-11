@@ -64,6 +64,16 @@ def get_embedding_model_name(database_name: str):
     return model_name
 
 
+def get_embedding_model_record(database_name: str):
+    """Return the full embedding_model document for a database, or None."""
+    if not mongo_client:
+        return None
+    wg_db = mongo_client[WEB_GATHER_DB]
+    return wg_db[EMBEDDING_MODEL_COLLECTION].find_one(
+        {"database_name": database_name}
+    )
+
+
 @db_bp.get("/documents")
 def list_documents():
     """List documents in a MongoDB collection."""
