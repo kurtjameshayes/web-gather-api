@@ -1,4 +1,6 @@
 """Tests for policy statute compliance service."""
+from __future__ import annotations
+
 import asyncio
 import json
 import sys
@@ -46,7 +48,8 @@ def test_build_prompt_uses_template():
     assert "You are a privacy law analyst." in prompt
     assert "Candidate statutes (top K):" in prompt
     assert "[stat-1] US Retention Limits" in prompt
-    assert "Output JSON exactly with keys:" in prompt
+    assert "Output only valid JSON" in prompt
+    assert "Use exactly these keys:" in prompt
 
 
 def test_evaluator_respects_confidence_threshold():
@@ -180,13 +183,36 @@ class StubLLM:
 
 
 def test_policy_compliance_endpoint_retention_non_compliant():
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
     config = load_config()
     config.enable_audit_logging = False
     config.enable_redaction = True
     config.auth_required = False
 
+    policy_text = "We retain user data for 10 years for analytics."
+    mock_chunks = [
+        {
+            config.policy_document_id_field: "test-policy-id",
+            config.policy_chunk_index_field: 0,
+            config.policy_chunk_text_field: policy_text,
+            config.policy_chunk_header_field: "",
+        }
+    ]
+    mock_cursor = MagicMock()
+    mock_cursor.sort.return_value = mock_chunks
+    mock_coll = MagicMock()
+    mock_coll.find.return_value = mock_cursor
+    mock_db = MagicMock()
+    mock_db.__getitem__.return_value = mock_coll
+    mock_mongo = MagicMock()
+    mock_mongo.__getitem__.return_value = mock_db
+
     service = ComplianceService(
-        mongo_client=MagicMock(),
+        mongo_client=mock_mongo,
         config=config,
         segmenter=PolicySegmenter(config.max_section_chars),
         retriever=StubRetriever(),
@@ -204,18 +230,14 @@ def test_policy_compliance_endpoint_retention_non_compliant():
     response = client.post(
         "/policy-statute-compliance",
         json={
-            "database": "privacy_db",
-            "policy_collection": "policies",
-            "text": "We retain user data for 10 years for analytics.",
+            "policy_collection": "policy_embeddings",
+            "policy_id": "test-policy-id",
             "jurisdiction": "US",
-            "top_k_statutes": 5,
-            "confidence_thresholds": {"compliant": 0.75, "non_compliant": 0.75},
-            "options": {"explainability": True, "redact_pii": True},
         },
     )
 
     assert response.status_code == 200
-    body = response.json()
+    body = response.get_json()
     PolicyStatuteComplianceResponse.model_validate(body)
     assert body["sections"][0]["compliance"] == "non_compliant"
     assert body["sections"][0]["confidence"] >= 0.8

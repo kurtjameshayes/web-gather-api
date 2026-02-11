@@ -16,7 +16,6 @@ from schemas import (
     PolicyStatuteComplianceRequest,
     PolicyStatuteComplianceResponse,
     PolicySectionResult,
-    RequestOptions,
     SummaryCounts,
     SummaryResult,
 )
@@ -24,6 +23,14 @@ from segmenter import PolicySegmenter
 from vector_retriever import StatuteCandidate, VectorRetriever
 
 logger = logging.getLogger("policy-compliance")
+
+
+async def _run_in_thread(func):
+    """Run a sync function in a thread (Python 3.8 compat: no asyncio.to_thread)."""
+    if hasattr(asyncio, "to_thread"):
+        return await asyncio.to_thread(func)
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, func)
 
 
 class ServiceError(Exception):
@@ -54,7 +61,16 @@ class ComplianceService:
         self._redactor = redactor
         self._audit_logger = audit_logger
         self._rate_limiter = rate_limiter
-        self._semaphore = asyncio.Semaphore(config.llm_concurrency)
+        self._semaphore: Optional[asyncio.Semaphore] = None
+        self._semaphore_loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def _get_semaphore(self) -> asyncio.Semaphore:
+        """Return a semaphore bound to the current event loop (avoids 'Future attached to a different loop')."""
+        loop = asyncio.get_event_loop()
+        if self._semaphore is None or self._semaphore_loop is not loop:
+            self._semaphore_loop = loop
+            self._semaphore = asyncio.Semaphore(self._config.llm_concurrency)
+        return self._semaphore
 
     async def compare_policy(
         self, payload: PolicyStatuteComplianceRequest
@@ -64,20 +80,19 @@ class ComplianceService:
 
         warnings: List[str] = []
         jurisdiction = normalize_jurisdiction(payload.jurisdiction)
-        options = payload.options or RequestOptions()
-        top_k = payload.top_k_statutes or self._config.top_k_statutes
-        thresholds = payload.confidence_thresholds or self._config.confidence_thresholds
+        database = self._config.compliance_database
+        retrieval_database = (self._config.statute_database or "").strip() or database
+        top_k = self._config.top_k_statutes
+        thresholds = self._config.confidence_thresholds
 
         policy_text, existing_sections = await self._load_policy(
-            payload.database, payload.policy_collection, payload.policy_id, payload.text
+            database, payload.policy_collection, payload.policy_id, None
         )
-        if payload.policy_id and payload.text:
-            warnings.append("Both policy_id and text provided; using provided text.")
 
         if not policy_text:
             raise ServiceError("Policy text not found or empty.", status_code=400)
 
-        if options.redact_pii and self._config.enable_redaction:
+        if self._config.enable_redaction:
             redaction_result = self._redactor.redact(policy_text)
             policy_text = redaction_result.redacted_text
 
@@ -89,13 +104,14 @@ class ComplianceService:
             self._process_section(
                 section.section_id,
                 section.section_text,
-                payload.database,
+                database,
+                retrieval_database,
                 jurisdiction,
-                payload.statute_corpus_id,
+                None,
                 top_k,
                 thresholds,
-                options.explainability,
-                options.redact_pii,
+                True,
+                self._config.enable_redaction,
             )
             for section in sections
         ]
@@ -120,7 +136,7 @@ class ComplianceService:
         summary = self._build_summary(response_sections)
 
         await self._audit_logger.log(
-            payload.database,
+            database,
             payload.policy_id,
             jurisdiction,
             policy_text,
@@ -151,23 +167,36 @@ class ComplianceService:
             return "", None
 
         collection = self._mongo_client[database][policy_collection]
+        doc_id_field = self._config.policy_document_id_field
+        chunk_index_field = self._config.policy_chunk_index_field
+        chunk_text_field = self._config.policy_chunk_text_field
+        chunk_header_field = self._config.policy_chunk_header_field
 
-        def run_find() -> Optional[Dict[str, Any]]:
-            return collection.find_one({"_id": policy_id})
+        def run_find_chunks() -> List[Dict[str, Any]]:
+            return list(
+                collection.find({doc_id_field: policy_id}).sort(chunk_index_field, 1)
+            )
 
-        document = await asyncio.to_thread(run_find)
-        if not document:
+        chunks = await _run_in_thread(run_find_chunks)
+        if not chunks:
             return "", None
 
-        text = (document.get("text") or "").strip()
-        sections = document.get("sections")
-        return text, sections if isinstance(sections, list) else None
+        parts: List[str] = []
+        for chunk in chunks:
+            header = (chunk.get(chunk_header_field) or "").strip()
+            text_part = (chunk.get(chunk_text_field) or "").strip()
+            if header:
+                parts.append(header)
+            if text_part:
+                parts.append(text_part)
+        return "\n\n".join(parts).strip(), None
 
     async def _process_section(
         self,
         section_id: str,
         section_text: str,
         database: str,
+        retrieval_database: str,
         jurisdiction: str,
         statute_corpus_id: Optional[str],
         top_k: int,
@@ -175,17 +204,37 @@ class ComplianceService:
         explainability: bool,
         redact_pii: bool,
     ) -> Dict[str, Any]:
-        async with self._semaphore:
+        async with self._get_semaphore():
             if redact_pii and self._config.enable_redaction:
                 section_text = self._redactor.redact(section_text).redacted_text
 
             candidates = await self._retriever.retrieve(
-                database,
+                retrieval_database,
                 section_text,
                 jurisdiction,
                 statute_corpus_id,
                 top_k,
             )
+
+            if not candidates:
+                retrieval_trace = (
+                    [f"0 candidates (jurisdiction={jurisdiction})"]
+                    if explainability
+                    else []
+                )
+                return {
+                    "section_id": section_id,
+                    "section_text": section_text,
+                    "applied_statutes": [],
+                    "compliance": "neither",
+                    "confidence": 0.0,
+                    "rationale": "No statute candidates retrieved for this section and jurisdiction.",
+                    "remediation_suggestions": [
+                        "Verify statute vector index and jurisdiction filter (see compliance README)."
+                    ],
+                    "retrieval_trace": retrieval_trace,
+                    "warnings": [],
+                }
 
             llm_response = await self._llm_client.compare_section(
                 section_id, section_text, candidates

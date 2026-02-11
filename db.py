@@ -2,6 +2,8 @@
 
 Includes functionality for endpoints: all-collections, all-databases, collections, count-documents, databases, documents, and write_to_collection.
 """
+from __future__ import annotations
+
 import json
 import logging
 from datetime import datetime, timezone
@@ -17,8 +19,23 @@ mongo_client = None
 WEB_GATHER_DB = "web-gather"
 DOCUMENTS_COLLECTION = "documents"
 EMBEDDING_MODEL_COLLECTION = "embedding_model"
+PRIVACY_COMPLIANCE_DB = "privacy-compliance"
+
+# Application default embedding model (set at startup from web-gather for privacy-compliance).
+application_embedding_model_name: str | None = None
 
 db_bp = Blueprint("db", __name__)
+
+
+def set_application_embedding_model(name: str | None) -> None:
+    """Set the application default embedding model (used for privacy-compliance until restart)."""
+    global application_embedding_model_name
+    application_embedding_model_name = name
+
+
+def get_application_embedding_model() -> str | None:
+    """Return the application default embedding model, or None if not set."""
+    return application_embedding_model_name
 
 
 def init_db(client):

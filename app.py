@@ -2,6 +2,8 @@
 
 This module initializes the Flask application and registers all route blueprints.
 """
+from __future__ import annotations
+
 import logging
 import os
 
@@ -62,8 +64,19 @@ app.register_blueprint(db_bp)
 app.register_blueprint(core_bp)
 app.register_blueprint(util_bp)
 app.register_blueprint(routes_bp)
-app.register_blueprint(compliance_bp)
+app.register_blueprint(compliance_bp, url_prefix="/api/compliance")
+# Also mount at root so POST /policy-statute-compliance works (Swagger/docs and legacy clients).
+app.register_blueprint(compliance_bp, url_prefix="", name="compliance_root")
+
+# #region agent log
+try:
+    import json as _json
+    with open("/Users/kurthayes/Dev/AI/web-gather-api/.cursor/debug.log", "a") as _f:
+        _f.write(_json.dumps({"timestamp": __import__("time").time() * 1000, "location": "app.py:blueprint_registration", "message": "Blueprints registered", "data": {"compliance_root_registered": True}, "hypothesisId": "H1"}) + "\n")
+except Exception:
+    pass
+# #endregion
 
 if __name__ == "__main__":
-    logger.info("Starting Web Gather API server on port 7001")
-    app.run(debug=True, port=7001)
+    logger.info("Starting Web Gather API server on port 7005")
+    app.run(debug=True, port=7005)

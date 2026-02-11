@@ -12,6 +12,14 @@ from compliance_config import ComplianceConfig
 from compliance_utils import hash_text, utc_now
 
 
+async def _run_in_thread(func, *args, **kwargs):
+    """Run sync function in a thread (Python 3.8 compat: asyncio.to_thread added in 3.9)."""
+    if hasattr(asyncio, "to_thread"):
+        return await asyncio.to_thread(func, *args, **kwargs)
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
+
+
 class AuditLogger:
     def __init__(self, mongo_client: Any, config: ComplianceConfig) -> None:
         self._mongo_client = mongo_client
@@ -60,4 +68,4 @@ class AuditLogger:
 
         collection = self._mongo_client[database][self._collection]
 
-        await asyncio.to_thread(collection.insert_one, record)
+        await _run_in_thread(lambda: collection.insert_one(record))

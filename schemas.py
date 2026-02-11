@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 
 class ConfidenceThresholds(BaseModel):
@@ -17,21 +17,9 @@ class RequestOptions(BaseModel):
 
 
 class PolicyStatuteComplianceRequest(BaseModel):
-    database: str = Field(..., min_length=1)
     policy_collection: str = Field(..., min_length=1)
-    policy_id: Optional[str] = None
-    text: Optional[str] = None
+    policy_id: str = Field(..., min_length=1)
     jurisdiction: str = Field(..., min_length=1)
-    statute_corpus_id: Optional[str] = None
-    top_k_statutes: Optional[int] = Field(default=None, ge=1, le=50)
-    confidence_thresholds: Optional[ConfidenceThresholds] = None
-    options: Optional[RequestOptions] = None
-
-    @model_validator(mode="after")
-    def validate_policy_source(self) -> "PolicyStatuteComplianceRequest":
-        if not self.policy_id and not self.text:
-            raise ValueError("Either policy_id or text must be provided.")
-        return self
 
 
 class AppliedStatute(BaseModel):

@@ -1,7 +1,12 @@
 """Endpoint routes and OpenAPI specification for the Web Gather API."""
+from __future__ import annotations
+
 from flask import Blueprint, Response, jsonify
 
 routes_bp = Blueprint("routes", __name__)
+
+# Must match app.py url_prefix when registering compliance_bp.
+COMPLIANCE_API_PREFIX = "/api/compliance"
 
 
 def build_openapi_spec():
@@ -17,6 +22,7 @@ def build_openapi_spec():
                 "to create vector embeddings."
             ),
         },
+        "servers": [{"url": "/", "description": "API root (relative to current host)"}],
         "components": {
             "schemas": {
                 "ConfidenceThresholds": {
@@ -57,52 +63,22 @@ def build_openapi_spec():
                 },
                 "PolicyStatuteComplianceRequest": {
                     "type": "object",
-                    "description": "Request body for policy statute compliance. Either policy_id or text must be provided.",
+                    "description": "Request body for policy statute compliance. Compare the policy identified by collection and id to the statute in the given jurisdiction.",
                     "properties": {
-                        "database": {
-                            "type": "string",
-                            "description": "MongoDB database name containing the policy document.",
-                        },
                         "policy_collection": {
                             "type": "string",
-                            "description": "Collection name that holds the policy document.",
+                            "description": "Collection name that holds the policy chunks (e.g. policy_embeddings).",
                         },
                         "policy_id": {
                             "type": "string",
-                            "nullable": True,
-                            "description": "Document ID of the policy in the database. Required if text is not provided.",
-                        },
-                        "text": {
-                            "type": "string",
-                            "nullable": True,
-                            "description": "Raw policy text when not using a stored document. Required if policy_id is not provided.",
+                            "description": "Document ID of the policy (document_id in policy chunks).",
                         },
                         "jurisdiction": {
                             "type": "string",
                             "description": "Jurisdiction for statute comparison (e.g. GDPR, CCPA).",
                         },
-                        "statute_corpus_id": {
-                            "type": "string",
-                            "nullable": True,
-                            "description": "Identifier for which statute corpus to use.",
-                        },
-                        "top_k_statutes": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "maximum": 50,
-                            "description": "Maximum number of statute candidates to consider (1-50).",
-                            "example": 50,
-                        },
-                        "confidence_thresholds": {
-                            "$ref": "#/components/schemas/ConfidenceThresholds",
-                            "description": "Optional thresholds for compliant/non-compliant confidence.",
-                        },
-                        "options": {
-                            "$ref": "#/components/schemas/ComplianceOptions",
-                            "description": "Optional request options (explainability, redact_pii).",
-                        },
                     },
-                    "required": ["database", "policy_collection", "jurisdiction"],
+                    "required": ["policy_collection", "policy_id", "jurisdiction"],
                 },
                 "AppliedStatute": {
                     "type": "object",
@@ -897,31 +873,19 @@ def build_openapi_spec():
                     },
                 }
             },
-            "/policy-statute-compliance": {
+            f"{COMPLIANCE_API_PREFIX}/policy-statute-compliance": {
                 "post": {
-                    "summary": "Compare policy sections to statutes for compliance",
-                    "description": "Segments a policy into sections, retrieves relevant statutes, and returns compliance determinations with evidence.",
+                    "summary": "Compare policy to statutes for compliance",
+                    "description": "Loads the policy identified by policy_collection and policy_id from the compliance database (privacy-compliance), segments it, retrieves relevant statutes for the given jurisdiction, and returns compliance determinations with evidence.",
                     "requestBody": {
                         "required": True,
                         "content": {
                             "application/json": {
                                 "schema": {"$ref": "#/components/schemas/PolicyStatuteComplianceRequest"},
                                 "example": {
-                                    "database": "string",
-                                    "policy_collection": "string",
-                                    "policy_id": "string",
-                                    "text": "string",
-                                    "jurisdiction": "string",
-                                    "statute_corpus_id": "string",
-                                    "top_k_statutes": 50,
-                                    "confidence_thresholds": {
-                                        "compliant": 1,
-                                        "non_compliant": 1,
-                                    },
-                                    "options": {
-                                        "explainability": True,
-                                        "redact_pii": True,
-                                    },
+                                    "policy_collection": "policy_embeddings",
+                                    "policy_id": "doc-123",
+                                    "jurisdiction": "CCPA",
                                 },
                             }
                         },
@@ -975,6 +939,33 @@ def build_openapi_spec():
                                 }
                             },
                         },
+                    },
+                }
+            },
+            "/policy-statute-compliance": {
+                "post": {
+                    "summary": "Compare policy to statutes for compliance (root path)",
+                    "description": "Same as /api/compliance/policy-statute-compliance. Loads the policy identified by policy_collection and policy_id, segments it, retrieves relevant statutes for the given jurisdiction, and returns compliance determinations with evidence.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/PolicyStatuteComplianceRequest"},
+                                "example": {
+                                    "policy_collection": "policy_embeddings",
+                                    "policy_id": "doc-123",
+                                    "jurisdiction": "CCPA",
+                                },
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": {"description": "Compliance analysis response", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PolicyStatuteComplianceResponse"}}}},
+                        "400": {"description": "Bad request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "401": {"description": "Missing API key", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "403": {"description": "Unauthorized", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "422": {"description": "Validation error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "500": {"description": "Internal server error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
                     },
                 }
             },

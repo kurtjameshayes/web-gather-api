@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import re
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 
 
 JURISDICTION_MAP = {
@@ -36,6 +36,20 @@ def clamp(value: float, min_value: float = 0.0, max_value: float = 1.0) -> float
 def normalize_jurisdiction(value: str) -> str:
     normalized = (value or "").strip().lower()
     return JURISDICTION_MAP.get(normalized, value.strip().upper())
+
+
+def jurisdiction_filter_values(normalized: str) -> List[str]:
+    """Return values to use in a DB filter so both normalized (e.g. CA) and stored variants (e.g. California) match."""
+    if not normalized:
+        return []
+    values = [normalized]
+    normalized_lower = normalized.lower()
+    for key, val in JURISDICTION_MAP.items():
+        if val == normalized or val.lower() == normalized_lower:
+            values.append(key)
+            if key and key[0].isalpha():
+                values.append(key.capitalize())
+    return list(dict.fromkeys(values))
 
 
 def safe_truncate(text: str, max_chars: int) -> str:

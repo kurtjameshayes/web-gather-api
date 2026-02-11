@@ -21,8 +21,10 @@ from sentence_transformers import SentenceTransformer
 
 from bson import ObjectId
 from db import (
-    WEB_GATHER_DB,
     DOCUMENTS_COLLECTION,
+    PRIVACY_COMPLIANCE_DB,
+    WEB_GATHER_DB,
+    get_application_embedding_model,
     get_embedding_model_name,
     utc_now,
 )
@@ -738,8 +740,11 @@ def index_document_chunks(
     logger.info("Indexing parameters: chunk_size=%d, chunk_overlap=%d, splitting_strategy=%s",
                 chunk_size, chunk_overlap, splitting_strategy)
 
-    # Look up embedding model using the index database name
-    model_name = get_embedding_model_name(index_database_name)
+    # Look up embedding model: use app default for privacy-compliance, else per-database
+    if index_database_name == PRIVACY_COMPLIANCE_DB:
+        model_name = get_application_embedding_model() or get_embedding_model_name(index_database_name)
+    else:
+        model_name = get_embedding_model_name(index_database_name)
     if not model_name:
         logger.info("Skipping indexing - no embedding model configured for database: %s", index_database_name)
         return None
@@ -1203,8 +1208,11 @@ def index_document():
         index_collection_name,
     )
 
-    # Check if embedding model is configured for index_database_name
-    model_name = get_embedding_model_name(index_database_name)
+    # Use app default for privacy-compliance, else per-database embedding model
+    if index_database_name == PRIVACY_COMPLIANCE_DB:
+        model_name = get_application_embedding_model() or get_embedding_model_name(index_database_name)
+    else:
+        model_name = get_embedding_model_name(index_database_name)
     if not model_name:
         logger.error(
             "POST /vector-index - No embedding model configured for database: %s",
@@ -1356,7 +1364,10 @@ def search():
     index_database_name = doc_record.get("index_database_name", database_name)
     chunk_collection = doc_record.get("chunk_collection", collection_name)
 
-    model_name = get_embedding_model_name(index_database_name)
+    if index_database_name == PRIVACY_COMPLIANCE_DB:
+        model_name = get_application_embedding_model() or get_embedding_model_name(index_database_name)
+    else:
+        model_name = get_embedding_model_name(index_database_name)
     if not model_name:
         logger.error("GET /search - No embedding model configured for database: %s", index_database_name)
         return jsonify({"error": "embedding model not configured"}), 400

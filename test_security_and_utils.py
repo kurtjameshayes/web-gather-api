@@ -12,6 +12,7 @@ from compliance_config import load_config
 from compliance_utils import (
     clamp,
     extract_json_block,
+    jurisdiction_filter_values,
     normalize_jurisdiction,
     safe_truncate,
     slugify,
@@ -88,7 +89,8 @@ def test_cache_eviction_and_expiry(monkeypatch: Any) -> None:
 
 
 @pytest.mark.anyio
-async def test_rate_limiter_blocks_then_allows(monkeypatch: Any) -> None:
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_rate_limiter_blocks_then_allows(monkeypatch: Any, anyio_backend: str) -> None:
     now = 1000.0
 
     def fake_time() -> float:
@@ -104,6 +106,10 @@ async def test_rate_limiter_blocks_then_allows(monkeypatch: Any) -> None:
 
 def test_compliance_utils_helpers() -> None:
     assert normalize_jurisdiction("United States") == "US"
+    ca_values = jurisdiction_filter_values("CA")
+    assert "CA" in ca_values
+    assert "California" in ca_values or "california" in ca_values
+    assert normalize_jurisdiction("California") == "CA"
     assert clamp(1.5) == 1.0
     assert safe_truncate("abcdef", 4) == "a..."
     assert slugify("Data Retention") == "data_retention"

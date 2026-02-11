@@ -71,7 +71,7 @@ class ComplianceEvaluator:
         )
 
         max_evidence = max((item.get("evidence_score", 0.0) for item in applied_statutes), default=0.0)
-        if max_evidence < self._evidence_score_threshold:
+        if candidates and max_evidence < self._evidence_score_threshold:
             warnings.append("Low retrieval evidence score; marked as neither.")
             compliance = "neither"
 

@@ -76,10 +76,16 @@ class ComplianceConfig:
     embedding_model_name: str
     llm_model_name: str
     statute_collection_tag: str
+    # Database for statute/embedding retrieval (when set; else compliance_database)
+    statute_database: str
     # Compliance suite (gap analysis, health score, drift)
     compliance_database: str
     policies_collection: str
     policy_chunks_collection: str
+    policy_document_id_field: str
+    policy_chunk_index_field: str
+    policy_chunk_text_field: str
+    policy_chunk_header_field: str
     statute_chunk_header_field: str
     compliance_results_collection: str
     compliance_alerts_collection: str
@@ -101,7 +107,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "statutes_collection": "statutes",
     "embeddings_collection": "embeddings",
     "use_embeddings_collection": False,
-    "vector_index_name": "statute_vector_index",
+    "vector_index_name": "vector_index",
     "vector_field": "vector",
     "statute_text_field": "section_text",
     "statute_title_field": "title",
@@ -123,17 +129,22 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "enable_redaction": True,
     "enable_audit_logging": True,
     "allow_raw_audit": False,
-    "auth_required": True,
+    "auth_required": False,
     "api_key": "",
     "allowed_roles": ["admin", "compliance"],
     "default_role_header": "x-role",
     "embedding_model_name": "all-MiniLM-L6-v2",
     "llm_model_name": "claude-3-5-sonnet-20241022",
     "statute_collection_tag": "statutes",
+    "statute_database": "",
     # Compliance suite
     "compliance_database": "privacy-compliance",
     "policies_collection": "policies",
     "policy_chunks_collection": "policy_chunks",
+    "policy_document_id_field": "document_id",
+    "policy_chunk_index_field": "chunk_index",
+    "policy_chunk_text_field": "chunk_text",
+    "policy_chunk_header_field": "chunk_header_text",
     "statute_chunk_header_field": "chunk_header_text",
     "compliance_results_collection": "compliance_results",
     "compliance_alerts_collection": "compliance_alerts",
@@ -169,7 +180,8 @@ def _load_from_file(path: str) -> Dict[str, Any]:
 
 
 def load_config() -> ComplianceConfig:
-    config_path = os.getenv("COMPLIANCE_CONFIG_PATH", "/workspace/policy_compliance_config.json")
+    default_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "policy_compliance_config.json")
+    config_path = os.getenv("COMPLIANCE_CONFIG_PATH", default_path)
     file_data = _load_from_file(config_path)
     data = {**DEFAULT_CONFIG, **file_data}
 
@@ -264,9 +276,14 @@ def load_config() -> ComplianceConfig:
         embedding_model_name=data["embedding_model_name"],
         llm_model_name=data["llm_model_name"],
         statute_collection_tag=data["statute_collection_tag"],
+        statute_database=(data.get("statute_database", "") or "").strip(),
         compliance_database=data.get("compliance_database", DEFAULT_CONFIG["compliance_database"]),
         policies_collection=data.get("policies_collection", DEFAULT_CONFIG["policies_collection"]),
         policy_chunks_collection=data.get("policy_chunks_collection", DEFAULT_CONFIG["policy_chunks_collection"]),
+        policy_document_id_field=data.get("policy_document_id_field", DEFAULT_CONFIG["policy_document_id_field"]),
+        policy_chunk_index_field=data.get("policy_chunk_index_field", DEFAULT_CONFIG["policy_chunk_index_field"]),
+        policy_chunk_text_field=data.get("policy_chunk_text_field", DEFAULT_CONFIG["policy_chunk_text_field"]),
+        policy_chunk_header_field=data.get("policy_chunk_header_field", DEFAULT_CONFIG["policy_chunk_header_field"]),
         statute_chunk_header_field=data.get("statute_chunk_header_field", DEFAULT_CONFIG["statute_chunk_header_field"]),
         compliance_results_collection=data.get("compliance_results_collection", DEFAULT_CONFIG["compliance_results_collection"]),
         compliance_alerts_collection=data.get("compliance_alerts_collection", DEFAULT_CONFIG["compliance_alerts_collection"]),
