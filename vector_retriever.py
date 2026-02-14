@@ -330,6 +330,7 @@ class VectorRetriever:
             emb_section = result.get(section_field) or result.get(section_id_field)
             stat_section = statute_doc.get(section_field) or statute_doc.get(section_id_field)
             section_id = str(emb_section or stat_section or "")
+            emb_header = result.get(header_field)
             chunk_header = str(emb_header or statute_doc.get(header_field, "") or "")
             # Prefer jurisdiction from embedding doc (e.g. "California") when present; else statute doc
             emb_jur = result.get(self._config.statute_jurisdiction_field) or result.get("jurisdiction")

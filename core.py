@@ -1547,6 +1547,9 @@ return an array of sections with:
 {numbered_text}
 </document>
 
+Exclude irrelevant sections from the results.
+Any sections that do not pertain to company privacy policy should be omitted.
+
 <parse_prompt>
 {parse_prompt}
 </parse_prompt>
