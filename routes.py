@@ -193,6 +193,7 @@ def build_openapi_spec():
                         "requirement_summary": {"type": "string"},
                         "status": {"type": "string", "enum": ["missing", "addressed", "conflict"]},
                         "policy_quote": {"type": ["string", "null"]},
+                        "statute_quote": {"type": ["string", "null"]},
                         "conflict_description": {"type": ["string", "null"]},
                         "analysis_failed": {"type": "boolean"},
                     },

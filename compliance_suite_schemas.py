@@ -40,6 +40,7 @@ class GapItem(BaseModel):
     requirement_summary: str
     status: str = Field(..., pattern="^(missing|addressed|conflict)$")
     policy_quote: Optional[str] = None
+    statute_quote: Optional[str] = None
     conflict_description: Optional[str] = None
     analysis_failed: bool = False
 

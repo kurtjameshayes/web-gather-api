@@ -251,6 +251,11 @@ class ComplianceSuiteService:
                 ).strip()
                 section = _section_value(c.section_id or "", c.chunk_header_text or "")
                 statute_name = c.title.strip() if c.title else None
+                chunk_text = (c.chunk_text or "").strip()
+                statute_quote = (
+                    truncate_at_sentence(chunk_text, self._config.max_statute_quote_chars).strip()
+                    or None
+                ) if chunk_text else None
                 gaps.append(
                     GapItem(
                         jurisdiction=jurisdiction,
@@ -261,6 +266,7 @@ class ComplianceSuiteService:
                         requirement_summary=requirement_summary,
                         status=status,
                         policy_quote=policy_quote,
+                        statute_quote=statute_quote,
                         conflict_description=result.get("conflict_description") if result else None,
                         analysis_failed=analysis_failed,
                     )

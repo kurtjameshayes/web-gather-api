@@ -92,6 +92,7 @@ class ComplianceConfig:
     compliance_alerts_collection: str
     compliance_run_log_collection: str
     statute_index_version_field: str
+    max_statute_quote_chars: int
     default_jurisdictions: List[str]
     conflict_penalty_multiplier: float
     requirement_weights: Dict[str, float]
@@ -152,6 +153,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "compliance_alerts_collection": "compliance_alerts",
     "compliance_run_log_collection": "compliance_run_log",
     "statute_index_version_field": "indexed_at",
+    "max_statute_quote_chars": 300,
     "default_jurisdictions": ["CA", "VA", "CO", "CT"],
     "conflict_penalty_multiplier": 0.7,
     "requirement_weights": {},
@@ -292,6 +294,10 @@ def load_config() -> ComplianceConfig:
         compliance_alerts_collection=data.get("compliance_alerts_collection", DEFAULT_CONFIG["compliance_alerts_collection"]),
         compliance_run_log_collection=data.get("compliance_run_log_collection", DEFAULT_CONFIG["compliance_run_log_collection"]),
         statute_index_version_field=data.get("statute_index_version_field", DEFAULT_CONFIG["statute_index_version_field"]),
+        max_statute_quote_chars=_to_int(
+            os.getenv("COMPLIANCE_MAX_STATUTE_QUOTE_CHARS"),
+            data.get("max_statute_quote_chars", DEFAULT_CONFIG["max_statute_quote_chars"]),
+        ),
         default_jurisdictions=data.get("default_jurisdictions", DEFAULT_CONFIG["default_jurisdictions"]),
         conflict_penalty_multiplier=_to_float(
             os.getenv("COMPLIANCE_CONFLICT_PENALTY"), data.get("conflict_penalty_multiplier", DEFAULT_CONFIG["conflict_penalty_multiplier"])
