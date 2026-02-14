@@ -7,9 +7,16 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from bson import ObjectId
+from bson.errors import InvalidId
+
 from compliance_config import ComplianceConfig
 from compliance_suite_schemas import (
     ApplicabilityResponse,
+    CitationItem,
+    CitationsRequest,
+    CitationsResponse,
+    CitationsSummary,
     ConflictBetweenJurisdictionsItem,
     DriftAlertItem,
     DriftCheckResponse,
@@ -19,10 +26,15 @@ from compliance_suite_schemas import (
     GapSummary,
     HealthScoreResponse,
     MultiJurisdictionalResponse,
+    ReportRequest,
+    RiskAssessmentRequest,
+    RiskAssessmentResponse,
     StrictestDenominatorItem,
+    TemplateItem,
+    TemplatesResponse,
 )
 from compliance_storage import ComplianceStorage
-from compliance_utils import utc_now
+from compliance_utils import truncate_at_sentence, utc_now
 from llm_client import AnthropicLLMClient
 from rate_limiter import RateLimiter
 from vector_retriever import StatuteCandidate, VectorRetriever
@@ -66,6 +78,22 @@ def _citation_binding(policy_quote: Optional[str], policy_text: str) -> bool:
     return q in t if q else False
 
 
+def _looks_like_section_citation(text: Optional[str]) -> bool:
+    """Return True if text looks like a section citation (e.g. 1798.105(a), § 1798.105)."""
+    if not text or not text.strip():
+        return False
+    t = text.strip()
+    # Match patterns like 1798.105, 1798.105(a), § 1798.105
+    return bool(re.search(r"\d+\.\d+(?:\([a-z]\))?", t))
+
+
+def _section_value(section_id: str, chunk_header_text: str) -> Optional[str]:
+    """Prefer chunk_header_text when it looks like a section citation; else section_id; else chunk_header_text."""
+    if chunk_header_text and _looks_like_section_citation(chunk_header_text):
+        return chunk_header_text.strip()
+    return (section_id or chunk_header_text or "").strip() or None
+
+
 class ComplianceSuiteService:
     def __init__(
         self,
@@ -92,13 +120,24 @@ class ComplianceSuiteService:
         database: Optional[str] = None,
         policy_collection: Optional[str] = None,
     ) -> Tuple[str, Optional[str]]:
-        """Load policy full text and optional company_name. Returns (text, company_name)."""
+        """Load policy full text and optional company_name. Returns (text, company_name).
+
+        Queries by document_id field first (policy_document_id_field from config),
+        then falls back to _id for backward compatibility.
+        """
         db_name = database or self._database
         coll_name = policy_collection or self._config.policies_collection
+        doc_id_field = self._config.policy_document_id_field
 
         def find():
             coll = self._mongo_client[db_name][coll_name]
-            return coll.find_one({"_id": policy_document_id})
+            doc = coll.find_one({doc_id_field: policy_document_id})
+            if not doc:
+                try:
+                    doc = coll.find_one({"_id": ObjectId(policy_document_id)})
+                except (InvalidId, TypeError):
+                    doc = coll.find_one({"_id": policy_document_id})
+            return doc
 
         doc = await _run_in_thread(find)
         if not doc:
@@ -190,9 +229,10 @@ class ComplianceSuiteService:
                     )
 
                 addressed = bool(result.get("addressed"))
-                policy_quote = result.get("policy_quote")
+                policy_quote = result.get("policy_quote") if result.get("policy_quote") else None
                 if addressed and policy_quote and not _citation_binding(policy_quote, policy_text):
                     addressed = False
+                    policy_quote = None
                 missing = bool(result.get("missing")) or not addressed
                 conflict = bool(result.get("conflict"))
                 analysis_failed = not result
@@ -206,14 +246,21 @@ class ComplianceSuiteService:
                 else:
                     status = "missing"
 
-                requirement_summary = (c.chunk_header_text or c.chunk_text[:120] or "Requirement").strip()
+                requirement_summary = (
+                    c.chunk_header_text or truncate_at_sentence(c.chunk_text, 350) or "Requirement"
+                ).strip()
+                section = _section_value(c.section_id or "", c.chunk_header_text or "")
+                statute_name = c.title.strip() if c.title else None
                 gaps.append(
                     GapItem(
                         jurisdiction=jurisdiction,
                         statute_reference=c.statute_id or c.section_id or "",
+                        statute_name=statute_name,
+                        statute_chunk_id=c.chunk_id or None,
+                        section=section,
                         requirement_summary=requirement_summary,
                         status=status,
-                        policy_quote=policy_quote if addressed else None,
+                        policy_quote=policy_quote,
                         conflict_description=result.get("conflict_description") if result else None,
                         analysis_failed=analysis_failed,
                     )
@@ -237,24 +284,26 @@ class ComplianceSuiteService:
             summary=summary,
         )
 
-        try:
-            await self._storage.write_compliance_result({
-                "policy_document_id": policy_document_id,
-                "company_name": company_name,
-                "applicable_jurisdictions": jurisdictions,
-                "gaps": [g.model_dump() for g in gaps],
-                "summary": summary.model_dump(),
-                "analyzed_at": analyzed_at,
-            })
-            await self._storage.write_compliance_run_log({
-                "policy_document_id": policy_document_id,
-                "applicable_jurisdictions": jurisdictions,
-                "run_timestamp": analyzed_at,
-                "statute_chunk_ids_used": statute_chunk_ids_used[:500],
-            })
-        except Exception as e:
-            import logging
-            logging.getLogger("policy-compliance").warning("Failed to write compliance result/run_log: %s", e)
+        if getattr(req, "save_results", True):
+            try:
+                await self._storage.write_compliance_result({
+                    "policy_document_id": policy_document_id,
+                    "company_name": company_name,
+                    "applicable_jurisdictions": jurisdictions,
+                    "gaps": [g.model_dump() for g in gaps],
+                    "summary": summary.model_dump(),
+                    "analyzed_at": analyzed_at,
+                    "run_types": ["gap"],
+                })
+                await self._storage.write_compliance_run_log({
+                    "policy_document_id": policy_document_id,
+                    "applicable_jurisdictions": jurisdictions,
+                    "run_timestamp": analyzed_at,
+                    "statute_chunk_ids_used": statute_chunk_ids_used[:500],
+                })
+            except Exception as e:
+                import logging
+                logging.getLogger("policy-compliance").warning("Failed to write compliance result/run_log: %s", e)
 
         return response
 
@@ -268,6 +317,7 @@ class ComplianceSuiteService:
             applicable_jurisdictions=req.applicable_jurisdictions,
             database=req.database,
             policy_collection=req.policy_collection,
+            save_results=req.save_results,
         )
         gap_result = await self.gap_analysis(gap_req)
 
@@ -339,19 +389,21 @@ class ComplianceSuiteService:
             analyzed_at=gap_result.analyzed_at,
         )
 
-        try:
-            await self._storage.write_compliance_result({
-                "policy_document_id": policy_document_id,
-                "company_name": gap_result.company_name,
-                "applicable_jurisdictions": gap_result.applicable_jurisdictions,
-                "privacy_health_score": score,
-                "score_breakdown": response.score_breakdown,
-                "components": components,
-                "analyzed_at": gap_result.analyzed_at,
-            })
-        except Exception as e:
-            import logging
-            logging.getLogger("policy-compliance").warning("Failed to write health score result: %s", e)
+        if getattr(req, "save_results", True):
+            try:
+                await self._storage.write_compliance_result({
+                    "policy_document_id": policy_document_id,
+                    "company_name": gap_result.company_name,
+                    "applicable_jurisdictions": gap_result.applicable_jurisdictions,
+                    "privacy_health_score": score,
+                    "score_breakdown": response.score_breakdown,
+                    "components": components,
+                    "analyzed_at": gap_result.analyzed_at,
+                    "run_types": ["health_score"],
+                })
+            except Exception as e:
+                import logging
+                logging.getLogger("policy-compliance").warning("Failed to write health score result: %s", e)
 
         return response
 
@@ -522,4 +574,251 @@ class ComplianceSuiteService:
             alerts=alerts,
             policies_checked=policies_checked,
             alerts_written=len(alerts),
+        )
+
+    def _build_report_markdown(
+        self,
+        result_data: Dict[str, Any],
+        include_gap: bool = True,
+        include_health_score: bool = True,
+        include_multi_jurisdictional: bool = False,
+    ) -> str:
+        """Build markdown report from a compliance result dict (from storage or in-memory)."""
+        lines = []
+        policy_id = result_data.get("policy_document_id", "")
+        company = result_data.get("company_name") or "—"
+        analyzed_at = result_data.get("analyzed_at", "")
+        lines.append(f"# Compliance Report")
+        lines.append(f"**Policy ID:** {policy_id}")
+        lines.append(f"**Company:** {company}")
+        lines.append(f"**Analyzed at:** {analyzed_at}")
+        lines.append("")
+
+        if include_gap and result_data.get("gaps"):
+            lines.append("## Gap Analysis")
+            summary = result_data.get("summary") or {}
+            lines.append(f"- Total requirements: {summary.get('total_requirements', 0)}")
+            lines.append(f"- Addressed: {summary.get('addressed', 0)}")
+            lines.append(f"- Missing: {summary.get('missing', 0)}")
+            lines.append(f"- Conflicts: {summary.get('conflicts', 0)}")
+            lines.append("")
+            lines.append("| Jurisdiction | Statute | Section | Chunk ID | Requirement | Status | Policy quote | Conflict |")
+            lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+            for g in result_data.get("gaps", []):
+                req = (g.get("requirement_summary") or "")[:60]
+                status = g.get("status", "")
+                quote = (g.get("policy_quote") or "")[:40].replace("|", " ")
+                conflict = (g.get("conflict_description") or "")[:40].replace("|", " ")
+                section = (g.get("section") or "")[:30]
+                chunk_id = g.get("statute_chunk_id") or ""
+                statute_name = (g.get("statute_name") or "")[:20]
+                lines.append(f"| {g.get('jurisdiction', '')} | {statute_name} | {section} | {chunk_id} | {req} | {status} | {quote} | {conflict} |")
+            lines.append("")
+
+        if include_health_score and result_data.get("privacy_health_score") is not None:
+            lines.append("## Privacy Health Score")
+            lines.append(f"**Score:** {result_data.get('privacy_health_score')}/100")
+            breakdown = result_data.get("score_breakdown") or {}
+            by_j = breakdown.get("by_jurisdiction") or {}
+            if by_j:
+                lines.append("**By jurisdiction:**")
+                for j, s in by_j.items():
+                    lines.append(f"- {j}: {s}")
+            lines.append("")
+
+        if include_multi_jurisdictional and result_data.get("strictest_common_denominator"):
+            lines.append("## Strictest Common Denominator")
+            for item in result_data.get("strictest_common_denominator", []):
+                lines.append(f"- **{item.get('label', '')}** (strictest: {item.get('strictest_jurisdiction', '')})")
+                lines.append(f"  {item.get('strictest_description', '')[:200]}")
+            lines.append("")
+
+        return "\n".join(lines)
+
+    async def report(self, req: ReportRequest) -> Dict[str, Any]:
+        """Generate report content (markdown or PDF). For PDF returns content_base64 or raises 501."""
+        policy_document_id = (req.policy_document_id or "").strip()
+        if not policy_document_id:
+            raise ComplianceSuiteServiceError("policy_document_id is required.", status_code=400)
+
+        if req.source == "latest_stored":
+            doc = await self._storage.get_last_compliance_result(policy_document_id)
+            if not doc:
+                raise ComplianceSuiteServiceError("No stored result for this policy.", status_code=404)
+            content = self._build_report_markdown(
+                doc,
+                include_gap=req.include_gap,
+                include_health_score=req.include_health_score,
+                include_multi_jurisdictional=req.include_multi_jurisdictional,
+            )
+        else:
+            # run_now: run gap + health (and optionally multi-jurisdictional) without persisting
+            gap_req = GapAnalysisRequest(
+                policy_document_id=policy_document_id,
+                applicable_jurisdictions=req.applicable_jurisdictions,
+                save_results=False,
+            )
+            gap_result = await self.gap_analysis(gap_req)
+            health_req = HealthScoreRequest(
+                policy_document_id=policy_document_id,
+                applicable_jurisdictions=req.applicable_jurisdictions,
+                save_results=False,
+            )
+            health_result = await self.health_score(health_req)
+            combined: Dict[str, Any] = {
+                "policy_document_id": policy_document_id,
+                "company_name": gap_result.company_name,
+                "analyzed_at": gap_result.analyzed_at,
+                "gaps": [g.model_dump() for g in gap_result.gaps],
+                "summary": gap_result.summary.model_dump(),
+                "privacy_health_score": health_result.privacy_health_score,
+                "score_breakdown": health_result.score_breakdown,
+                "components": health_result.components,
+            }
+            if req.include_multi_jurisdictional:
+                multi_req = MultiJurisdictionalRequest(
+                    applicable_jurisdictions=req.applicable_jurisdictions or gap_result.applicable_jurisdictions,
+                )
+                multi_result = await self.multi_jurisdictional(multi_req)
+                combined["strictest_common_denominator"] = [
+                    s.model_dump() for s in multi_result.strictest_common_denominator
+                ]
+            content = self._build_report_markdown(
+                combined,
+                include_gap=req.include_gap,
+                include_health_score=req.include_health_score,
+                include_multi_jurisdictional=req.include_multi_jurisdictional,
+            )
+
+        if req.format == "markdown":
+            return {"format": "markdown", "content": content}
+        # PDF: not implemented here; route may return 501 or convert via library
+        raise ComplianceSuiteServiceError(
+            "PDF generation not implemented. Use format=markdown.",
+            status_code=501,
+        )
+
+    async def citations(self, req: CitationsRequest) -> CitationsResponse:
+        if not await self._rate_limiter.allow():
+            raise ComplianceSuiteServiceError("Rate limit exceeded", status_code=429)
+
+        policy_document_id = req.policy_document_id
+        policy_text, company_name = await self._load_policy_text(policy_document_id)
+        if not policy_text:
+            raise ComplianceSuiteServiceError("Policy not found or empty.", status_code=404)
+
+        jurisdictions = req.applicable_jurisdictions or self._config.default_jurisdictions
+        queries = self._config.disclosure_queries or ["right to know", "right to delete", "opt out of sale"]
+        top_k_per_query = max(2, (self._config.top_k_statutes or 5) // 2)
+
+        citation_list: List[CitationItem] = []
+        seen: Set[Tuple[str, str]] = set()
+
+        for jurisdiction in jurisdictions:
+            candidates = await self._retriever.retrieve_by_queries(
+                database=self._retrieval_database,
+                jurisdiction=jurisdiction,
+                queries=queries,
+                top_k_per_query=top_k_per_query,
+            )
+            for c in candidates[:15]:
+                key = (c.statute_id or c.section_id or "", c.chunk_text[:80])
+                if key in seen:
+                    continue
+                seen.add(key)
+                async with self._semaphore:
+                    out = await self._llm_client.citation_check(
+                        policy_excerpt=policy_text[:3000],
+                        statute_chunk_text=c.chunk_text,
+                        statute_reference=c.statute_id or c.section_id or "",
+                        jurisdiction=jurisdiction,
+                    )
+                citation_list.append(
+                    CitationItem(
+                        policy_excerpt=policy_text[:200],
+                        policy_chunk_id=None,
+                        statute_reference=c.statute_id or c.section_id or "",
+                        jurisdiction=jurisdiction,
+                        alignment=bool(out.get("alignment")),
+                        statute_excerpt=out.get("statute_excerpt"),
+                    )
+                )
+
+        aligned = sum(1 for x in citation_list if x.alignment)
+        summary = CitationsSummary(
+            total_citations=len(citation_list),
+            aligned=aligned,
+            not_aligned=len(citation_list) - aligned,
+        )
+        return CitationsResponse(
+            policy_document_id=policy_document_id,
+            company_name=company_name,
+            applicable_jurisdictions=jurisdictions,
+            analyzed_at=_iso(),
+            citations=citation_list,
+            summary=summary,
+        )
+
+    async def risk_assessment(self, req: RiskAssessmentRequest) -> RiskAssessmentResponse:
+        if not await self._rate_limiter.allow():
+            raise ComplianceSuiteServiceError("Rate limit exceeded", status_code=429)
+
+        policy_document_id = req.policy_document_id
+        policy_text, company_name = await self._load_policy_text(policy_document_id)
+        if not policy_text:
+            raise ComplianceSuiteServiceError("Policy not found or empty.", status_code=404)
+
+        jurisdictions = req.applicable_jurisdictions or self._config.default_jurisdictions
+        queries = self._config.disclosure_queries or ["right to know", "right to delete", "opt out of sale"]
+        top_k_per_query = 3
+        statute_parts: List[str] = []
+        for jurisdiction in jurisdictions:
+            candidates = await self._retriever.retrieve_by_queries(
+                database=self._retrieval_database,
+                jurisdiction=jurisdiction,
+                queries=queries,
+                top_k_per_query=top_k_per_query,
+            )
+            for c in candidates[:5]:
+                statute_parts.append(f"[{jurisdiction}] {c.chunk_text[:500]}")
+        statute_summary = "\n\n".join(statute_parts)[:6000]
+
+        async with self._semaphore:
+            assessment = await self._llm_client.risk_assessment(policy_text, statute_summary)
+
+        report_md = None
+        if req.include_report:
+            report_lines = [
+                "# Risk Assessment",
+                f"**Policy:** {policy_document_id}",
+                "",
+                "## Processing purposes",
+                *["- " + p for p in (assessment.get("processing_purposes") or [])],
+                "",
+                "## Data categories",
+                *["- " + cat for cat in (assessment.get("data_categories") or [])],
+                "",
+                "## Risks",
+            ]
+            for r in assessment.get("risks") or []:
+                if isinstance(r, dict):
+                    report_lines.append(f"- {r.get('description', '')} (severity: {r.get('severity', '')})")
+                else:
+                    report_lines.append(f"- {r}")
+            report_lines.extend(["", "## Mitigations", *["- " + m for m in (assessment.get("mitigations") or [])]])
+            report_md = "\n".join(report_lines)
+
+        return RiskAssessmentResponse(
+            policy_document_id=policy_document_id,
+            company_name=company_name,
+            applicable_jurisdictions=jurisdictions,
+            template_id=req.template_id or "default",
+            analyzed_at=_iso(),
+            assessment=assessment,
+            report=report_md,
+        )
+
+    async def list_templates(self) -> TemplatesResponse:
+        return TemplatesResponse(
+            templates=[TemplateItem(id="default", label="Default DPIA-style")],
         )

@@ -74,9 +74,10 @@ Policy text:
 
 Answer:
 (a) Is the required disclosure/obligation in the statute addressed in the policy? (yes/no)
-(b) If yes, quote the exact policy phrase that addresses it. If no, use null.
+(b) If yes, quote the exact policy phrase that addresses it in policy_quote. If no, use null.
 (c) Is there any statement in the policy that conflicts with the statute? (yes/no)
-(d) If conflict, briefly describe it. Otherwise null.
+(d) If conflict, briefly describe it in conflict_description. If the policy contains a phrase that conflicts, also quote that exact phrase in policy_quote.
+(e) policy_quote must be a verbatim substring of the policy text (for addressed or conflict cases).
 
 Output only valid JSON with this exact structure:
 {
@@ -128,6 +129,40 @@ Output only valid JSON:
 {
   "policy_alignment": "satisfies_all|satisfies_strictest_only|conflict_between_jurisdictions|not_provided|unclear",
   "policy_note": "Brief explanation or null"
+}
+"""
+
+CITATION_PROMPT = """You are a privacy law analyst. Does this policy excerpt cite or align with this statute? If yes, provide the exact policy phrase that corresponds and an optional statute snippet.
+
+Policy excerpt:
+<<<POLICY_EXCERPT>>>
+
+Statute (<<<JURISDICTION>>>):
+<<<STATUTE_CHUNK>>>
+
+Output only valid JSON:
+{
+  "alignment": true or false,
+  "policy_quote": "exact phrase from policy or null",
+  "statute_excerpt": "optional short snippet from statute or null"
+}
+"""
+
+RISK_ASSESSMENT_PROMPT = """You are a privacy law analyst. From the following policy text and statute requirements, fill a DPIA-style risk assessment. List processing purposes, data categories, risks, mitigations, and any gaps between policy and statute.
+
+Policy text:
+<<<POLICY_TEXT>>>
+
+Statute requirements (by jurisdiction):
+<<<STATUTE_SUMMARY>>>
+
+Output only valid JSON with this exact structure:
+{
+  "processing_purposes": ["purpose 1", "purpose 2", ...],
+  "data_categories": ["category 1", "category 2", ...],
+  "risks": [{"description": "...", "severity": "low|medium|high", "mitigation": "..."}, ...],
+  "mitigations": ["mitigation 1", ...],
+  "gaps_from_statute": [{"requirement": "...", "jurisdiction": "...", "status": "missing|addressed|conflict"}, ...]
 }
 """
 
@@ -312,6 +347,51 @@ class AnthropicLLMClient:
         return {
             "policy_alignment": align,
             "policy_note": out.get("policy_note") if out.get("policy_note") else None,
+        }
+
+    async def citation_check(
+        self,
+        policy_excerpt: str,
+        statute_chunk_text: str,
+        statute_reference: str,
+        jurisdiction: str,
+    ) -> Dict[str, Any]:
+        """Return { alignment: bool, policy_quote: str | null, statute_excerpt: str | null }."""
+        prompt = (
+            CITATION_PROMPT.replace("<<<POLICY_EXCERPT>>>", (policy_excerpt or "")[:2000])
+            .replace("<<<STATUTE_CHUNK>>>", (statute_chunk_text or "")[:3000])
+            .replace("<<<JURISDICTION>>>", jurisdiction or "")
+        )
+        out = await self._call_json(prompt)
+        if not out:
+            return {"alignment": False, "policy_quote": None, "statute_excerpt": None}
+        return {
+            "alignment": bool(out.get("alignment")),
+            "policy_quote": out.get("policy_quote") if out.get("policy_quote") else None,
+            "statute_excerpt": out.get("statute_excerpt") if out.get("statute_excerpt") else None,
+        }
+
+    async def risk_assessment(self, policy_text: str, statute_summary: str) -> Dict[str, Any]:
+        """Return { processing_purposes, data_categories, risks, mitigations, gaps_from_statute }."""
+        prompt = (
+            RISK_ASSESSMENT_PROMPT.replace("<<<POLICY_TEXT>>>", (policy_text or "")[:8000])
+            .replace("<<<STATUTE_SUMMARY>>>", (statute_summary or "")[:6000])
+        )
+        out = await self._call_json(prompt)
+        if not out:
+            return {
+                "processing_purposes": [],
+                "data_categories": [],
+                "risks": [],
+                "mitigations": [],
+                "gaps_from_statute": [],
+            }
+        return {
+            "processing_purposes": out.get("processing_purposes") or [],
+            "data_categories": out.get("data_categories") or [],
+            "risks": out.get("risks") or [],
+            "mitigations": out.get("mitigations") or [],
+            "gaps_from_statute": out.get("gaps_from_statute") or [],
         }
 
 

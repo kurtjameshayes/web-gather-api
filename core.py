@@ -1,6 +1,6 @@
 """Core endpoints for the Web Gather API.
 
-Includes endpoints: gather, ingest, parse-llm, search, index, and crawl.
+Includes endpoints: gather, ingest, parse-llm, gap-check, search, index, and crawl.
 """
 from __future__ import annotations
 
@@ -20,6 +20,8 @@ from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
 
 from bson import ObjectId
+from bson.errors import InvalidId
+from compliance_utils import extract_json_block
 from db import (
     DOCUMENTS_COLLECTION,
     PRIVACY_COMPLIANCE_DB,
@@ -1452,15 +1454,16 @@ def parse_llm():
     # Read documents from the collection
     db = mongo_client[database]
     if document_id:
-        # Query for specific document by _id
-        try:
-            doc = db[collection].find_one({"_id": ObjectId(document_id)})
-        except Exception as e:
-            logger.warning("POST /parse-llm - Invalid document_id format: %s", document_id)
-            return jsonify({"error": f"Invalid document_id format: {document_id}"}), 400
+        # Query by document_id field (e.g. statutes) or _id (e.g. ingest).
+        doc = db[collection].find_one({"document_id": document_id})
         if not doc:
-            logger.warning("POST /parse-llm - Document not found with _id: %s", document_id)
-            return jsonify({"error": f"Document not found with _id: {document_id}"}), 400
+            try:
+                doc = db[collection].find_one({"_id": ObjectId(document_id)})
+            except (InvalidId, TypeError):
+                doc = db[collection].find_one({"_id": document_id})
+        if not doc:
+            logger.warning("POST /parse-llm - Document not found with document_id: %s", document_id)
+            return jsonify({"error": f"Document not found with document_id: {document_id}"}), 400
         documents = [doc]
     else:
         # Query all documents in the collection
@@ -1662,6 +1665,190 @@ Use the identify_sections tool to report the sections you identified."""
 
     except Exception as e:
         logger.error("POST /parse-llm - LLM parsing failed: %s", e)
+        return jsonify({"error": f"LLM parsing failed: {str(e)}"}), 500
+
+
+def _fetch_document_text(database_name: str, collection_name: str, document_id: str):
+    """Fetch document from MongoDB and extract text.
+
+    Looks up by document_id field first, then _id (ObjectId or string).
+    Extracts text from: doc.text; else doc.chunk_text or doc.section_text;
+    else concatenate doc.policy_chunks (chunk_text or chunk_header_text).
+
+    Returns:
+        tuple: (text, None) on success, or (None, (response, status_code)) on error.
+    """
+    db = mongo_client[database_name]
+    coll = db[collection_name]
+    doc = coll.find_one({"document_id": document_id})
+    if not doc:
+        try:
+            doc = coll.find_one({"_id": ObjectId(document_id)})
+        except (InvalidId, TypeError):
+            doc = coll.find_one({"_id": document_id})
+    if not doc:
+        return None, (jsonify({"error": "Document not found"}), 404)
+
+    text = (doc.get("text") or "").strip()
+    if text:
+        return text, None
+
+    chunk_text = (doc.get("chunk_text") or doc.get("section_text") or "").strip()
+    if chunk_text:
+        return chunk_text, None
+
+    chunks = doc.get("policy_chunks")
+    if isinstance(chunks, list):
+        parts = []
+        for c in chunks:
+            if isinstance(c, dict):
+                part = (c.get("chunk_text") or c.get("chunk_header_text") or "").strip()
+                if part:
+                    parts.append(part)
+        if parts:
+            return "\n\n".join(parts), None
+
+    return None, (jsonify({"error": "Document has no extractable text"}), 404)
+
+
+GAP_CHECK_PROMPT_TEMPLATE = """Consider the following statute requirement:
+
+{statute_text}
+
+Below is a privacy policy document. Does the policy address this statute requirement? If yes, quote the exact policy phrase that addresses it in policy_quote. If there is a conflict with the statute, describe it in conflict_description and, if the policy contains a phrase that conflicts, quote that exact phrase in policy_quote. policy_quote must be a verbatim substring of the policy text.
+
+PRIVACY POLICY:
+{policy_text}
+
+Respond with only a valid JSON object. Use these exact keys: addressed, policy_quote, missing, conflict, conflict_description. addressed, missing, and conflict must be booleans. policy_quote and conflict_description must be strings or null if not applicable."""
+
+
+@core_bp.post("/gap-check")
+def gap_check():
+    """Single statute-to-policy gap check via LLM.
+
+    Fetches both statute and policy from MongoDB, invokes the LLM, and returns
+    a structured gap_check result (addressed, policy_quote, missing, conflict,
+    conflict_description).
+    """
+    logger.info("POST /gap-check - Starting gap check")
+    payload = request.get_json(silent=True) or {}
+
+    policy_database_name = payload.get("policy_database_name")
+    policy_collection_name = payload.get("policy_collection_name")
+    policy_document_id = payload.get("policy_document_id")
+    statute_database_name = payload.get("statute_database_name")
+    statute_collection_name = payload.get("statute_collection_name")
+    statute_document_id = payload.get("statute_document_id")
+    max_policy_chars = int(payload.get("max_policy_chars", 8000))
+
+    logger.info(
+        "POST /gap-check - policy: %s.%s id=%s, statute: %s.%s id=%s",
+        policy_database_name,
+        policy_collection_name,
+        policy_document_id,
+        statute_database_name,
+        statute_collection_name,
+        statute_document_id,
+    )
+
+    # Validate policy params
+    if not policy_database_name or not policy_collection_name or not policy_document_id:
+        return jsonify({
+            "error": "policy_database_name, policy_collection_name, and policy_document_id are required"
+        }), 400
+
+    # Validate statute params
+    if not statute_database_name or not statute_collection_name or not statute_document_id:
+        return jsonify({
+            "error": "statute_database_name, statute_collection_name, and statute_document_id are required"
+        }), 400
+
+    # Fetch statute text
+    statute_text, err = _fetch_document_text(
+        statute_database_name, statute_collection_name, statute_document_id
+    )
+    if err is not None:
+        resp, code = err
+        if code == 404:
+            return jsonify({"error": "Statute document not found"}), 404
+        return resp, code
+
+    # Fetch policy text
+    policy_text, err = _fetch_document_text(
+        policy_database_name, policy_collection_name, policy_document_id
+    )
+    if err is not None:
+        resp, code = err
+        if code == 404:
+            return jsonify({"error": "Policy document not found"}), 404
+        return resp, code
+
+    # Truncate statute to 4000 chars (keep start)
+    if len(statute_text) > 4000:
+        statute_text = statute_text[:4000]
+
+    # Truncate policy: prefer keeping end (disclosure sections). Use last N chars.
+    if len(policy_text) > max_policy_chars:
+        policy_text = policy_text[-max_policy_chars:]
+
+    prompt = GAP_CHECK_PROMPT_TEMPLATE.format(
+        statute_text=statute_text,
+        policy_text=policy_text,
+    )
+
+    def _parse_gap_response(raw_text: str):
+        raw = extract_json_block(raw_text)
+        if not raw:
+            return None
+        try:
+            out = json.loads(raw)
+            return {
+                "addressed": bool(out.get("addressed")),
+                "policy_quote": out.get("policy_quote") if out.get("policy_quote") else None,
+                "missing": bool(out.get("missing", True)),
+                "conflict": bool(out.get("conflict")),
+                "conflict_description": out.get("conflict_description") if out.get("conflict_description") else None,
+            }
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+    try:
+        response = anthropic_client.messages.create(
+            model="claude-3-5-haiku-20241022",
+            max_tokens=500,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        content = []
+        for block in response.content:
+            if block.type == "text":
+                content.append(block.text)
+        raw_text = "".join(content)
+
+        result = _parse_gap_response(raw_text)
+        if result is None:
+            # Retry with stricter prompt
+            retry_prompt = prompt + "\n\nIMPORTANT: Respond with ONLY a valid JSON object, no other text. Use the exact keys: addressed, policy_quote, missing, conflict, conflict_description."
+            retry_response = anthropic_client.messages.create(
+                model="claude-3-5-haiku-20241022",
+                max_tokens=500,
+                messages=[{"role": "user", "content": retry_prompt}],
+            )
+            retry_content = []
+            for block in retry_response.content:
+                if block.type == "text":
+                    retry_content.append(block.text)
+            result = _parse_gap_response("".join(retry_content))
+
+        if result is None:
+            logger.error("POST /gap-check - Could not parse LLM response")
+            return jsonify({"error": "Could not parse SLM response"}), 500
+
+        logger.info("POST /gap-check - Success")
+        return jsonify({"gap_check": result})
+
+    except Exception as e:
+        logger.error("POST /gap-check - LLM call failed: %s", e)
         return jsonify({"error": f"LLM parsing failed: {str(e)}"}), 500
 
 

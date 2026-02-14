@@ -427,14 +427,11 @@ class TestParseLlm:
         assert data["parsed_doc"][1]["section"] == "\u00a7 2"
 
     def test_parse_llm_with_document_id_success(self, client, mock_clients):
-        """Test successful LLM parsing with a specific document_id."""
-        from bson import ObjectId
-
-        # Arrange
-        test_object_id = ObjectId()
+        """Test successful LLM parsing with document_id field (statutes-style)."""
+        doc_id = "8df572eb-4898-4677-98bf-25e96a7701fa"
         mock_collection = MagicMock()
         mock_collection.find_one.return_value = {
-            "_id": test_object_id,
+            "document_id": doc_id,
             "text": "Specific document text content.",
         }
         mock_clients["mongo"].__getitem__.return_value.__getitem__.return_value = mock_collection
@@ -459,7 +456,7 @@ class TestParseLlm:
                 "database": "test_db",
                 "collection": "test_collection",
                 "parse_prompt": "Summarize the document",
-                "document_id": str(test_object_id),
+                "document_id": doc_id,
             },
         )
 
@@ -470,11 +467,10 @@ class TestParseLlm:
         assert len(data["parsed_doc"]) == 1
         assert data["parsed_doc"][0]["section"] == "\u00a7 1"
 
-        # Verify find_one was called with the ObjectId
+        # Verify find_one was called with document_id
         mock_collection.find_one.assert_called_once()
         call_args = mock_collection.find_one.call_args[0][0]
-        assert "_id" in call_args
-        assert call_args["_id"] == test_object_id
+        assert call_args == {"document_id": doc_id}
 
         # Verify the specific document text is in the LLM input
         call_args = mock_clients["anthropic"].messages.stream.call_args
@@ -508,8 +504,49 @@ class TestParseLlm:
         assert "error" in data
         assert "not found" in data["error"].lower()
 
+    def test_parse_llm_with_document_id_uuid_from_ingest(self, client, mock_clients):
+        """Test parse-llm with _id fallback when document_id query finds nothing (ingest-style)."""
+        ingest_doc_id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        mock_collection = MagicMock()
+        # First call (document_id) returns None; second call (_id) returns doc
+        mock_collection.find_one.side_effect = [
+            None,  # document_id lookup misses
+            {"_id": ingest_doc_id, "text": "Crawled document content from ingest."},
+        ]
+        mock_clients["mongo"].__getitem__.return_value.__getitem__.return_value = mock_collection
+
+        mock_response = create_tool_use_response([
+            {"section": "\u00a7 1", "code_name": "Civil Code", "jurisdiction": "California",
+             "parsed_header_text": "Content", "start_line": 1},
+        ])
+        mock_stream = MagicMock()
+        mock_stream.get_final_message.return_value = mock_response
+        mock_clients["anthropic"].messages.stream.return_value.__enter__.return_value = mock_stream
+
+        response = client.post(
+            "/parse-llm",
+            json={
+                "database": "test_db",
+                "collection": "test_collection",
+                "parse_prompt": "Parse sections",
+                "document_id": ingest_doc_id,
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.get_json()
+        assert "parsed_doc" in data
+        assert len(data["parsed_doc"]) == 1
+        # First call: document_id; second call: _id (ObjectId fails for UUID, then string)
+        assert mock_collection.find_one.call_count == 2
+        assert mock_collection.find_one.call_args_list[0][0][0] == {"document_id": ingest_doc_id}
+        assert mock_collection.find_one.call_args_list[1][0][0]["_id"] == ingest_doc_id
+
     def test_parse_llm_with_invalid_document_id_format(self, client, mock_clients):
-        """Test error when document_id has invalid ObjectId format."""
+        """Test error when document_id has invalid ObjectId format (fallback string lookup returns None)."""
+        mock_collection = MagicMock()
+        mock_collection.find_one.return_value = None  # fallback string lookup finds nothing
+        mock_clients["mongo"].__getitem__.return_value.__getitem__.return_value = mock_collection
         # Act
         response = client.post(
             "/parse-llm",
@@ -525,7 +562,7 @@ class TestParseLlm:
         assert response.status_code == 400
         data = response.get_json()
         assert "error" in data
-        assert "invalid" in data["error"].lower()
+        assert "not found" in data["error"].lower()
 
     def test_parse_llm_with_document_id_no_text(self, client, mock_clients):
         """Test error when document found by document_id has no text attribute."""

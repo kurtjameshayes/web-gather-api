@@ -4,12 +4,13 @@ This module initializes the Flask application and registers all route blueprints
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 
 import anthropic
 from dotenv import load_dotenv
-from flask import Flask
+from flask import Flask, request
 from pymongo import MongoClient
 from firecrawl import FirecrawlApp
 
@@ -67,6 +68,22 @@ app.register_blueprint(routes_bp)
 app.register_blueprint(compliance_bp, url_prefix="/api/compliance")
 # Also mount at root so POST /policy-statute-compliance works (Swagger/docs and legacy clients).
 app.register_blueprint(compliance_bp, url_prefix="", name="compliance_root")
+
+
+@app.before_request
+def log_request_params():
+    """Log all API parameters for every request."""
+    params = {"method": request.method, "path": request.path}
+    if request.args:
+        params["query"] = dict(request.args)
+    if request.method in ("POST", "PUT", "PATCH") and request.is_json:
+        body = request.get_json(silent=True)
+        if body is not None:
+            params["body"] = body
+    elif request.form:
+        params["form"] = dict(request.form)
+    logger.info("API request: %s", json.dumps(params, default=str))
+
 
 # #region agent log
 try:

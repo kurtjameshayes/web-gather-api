@@ -14,11 +14,18 @@ from compliance_evaluator import ComplianceEvaluator
 from compliance_service import ComplianceService, ServiceError
 from compliance_storage import ComplianceStorage
 from compliance_suite_schemas import (
+    AlertsListResponse,
+    AlertListItem,
     ApplicabilityRequest,
+    CitationsRequest,
     DriftCheckRequest,
     GapAnalysisRequest,
     HealthScoreRequest,
     MultiJurisdictionalRequest,
+    ReportRequest,
+    RiskAssessmentRequest,
+    RunSummaryItem,
+    RunsListResponse,
 )
 from compliance_suite_service import ComplianceSuiteService, ComplianceSuiteServiceError
 from db import get_embedding_model_name, set_application_embedding_model
@@ -298,3 +305,213 @@ async def drift_check():
     except Exception:
         logger.exception("Unhandled error in drift_check")
         return jsonify({"error": "Internal server error"}), 500
+
+
+# ----- New spec endpoints (report, runs, citations, risk-assessment, alerts) -----
+
+
+def _parse_iso8601(s: str | None) -> str | None:
+    if not s or not s.strip():
+        return None
+    try:
+        from datetime import datetime
+        datetime.fromisoformat(s.strip().replace("Z", "+00:00"))
+        return s.strip()
+    except ValueError:
+        return None
+
+
+@compliance_bp.post("/report")
+async def report():
+    logger.info("POST /report - Generate compliance report")
+    payload = request.get_json(silent=True) or {}
+    try:
+        request_model = ReportRequest.model_validate(payload)
+    except ValidationError as exc:
+        return jsonify({"error": "Validation error", "details": exc.errors()}), 422
+    try:
+        authorize_request(_get_config(), request)
+    except AuthorizationError as exc:
+        return jsonify({"error": exc.message}), exc.status_code
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 500
+    try:
+        result = await _get_suite_service().report(request_model)
+        return jsonify(result)
+    except ComplianceSuiteServiceError as exc:
+        return jsonify({"error": str(exc)}), exc.status_code
+    except Exception:
+        logger.exception("Unhandled error in report")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@compliance_bp.get("/runs")
+async def list_runs():
+    logger.info("GET /runs - List compliance runs")
+    try:
+        authorize_request(_get_config(), request)
+    except AuthorizationError as exc:
+        return jsonify({"error": exc.message}), exc.status_code
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    policy_document_id = request.args.get("policy_document_id") or None
+    since_arg = request.args.get("since")
+    until_arg = request.args.get("until")
+    since = _parse_iso8601(since_arg) if since_arg is not None else None
+    until = _parse_iso8601(until_arg) if until_arg is not None else None
+    if since_arg is not None and since is None:
+        return jsonify({"error": "Invalid since (expected ISO8601)"}), 400
+    if until_arg is not None and until is None:
+        return jsonify({"error": "Invalid until (expected ISO8601)"}), 400
+    try:
+        limit = int(request.args.get("limit", 50))
+        limit = max(0, min(200, limit))
+    except ValueError:
+        limit = 50
+    try:
+        offset = int(request.args.get("offset", 0))
+        offset = max(0, offset)
+    except ValueError:
+        offset = 0
+    types_param = request.args.get("types")
+    types = [t.strip() for t in types_param.split(",") if t.strip()] if types_param else None
+    if types_param and not types:
+        types = None
+
+    try:
+        run_summaries, total = await _get_suite_service()._storage.list_runs(
+            policy_document_id=policy_document_id,
+            since=since,
+            until=until,
+            types=types,
+            limit=limit,
+            offset=offset,
+        )
+    except Exception as e:
+        logger.exception("Error listing runs")
+        return jsonify({"error": str(e)}), 502
+
+    runs = [RunSummaryItem(**s) for s in run_summaries]
+    resp = RunsListResponse(runs=runs, total=total, limit=limit, offset=offset)
+    return jsonify(resp.model_dump())
+
+
+@compliance_bp.get("/runs/<run_id>")
+async def get_run(run_id: str):
+    logger.info("GET /runs/%s - Get run detail", run_id)
+    try:
+        authorize_request(_get_config(), request)
+    except AuthorizationError as exc:
+        return jsonify({"error": exc.message}), exc.status_code
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    doc = await _get_suite_service()._storage.get_run_by_id(run_id)
+    if not doc:
+        return jsonify({"error": "Run not found"}), 404
+    return jsonify(doc)
+
+
+@compliance_bp.post("/citations")
+async def citations():
+    logger.info("POST /citations - Statute-policy citation extraction")
+    payload = request.get_json(silent=True) or {}
+    try:
+        request_model = CitationsRequest.model_validate(payload)
+    except ValidationError as exc:
+        return jsonify({"error": "Validation error", "details": exc.errors()}), 422
+    try:
+        authorize_request(_get_config(), request)
+    except AuthorizationError as exc:
+        return jsonify({"error": exc.message}), exc.status_code
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 500
+    try:
+        result = await _get_suite_service().citations(request_model)
+        return jsonify(result.model_dump())
+    except ComplianceSuiteServiceError as exc:
+        return jsonify({"error": str(exc)}), exc.status_code
+    except Exception:
+        logger.exception("Unhandled error in citations")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@compliance_bp.post("/risk-assessment")
+async def risk_assessment():
+    logger.info("POST /risk-assessment - DPIA/PIA-style assessment")
+    payload = request.get_json(silent=True) or {}
+    try:
+        request_model = RiskAssessmentRequest.model_validate(payload)
+    except ValidationError as exc:
+        return jsonify({"error": "Validation error", "details": exc.errors()}), 422
+    try:
+        authorize_request(_get_config(), request)
+    except AuthorizationError as exc:
+        return jsonify({"error": exc.message}), exc.status_code
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 500
+    try:
+        result = await _get_suite_service().risk_assessment(request_model)
+        return jsonify(result.model_dump())
+    except ComplianceSuiteServiceError as exc:
+        return jsonify({"error": str(exc)}), exc.status_code
+    except Exception:
+        logger.exception("Unhandled error in risk_assessment")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@compliance_bp.get("/risk-assessment/templates")
+async def risk_assessment_templates():
+    logger.info("GET /risk-assessment/templates - List assessment templates")
+    try:
+        authorize_request(_get_config(), request)
+    except AuthorizationError as exc:
+        return jsonify({"error": exc.message}), exc.status_code
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 500
+    result = await _get_suite_service().list_templates()
+    return jsonify(result.model_dump())
+
+
+@compliance_bp.get("/alerts")
+async def list_alerts():
+    logger.info("GET /alerts - List drift alerts")
+    try:
+        authorize_request(_get_config(), request)
+    except AuthorizationError as exc:
+        return jsonify({"error": exc.message}), exc.status_code
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    policy_document_id = request.args.get("policy_document_id") or None
+    company_name = request.args.get("company_name") or None
+    jurisdiction = request.args.get("jurisdiction") or None
+    since = _parse_iso8601(request.args.get("since"))
+    try:
+        limit = int(request.args.get("limit", 50))
+        limit = max(0, min(200, limit))
+    except ValueError:
+        limit = 50
+    try:
+        offset = int(request.args.get("offset", 0))
+        offset = max(0, offset)
+    except ValueError:
+        offset = 0
+
+    try:
+        alerts_docs, total = await _get_suite_service()._storage.list_alerts(
+            policy_document_id=policy_document_id,
+            company_name=company_name,
+            jurisdiction=jurisdiction,
+            since=since,
+            limit=limit,
+            offset=offset,
+        )
+    except Exception as e:
+        logger.exception("Error listing alerts")
+        return jsonify({"error": str(e)}), 502
+
+    alerts = [AlertListItem(**a) for a in alerts_docs]
+    resp = AlertsListResponse(alerts=alerts, total=total, limit=limit, offset=offset)
+    return jsonify(resp.model_dump())

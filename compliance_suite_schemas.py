@@ -34,6 +34,9 @@ class ApplicabilityResponse(BaseModel):
 class GapItem(BaseModel):
     jurisdiction: str
     statute_reference: str
+    statute_name: Optional[str] = None
+    statute_chunk_id: Optional[str] = None
+    section: Optional[str] = None
     requirement_summary: str
     status: str = Field(..., pattern="^(missing|addressed|conflict)$")
     policy_quote: Optional[str] = None
@@ -54,6 +57,7 @@ class GapAnalysisRequest(BaseModel):
     applicable_jurisdictions: Optional[List[str]] = None
     database: Optional[str] = None
     policy_collection: Optional[str] = None
+    save_results: bool = True  # If False, do not persist (e.g. for report run_now)
 
 
 class GapAnalysisResponse(BaseModel):
@@ -111,6 +115,7 @@ class HealthScoreRequest(BaseModel):
     weights: Optional[Dict[str, float]] = None
     database: Optional[str] = None
     policy_collection: Optional[str] = None
+    save_results: bool = True  # If False, do not persist (e.g. for report run_now)
 
 
 class HealthScoreResponse(BaseModel):
@@ -157,3 +162,122 @@ class DriftCheckResponse(BaseModel):
     alerts: List[DriftAlertItem] = Field(default_factory=list)
     policies_checked: int = 0
     alerts_written: int = 0
+
+
+# ----- Report (new spec) -----
+
+
+class ReportRequest(BaseModel):
+    policy_document_id: str = Field(..., min_length=1)
+    format: str = Field(..., pattern="^(markdown|pdf)$")
+    source: str = Field(default="latest_stored", pattern="^(latest_stored|run_now)$")
+    applicable_jurisdictions: Optional[List[str]] = None
+    include_gap: bool = True
+    include_health_score: bool = True
+    include_multi_jurisdictional: bool = False
+
+
+# ----- Runs list/detail (new spec) -----
+
+
+class RunSummaryItem(BaseModel):
+    run_id: str
+    policy_document_id: str
+    company_name: Optional[str] = None
+    run_at: str  # ISO8601
+    types: List[str] = Field(default_factory=list)
+    privacy_health_score: Optional[int] = None
+    summary: Optional[Dict[str, Any]] = None
+
+
+class RunsListResponse(BaseModel):
+    runs: List[RunSummaryItem] = Field(default_factory=list)
+    total: int = 0
+    limit: int = 50
+    offset: int = 0
+
+
+# ----- Citations (new spec) -----
+
+
+class CitationItem(BaseModel):
+    policy_excerpt: str
+    policy_chunk_id: Optional[str] = None
+    statute_reference: str
+    jurisdiction: str
+    alignment: bool
+    statute_excerpt: Optional[str] = None
+
+
+class CitationsRequest(BaseModel):
+    policy_document_id: str = Field(..., min_length=1)
+    applicable_jurisdictions: Optional[List[str]] = None
+
+
+class CitationsSummary(BaseModel):
+    total_citations: int = 0
+    aligned: int = 0
+    not_aligned: int = 0
+
+
+class CitationsResponse(BaseModel):
+    policy_document_id: str
+    company_name: Optional[str] = None
+    applicable_jurisdictions: List[str] = Field(default_factory=list)
+    analyzed_at: str  # ISO8601
+    citations: List[CitationItem] = Field(default_factory=list)
+    summary: CitationsSummary = Field(default_factory=CitationsSummary)
+
+
+# ----- Risk assessment (new spec) -----
+
+
+class RiskAssessmentRequest(BaseModel):
+    policy_document_id: str = Field(..., min_length=1)
+    applicable_jurisdictions: Optional[List[str]] = None
+    template_id: Optional[str] = None
+    include_report: bool = False
+
+
+class RiskAssessmentResponse(BaseModel):
+    policy_document_id: str
+    company_name: Optional[str] = None
+    applicable_jurisdictions: List[str] = Field(default_factory=list)
+    template_id: str = "default"
+    analyzed_at: str  # ISO8601
+    assessment: Dict[str, Any] = Field(default_factory=dict)
+    report: Optional[str] = None
+
+
+class TemplateItem(BaseModel):
+    id: str
+    label: str
+
+
+class TemplatesResponse(BaseModel):
+    templates: List[TemplateItem] = Field(default_factory=list)
+
+
+# ----- Alerts list (new spec; response shape) -----
+
+
+class AlertListItem(BaseModel):
+    alert_id: str
+    type: str = "regulatory_drift"
+    policy_document_id: str
+    company_name: Optional[str] = None
+    trigger: str
+    affected_jurisdictions: List[str] = Field(default_factory=list)
+    new_gaps: List[Any] = Field(default_factory=list)
+    resolved_gaps: List[Any] = Field(default_factory=list)
+    score_delta: Optional[int] = None
+    previous_score: Optional[int] = None
+    current_score: Optional[int] = None
+    detected_at: str  # ISO8601
+
+
+class AlertsListResponse(BaseModel):
+    alerts: List[AlertListItem] = Field(default_factory=list)
+    total: int = 0
+    limit: int = 50
+    offset: int = 0

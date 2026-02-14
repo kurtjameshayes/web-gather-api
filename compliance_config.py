@@ -53,6 +53,7 @@ class ComplianceConfig:
     statute_title_field: str
     statute_id_field: str
     statute_section_id_field: str
+    statute_section_field: str  # Formal citation (e.g. § 1798.100) in statute_chunks/embeddings
     statute_jurisdiction_field: str
     statute_corpus_field: str
     embedding_collection_tag_field: str
@@ -113,6 +114,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "statute_title_field": "title",
     "statute_id_field": "_id",
     "statute_section_id_field": "section_id",
+    "statute_section_field": "section",
     "statute_jurisdiction_field": "jurisdiction",
     "statute_corpus_field": "statute_corpus_id",
     "embedding_collection_tag_field": "collection",
@@ -253,6 +255,7 @@ def load_config() -> ComplianceConfig:
         statute_title_field=data["statute_title_field"],
         statute_id_field=data["statute_id_field"],
         statute_section_id_field=data["statute_section_id_field"],
+        statute_section_field=data.get("statute_section_field", DEFAULT_CONFIG["statute_section_field"]),
         statute_jurisdiction_field=data["statute_jurisdiction_field"],
         statute_corpus_field=data["statute_corpus_field"],
         embedding_collection_tag_field=data["embedding_collection_tag_field"],

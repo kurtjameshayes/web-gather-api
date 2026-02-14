@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from compliance_config import ComplianceConfig
 from compliance_utils import utc_now
@@ -149,3 +150,117 @@ class ComplianceStorage:
             return [str(doc[id_field]) for doc in cursor if doc.get(id_field)]
 
         return await _run_in_thread(find)
+
+    async def list_runs(
+        self,
+        policy_document_id: Optional[str] = None,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
+        types: Optional[List[str]] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """List compliance result runs with filters. Returns (list of run summary dicts, total count)."""
+        query: Dict[str, Any] = {}
+        if policy_document_id:
+            query["policy_document_id"] = policy_document_id
+        if types:
+            query["run_types"] = {"$in": types}
+        if since or until:
+            date_expr: Dict[str, Any] = {}
+            if since:
+                date_expr["$gte"] = since
+            if until:
+                date_expr["$lte"] = until
+            query["analyzed_at"] = date_expr
+
+        def find_and_count():
+            coll = self._results()
+            total = coll.count_documents(query)
+            cursor = (
+                coll.find(query)
+                .sort("analyzed_at", -1)
+                .skip(offset)
+                .limit(limit)
+            )
+            docs = list(cursor)
+            return docs, total
+
+        docs, total = await _run_in_thread(find_and_count)
+        run_summaries: List[Dict[str, Any]] = []
+        for doc in docs:
+            run_id = str(doc.get("_id", ""))
+            run_at = doc.get("analyzed_at", "")
+            type_list: List[str] = doc.get("run_types") or []
+            if not type_list:
+                if doc.get("gaps") is not None:
+                    type_list.append("gap")
+                if doc.get("privacy_health_score") is not None:
+                    type_list.append("health_score")
+                if doc.get("strictest_common_denominator") is not None:
+                    type_list.append("multi_jurisdictional")
+                if doc.get("applicable_jurisdictions") is not None and not type_list:
+                    type_list.append("applicability")
+            run_summaries.append({
+                "run_id": run_id,
+                "policy_document_id": doc.get("policy_document_id", ""),
+                "company_name": doc.get("company_name"),
+                "run_at": run_at,
+                "types": type_list,
+                "privacy_health_score": doc.get("privacy_health_score"),
+                "summary": doc.get("summary"),
+            })
+        return run_summaries, total
+
+    async def get_run_by_id(self, run_id: str) -> Optional[Dict[str, Any]]:
+        """Get a single compliance result by run_id (_id). Returns None if not found."""
+        def find():
+            return self._results().find_one({"_id": run_id})
+
+        doc = await _run_in_thread(find)
+        if not doc:
+            return None
+        if "_id" in doc:
+            doc["run_id"] = str(doc["_id"])
+            doc["_id"] = str(doc["_id"])
+        return doc
+
+    async def list_alerts(
+        self,
+        policy_document_id: Optional[str] = None,
+        company_name: Optional[str] = None,
+        jurisdiction: Optional[str] = None,
+        since: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """List drift alerts with filters. Returns (list of alert dicts, total count)."""
+        query: Dict[str, Any] = {}
+        if policy_document_id:
+            query["policy_document_id"] = policy_document_id
+        if company_name and company_name.strip():
+            query["company_name"] = {"$regex": re.escape(company_name.strip()), "$options": "i"}
+        if jurisdiction:
+            query["affected_jurisdictions"] = jurisdiction
+        if since:
+            query["detected_at"] = {"$gte": since}
+
+        def find_and_count():
+            coll = self._alerts()
+            total = coll.count_documents(query)
+            cursor = (
+                coll.find(query)
+                .sort("detected_at", -1)
+                .skip(offset)
+                .limit(limit)
+            )
+            return list(cursor), total
+
+        docs, total = await _run_in_thread(find_and_count)
+        out: List[Dict[str, Any]] = []
+        for doc in docs:
+            d = dict(doc)
+            if "_id" in d:
+                del d["_id"]
+            out.append(d)
+        return out, total

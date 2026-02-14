@@ -60,6 +60,28 @@ def safe_truncate(text: str, max_chars: int) -> str:
     return text[: max_chars - 3].rstrip() + "..."
 
 
+def truncate_at_sentence(text: str, max_chars: int = 350) -> str:
+    """Truncate text at the last sentence boundary before max_chars.
+
+    Finds the last . ! or ? before max_chars and returns the substring up to
+    and including that character. If no sentence boundary found, returns
+    text[:max_chars].rstrip().
+    """
+    if not text or max_chars <= 0:
+        return text or ""
+    if len(text) <= max_chars:
+        return text
+    segment = text[:max_chars]
+    last_sent = max(
+        segment.rfind("."),
+        segment.rfind("!"),
+        segment.rfind("?"),
+    )
+    if last_sent >= 0:
+        return text[: last_sent + 1].strip()
+    return segment.rstrip()
+
+
 def slugify(value: str, fallback: str = "section") -> str:
     cleaned = re.sub(r"[^a-zA-Z0-9]+", "_", value.strip().lower())
     cleaned = cleaned.strip("_")

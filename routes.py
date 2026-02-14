@@ -166,6 +166,323 @@ def build_openapi_spec():
                     "type": "object",
                     "properties": {"error": {"type": "string"}},
                 },
+                "ApplicabilityRequest": {
+                    "type": "object",
+                    "properties": {
+                        "policy_document_id": {"type": "string"},
+                        "text": {"type": "string"},
+                        "database": {"type": "string"},
+                        "policy_collection": {"type": "string"},
+                    },
+                },
+                "ApplicabilityResponse": {
+                    "type": "object",
+                    "properties": {
+                        "applicable_jurisdictions": {"type": "array", "items": {"type": "string"}},
+                        "confidence": {"type": "object", "additionalProperties": {"type": "number"}},
+                    },
+                },
+                "GapItem": {
+                    "type": "object",
+                    "properties": {
+                        "jurisdiction": {"type": "string"},
+                        "statute_reference": {"type": "string"},
+                        "statute_name": {"type": ["string", "null"]},
+                        "statute_chunk_id": {"type": ["string", "null"]},
+                        "section": {"type": ["string", "null"]},
+                        "requirement_summary": {"type": "string"},
+                        "status": {"type": "string", "enum": ["missing", "addressed", "conflict"]},
+                        "policy_quote": {"type": ["string", "null"]},
+                        "conflict_description": {"type": ["string", "null"]},
+                        "analysis_failed": {"type": "boolean"},
+                    },
+                },
+                "GapSummary": {
+                    "type": "object",
+                    "properties": {
+                        "total_requirements": {"type": "integer"},
+                        "missing": {"type": "integer"},
+                        "addressed": {"type": "integer"},
+                        "conflicts": {"type": "integer"},
+                    },
+                },
+                "GapAnalysisRequest": {
+                    "type": "object",
+                    "properties": {
+                        "policy_document_id": {"type": "string"},
+                        "applicable_jurisdictions": {"type": "array", "items": {"type": "string"}},
+                        "database": {"type": "string"},
+                        "policy_collection": {"type": "string"},
+                        "save_results": {"type": "boolean", "default": True},
+                    },
+                    "required": ["policy_document_id"],
+                },
+                "GapAnalysisResponse": {
+                    "type": "object",
+                    "properties": {
+                        "policy_document_id": {"type": "string"},
+                        "company_name": {"type": ["string", "null"]},
+                        "applicable_jurisdictions": {"type": "array", "items": {"type": "string"}},
+                        "analyzed_at": {"type": "string"},
+                        "gaps": {"type": "array", "items": {"$ref": "#/components/schemas/GapItem"}},
+                        "summary": {"$ref": "#/components/schemas/GapSummary"},
+                    },
+                },
+                "HealthScoreRequest": {
+                    "type": "object",
+                    "properties": {
+                        "policy_document_id": {"type": "string"},
+                        "applicable_jurisdictions": {"type": "array", "items": {"type": "string"}},
+                        "weights": {"type": "object"},
+                        "database": {"type": "string"},
+                        "policy_collection": {"type": "string"},
+                        "save_results": {"type": "boolean", "default": True},
+                    },
+                    "required": ["policy_document_id"],
+                },
+                "HealthScoreResponse": {
+                    "type": "object",
+                    "properties": {
+                        "policy_document_id": {"type": "string"},
+                        "company_name": {"type": ["string", "null"]},
+                        "privacy_health_score": {"type": ["integer", "null"]},
+                        "score_breakdown": {"type": "object"},
+                        "components": {"type": "object"},
+                        "analyzed_at": {"type": "string"},
+                        "error": {"type": ["string", "null"]},
+                    },
+                },
+                "MultiJurisdictionalRequest": {
+                    "type": "object",
+                    "properties": {
+                        "applicable_jurisdictions": {"type": "array", "items": {"type": "string"}},
+                        "policy_document_id": {"type": "string"},
+                        "database": {"type": "string"},
+                        "policy_collection": {"type": "string"},
+                    },
+                    "required": ["applicable_jurisdictions"],
+                },
+                "MultiJurisdictionalResponse": {
+                    "type": "object",
+                    "properties": {
+                        "applicable_jurisdictions": {"type": "array", "items": {"type": "string"}},
+                        "analyzed_at": {"type": "string"},
+                        "strictest_common_denominator": {"type": "array"},
+                        "conflicts_between_jurisdictions": {"type": "array"},
+                    },
+                },
+                "DriftCheckRequest": {
+                    "type": "object",
+                    "properties": {
+                        "since": {"type": "string", "description": "ISO8601 timestamp"},
+                        "policy_document_ids": {"type": "array", "items": {"type": "string"}},
+                        "full_rebaseline": {"type": "boolean", "default": False},
+                    },
+                },
+                "DriftCheckResponse": {
+                    "type": "object",
+                    "properties": {
+                        "alerts": {"type": "array"},
+                        "policies_checked": {"type": "integer"},
+                        "alerts_written": {"type": "integer"},
+                    },
+                },
+                "GapCheckRequest": {
+                    "type": "object",
+                    "description": "Request body for a single statute-to-policy gap check. Both policy and statute are fetched from MongoDB.",
+                    "properties": {
+                        "policy_database_name": {
+                            "type": "string",
+                            "description": "Database containing the policy document",
+                        },
+                        "policy_collection_name": {
+                            "type": "string",
+                            "description": "Collection containing the policy document",
+                        },
+                        "policy_document_id": {
+                            "type": "string",
+                            "description": "Document ID of the policy",
+                        },
+                        "statute_database_name": {
+                            "type": "string",
+                            "description": "Database containing the statute requirement document",
+                        },
+                        "statute_collection_name": {
+                            "type": "string",
+                            "description": "Collection containing the statute requirement document",
+                        },
+                        "statute_document_id": {
+                            "type": "string",
+                            "description": "Document ID of the statute requirement",
+                        },
+                        "max_policy_chars": {
+                            "type": "integer",
+                            "default": 8000,
+                            "description": "Max characters of policy text to send to the LLM (truncated from start to keep end)",
+                        },
+                    },
+                    "required": [
+                        "policy_database_name",
+                        "policy_collection_name",
+                        "policy_document_id",
+                        "statute_database_name",
+                        "statute_collection_name",
+                        "statute_document_id",
+                    ],
+                },
+                "GapCheckResponse": {
+                    "type": "object",
+                    "properties": {
+                        "gap_check": {
+                            "type": "object",
+                            "properties": {
+                                "addressed": {"type": "boolean"},
+                                "policy_quote": {"type": ["string", "null"]},
+                                "missing": {"type": "boolean"},
+                                "conflict": {"type": "boolean"},
+                                "conflict_description": {"type": ["string", "null"]},
+                            },
+                            "required": ["addressed", "policy_quote", "missing", "conflict", "conflict_description"],
+                        }
+                    },
+                    "required": ["gap_check"],
+                },
+                "ReportRequest": {
+                    "type": "object",
+                    "description": "Request body for generating a compliance report (Markdown or PDF).",
+                    "properties": {
+                        "policy_document_id": {"type": "string", "description": "Policy document ID."},
+                        "format": {"type": "string", "enum": ["markdown", "pdf"], "description": "Report format."},
+                        "source": {
+                            "type": "string",
+                            "enum": ["latest_stored", "run_now"],
+                            "default": "latest_stored",
+                            "description": "Use latest stored result or run gap+health now (no persist).",
+                        },
+                        "applicable_jurisdictions": {"type": "array", "items": {"type": "string"}, "description": "Used when source is run_now."},
+                        "include_gap": {"type": "boolean", "default": True, "description": "Include gap analysis section."},
+                        "include_health_score": {"type": "boolean", "default": True, "description": "Include Privacy Health Score."},
+                        "include_multi_jurisdictional": {"type": "boolean", "default": False, "description": "Include strictest-common-denominator (run_now only)."},
+                    },
+                    "required": ["policy_document_id", "format"],
+                },
+                "ReportResponseMarkdown": {
+                    "type": "object",
+                    "properties": {
+                        "format": {"type": "string", "enum": ["markdown"]},
+                        "content": {"type": "string", "description": "Markdown report content."},
+                    },
+                    "required": ["format", "content"],
+                },
+                "RunSummaryItem": {
+                    "type": "object",
+                    "properties": {
+                        "run_id": {"type": "string"},
+                        "policy_document_id": {"type": "string"},
+                        "company_name": {"type": "string", "nullable": True},
+                        "run_at": {"type": "string", "description": "ISO8601"},
+                        "types": {"type": "array", "items": {"type": "string"}},
+                        "privacy_health_score": {"type": "integer", "nullable": True},
+                        "summary": {"type": "object", "properties": {"total_requirements": {"type": "integer"}, "missing": {"type": "integer"}, "addressed": {"type": "integer"}, "conflicts": {"type": "integer"}}},
+                    },
+                },
+                "RunsListResponse": {
+                    "type": "object",
+                    "properties": {
+                        "runs": {"type": "array", "items": {"$ref": "#/components/schemas/RunSummaryItem"}},
+                        "total": {"type": "integer"},
+                        "limit": {"type": "integer"},
+                        "offset": {"type": "integer"},
+                    },
+                    "required": ["runs", "total", "limit", "offset"],
+                },
+                "CitationsRequest": {
+                    "type": "object",
+                    "properties": {
+                        "policy_document_id": {"type": "string"},
+                        "applicable_jurisdictions": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["policy_document_id"],
+                },
+                "CitationItem": {
+                    "type": "object",
+                    "properties": {
+                        "policy_excerpt": {"type": "string"},
+                        "policy_chunk_id": {"type": "string", "nullable": True},
+                        "statute_reference": {"type": "string"},
+                        "jurisdiction": {"type": "string"},
+                        "alignment": {"type": "boolean"},
+                        "statute_excerpt": {"type": "string", "nullable": True},
+                    },
+                },
+                "CitationsResponse": {
+                    "type": "object",
+                    "properties": {
+                        "policy_document_id": {"type": "string"},
+                        "company_name": {"type": "string", "nullable": True},
+                        "applicable_jurisdictions": {"type": "array", "items": {"type": "string"}},
+                        "analyzed_at": {"type": "string"},
+                        "citations": {"type": "array", "items": {"$ref": "#/components/schemas/CitationItem"}},
+                        "summary": {"type": "object", "properties": {"total_citations": {"type": "integer"}, "aligned": {"type": "integer"}, "not_aligned": {"type": "integer"}}},
+                    },
+                },
+                "RiskAssessmentRequest": {
+                    "type": "object",
+                    "properties": {
+                        "policy_document_id": {"type": "string"},
+                        "applicable_jurisdictions": {"type": "array", "items": {"type": "string"}},
+                        "template_id": {"type": "string", "nullable": True},
+                        "include_report": {"type": "boolean", "default": False},
+                    },
+                    "required": ["policy_document_id"],
+                },
+                "RiskAssessmentResponse": {
+                    "type": "object",
+                    "properties": {
+                        "policy_document_id": {"type": "string"},
+                        "company_name": {"type": "string", "nullable": True},
+                        "applicable_jurisdictions": {"type": "array", "items": {"type": "string"}},
+                        "template_id": {"type": "string"},
+                        "analyzed_at": {"type": "string"},
+                        "assessment": {"type": "object", "description": "processing_purposes, data_categories, risks, mitigations, gaps_from_statute"},
+                        "report": {"type": "string", "nullable": True},
+                    },
+                },
+                "TemplateItem": {
+                    "type": "object",
+                    "properties": {"id": {"type": "string"}, "label": {"type": "string"}},
+                },
+                "TemplatesResponse": {
+                    "type": "object",
+                    "properties": {"templates": {"type": "array", "items": {"$ref": "#/components/schemas/TemplateItem"}}},
+                },
+                "AlertListItem": {
+                    "type": "object",
+                    "properties": {
+                        "alert_id": {"type": "string"},
+                        "type": {"type": "string"},
+                        "policy_document_id": {"type": "string"},
+                        "company_name": {"type": "string", "nullable": True},
+                        "trigger": {"type": "string"},
+                        "affected_jurisdictions": {"type": "array", "items": {"type": "string"}},
+                        "new_gaps": {"type": "array"},
+                        "resolved_gaps": {"type": "array"},
+                        "score_delta": {"type": "integer", "nullable": True},
+                        "previous_score": {"type": "integer", "nullable": True},
+                        "current_score": {"type": "integer", "nullable": True},
+                        "detected_at": {"type": "string"},
+                    },
+                },
+                "AlertsListResponse": {
+                    "type": "object",
+                    "properties": {
+                        "alerts": {"type": "array", "items": {"$ref": "#/components/schemas/AlertListItem"}},
+                        "total": {"type": "integer"},
+                        "limit": {"type": "integer"},
+                        "offset": {"type": "integer"},
+                    },
+                    "required": ["alerts", "total", "limit", "offset"],
+                },
             }
         },
         "paths": {
@@ -915,6 +1232,63 @@ def build_openapi_spec():
                     },
                 }
             },
+            "/gap-check": {
+                "post": {
+                    "summary": "Single statute-to-policy gap check",
+                    "description": "Fetches both the statute requirement and policy document from MongoDB, invokes the LLM to determine if the policy addresses the statute requirement, and returns a structured gap_check result (addressed, policy_quote, missing, conflict, conflict_description).",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/GapCheckRequest"},
+                                "example": {
+                                    "policy_database_name": "privacy-compliance",
+                                    "policy_collection_name": "policies",
+                                    "policy_document_id": "142bcbe4-f34b-4f60-8be3-79ed269375ab",
+                                    "statute_database_name": "privacy-compliance",
+                                    "statute_collection_name": "statutes",
+                                    "statute_document_id": "8df572eb-4898-4677-98bf-25e96a7701fa",
+                                    "max_policy_chars": 8000,
+                                },
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Gap check result",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/GapCheckResponse"},
+                                }
+                            },
+                        },
+                        "400": {
+                            "description": "Missing required parameters",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/ErrorResponse"},
+                                }
+                            },
+                        },
+                        "404": {
+                            "description": "Statute or policy document not found",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/ErrorResponse"},
+                                }
+                            },
+                        },
+                        "500": {
+                            "description": "LLM parsing failed or could not parse SLM response",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/ErrorResponse"},
+                                }
+                            },
+                        },
+                    },
+                }
+            },
             f"{COMPLIANCE_API_PREFIX}/policy-statute-compliance": {
                 "post": {
                     "summary": "Compare policy to statutes for compliance",
@@ -981,6 +1355,284 @@ def build_openapi_spec():
                                 }
                             },
                         },
+                    },
+                }
+            },
+            f"{COMPLIANCE_API_PREFIX}/applicability": {
+                "post": {
+                    "summary": "Infer applicable jurisdictions",
+                    "description": "Analyze policy text to infer which US state codes (e.g. CA, VA) or US federal the policy is likely intended for.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/ApplicabilityRequest"},
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Applicable jurisdictions and confidence",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/ApplicabilityResponse"},
+                                }
+                            },
+                        },
+                        "400": {"description": "Bad request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "422": {"description": "Validation error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                    },
+                }
+            },
+            f"{COMPLIANCE_API_PREFIX}/gap-analysis": {
+                "post": {
+                    "summary": "Full gap analysis",
+                    "description": "Retrieve relevant statute chunks for the policy's jurisdictions, run gap checks against each, and return a full gap analysis with gaps, summary, and optional persistence.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/GapAnalysisRequest"},
+                                "example": {
+                                    "policy_document_id": "doc-123",
+                                    "applicable_jurisdictions": ["CA", "VA"],
+                                },
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Gap analysis with gaps and summary",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/GapAnalysisResponse"},
+                                }
+                            },
+                        },
+                        "400": {"description": "Bad request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "404": {"description": "Policy not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "422": {"description": "Validation error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                    },
+                }
+            },
+            f"{COMPLIANCE_API_PREFIX}/multi-jurisdictional": {
+                "post": {
+                    "summary": "Strictest common denominator",
+                    "description": "Compare how each jurisdiction formulates requirements and identify the strictest formulation.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/MultiJurisdictionalRequest"},
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Strictest common denominator analysis",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/MultiJurisdictionalResponse"},
+                                }
+                            },
+                        },
+                        "422": {"description": "Validation error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                    },
+                }
+            },
+            f"{COMPLIANCE_API_PREFIX}/health-score": {
+                "post": {
+                    "summary": "Privacy health score",
+                    "description": "Compute a 0-100 privacy health score from gap analysis results.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/HealthScoreRequest"},
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Health score and breakdown",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/HealthScoreResponse"},
+                                }
+                            },
+                        },
+                        "400": {"description": "Bad request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "404": {"description": "Policy not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "422": {"description": "Validation error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                    },
+                }
+            },
+            f"{COMPLIANCE_API_PREFIX}/drift-check": {
+                "post": {
+                    "summary": "Regulatory drift check",
+                    "description": "Check for new statute chunks since last run and generate drift alerts for affected policies.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/DriftCheckRequest"},
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Drift alerts and counts",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/DriftCheckResponse"},
+                                }
+                            },
+                        },
+                        "422": {"description": "Validation error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                    },
+                }
+            },
+            f"{COMPLIANCE_API_PREFIX}/report": {
+                "post": {
+                    "summary": "Generate compliance report",
+                    "description": "Generate a Markdown or PDF compliance report for a policy from latest stored result or an ad-hoc run (run_now does not persist).",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/ReportRequest"},
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Report content (markdown)",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/ReportResponseMarkdown"},
+                                }
+                            },
+                        },
+                        "400": {"description": "Invalid request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "404": {"description": "No stored result when source=latest_stored", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "501": {"description": "PDF not implemented", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "502": {"description": "Upstream (gap/health) failed", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                    },
+                }
+            },
+            f"{COMPLIANCE_API_PREFIX}/runs": {
+                "get": {
+                    "summary": "List compliance runs",
+                    "description": "List versioned compliance runs (audit trail) with optional filters: policy_document_id, since, until, limit, offset, types (gap, health_score, multi_jurisdictional, applicability).",
+                    "parameters": [
+                        {"name": "policy_document_id", "in": "query", "schema": {"type": "string"}, "description": "Filter by policy."},
+                        {"name": "since", "in": "query", "schema": {"type": "string", "format": "date-time"}, "description": "Runs with run_at >= since (ISO8601)."},
+                        {"name": "until", "in": "query", "schema": {"type": "string", "format": "date-time"}, "description": "Runs with run_at <= until (ISO8601)."},
+                        {"name": "limit", "in": "query", "schema": {"type": "integer", "default": 50, "maximum": 200}, "description": "Max items."},
+                        {"name": "offset", "in": "query", "schema": {"type": "integer", "default": 0}, "description": "Pagination offset."},
+                        {"name": "types", "in": "query", "schema": {"type": "string"}, "description": "Comma-separated: gap, health_score, multi_jurisdictional, applicability."},
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "List of run summaries",
+                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RunsListResponse"}}},
+                        },
+                        "400": {"description": "Invalid since/until or limit/offset", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "502": {"description": "Upstream failed", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                    },
+                }
+            },
+            f"{COMPLIANCE_API_PREFIX}/runs/{{run_id}}": {
+                "get": {
+                    "summary": "Get run detail",
+                    "description": "Return full payload for a single compliance run.",
+                    "parameters": [{"name": "run_id", "in": "path", "required": True, "schema": {"type": "string"}}],
+                    "responses": {
+                        "200": {
+                            "description": "Full run payload (gaps, summary, privacy_health_score, etc.)",
+                            "content": {"application/json": {"schema": {"type": "object"}}},
+                        },
+                        "404": {"description": "Run not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                    },
+                }
+            },
+            f"{COMPLIANCE_API_PREFIX}/citations": {
+                "post": {
+                    "summary": "Statute–policy citation extraction",
+                    "description": "Extract statute–policy citations: for each relevant policy section, return policy excerpt, statute reference, and alignment.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/CitationsRequest"},
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Citations and summary",
+                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CitationsResponse"}}},
+                        },
+                        "400": {"description": "Missing policy_document_id", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "404": {"description": "Policy not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "502": {"description": "Upstream or SLM failed", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                    },
+                }
+            },
+            f"{COMPLIANCE_API_PREFIX}/risk-assessment": {
+                "post": {
+                    "summary": "Risk assessment (DPIA/PIA-style)",
+                    "description": "Generate a pre-populated risk assessment from policy and applicable statute chunks via SLM.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/RiskAssessmentRequest"},
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Assessment and optional report",
+                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RiskAssessmentResponse"}}},
+                        },
+                        "400": {"description": "Missing or invalid request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "404": {"description": "Policy or template not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "502": {"description": "Upstream or SLM failed", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                    },
+                }
+            },
+            f"{COMPLIANCE_API_PREFIX}/risk-assessment/templates": {
+                "get": {
+                    "summary": "List risk-assessment templates",
+                    "description": "List available risk-assessment template IDs and labels.",
+                    "responses": {
+                        "200": {
+                            "description": "List of templates",
+                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TemplatesResponse"}}},
+                        },
+                    },
+                }
+            },
+            f"{COMPLIANCE_API_PREFIX}/alerts": {
+                "get": {
+                    "summary": "List drift alerts",
+                    "description": "List regulatory drift alerts from compliance_alerts with filters.",
+                    "parameters": [
+                        {"name": "policy_document_id", "in": "query", "schema": {"type": "string"}},
+                        {"name": "company_name", "in": "query", "schema": {"type": "string"}, "description": "Substring match."},
+                        {"name": "jurisdiction", "in": "query", "schema": {"type": "string"}, "description": "Filter by affected jurisdiction."},
+                        {"name": "since", "in": "query", "schema": {"type": "string", "format": "date-time"}, "description": "detected_at >= since."},
+                        {"name": "limit", "in": "query", "schema": {"type": "integer", "default": 50, "maximum": 200}},
+                        {"name": "offset", "in": "query", "schema": {"type": "integer", "default": 0}},
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "List of alerts",
+                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AlertsListResponse"}}},
+                        },
+                        "400": {"description": "Invalid parameters", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "502": {"description": "Upstream failed", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
                     },
                 }
             },

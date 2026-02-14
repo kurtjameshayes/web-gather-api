@@ -24,7 +24,7 @@ async def _run_in_thread(func):
 
 from cache import SimpleLRUCache
 from compliance_config import ComplianceConfig
-from compliance_utils import hash_text, normalize_jurisdiction, safe_truncate
+from compliance_utils import hash_text, jurisdiction_filter_values, normalize_jurisdiction, safe_truncate
 from embedder import Embedder
 
 
@@ -76,8 +76,10 @@ class VectorRetriever:
         try:
             import json as _json
             os.makedirs(_DEBUG_LOG_DIR, exist_ok=True)
+            eff_jur = (jurisdiction or "").strip() or VECTOR_SEARCH_JURISDICTION
+            fv = jurisdiction_filter_values(normalize_jurisdiction(eff_jur)) if eff_jur else [VECTOR_SEARCH_JURISDICTION]
             with open(_DEBUG_LOG_PATH, "a") as _f:
-                _f.write(_json.dumps({"timestamp": __import__("time").time() * 1000, "location": "vector_retriever.py:retrieve", "message": "retrieval path", "data": {"use_embeddings_collection": self._config.use_embeddings_collection, "jurisdiction": jurisdiction}, "hypothesisId": "H1"}) + "\n")
+                _f.write(_json.dumps({"timestamp": __import__("time").time() * 1000, "location": "vector_retriever.py:retrieve", "message": "retrieval path", "data": {"use_embeddings_collection": self._config.use_embeddings_collection, "jurisdiction": jurisdiction, "effective_filter_values": fv[:5]}, "hypothesisId": "H1", "runId": "post-fix"}) + "\n")
         except Exception:
             pass
         # #endregion
@@ -109,9 +111,16 @@ class VectorRetriever:
         statute_corpus_id: Optional[str],
         top_k: int,
     ) -> List[StatuteCandidate]:
-        # Hard-coded jurisdiction for vector search: California (not CA).
+        # Use passed jurisdiction; resolvable via jurisdiction_filter_values (e.g. CA -> California).
+        # Env override for backward compat when DB uses non-standard values.
+        eff_jurisdiction = (jurisdiction or "").strip() or VECTOR_SEARCH_JURISDICTION
+        filter_values = jurisdiction_filter_values(normalize_jurisdiction(eff_jurisdiction))
+        if not filter_values:
+            filter_values = [VECTOR_SEARCH_JURISDICTION]
         filter_doc: Dict[str, Any] = {
-            self._config.statute_jurisdiction_field: VECTOR_SEARCH_JURISDICTION,
+            self._config.statute_jurisdiction_field: (
+                {"$in": filter_values} if len(filter_values) > 1 else filter_values[0]
+            ),
         }
         if statute_corpus_id:
             filter_doc["$or"] = [
@@ -135,6 +144,7 @@ class VectorRetriever:
                     self._config.statute_id_field: 1,
                     self._config.statute_title_field: 1,
                     self._config.statute_text_field: 1,
+                    self._config.statute_section_field: 1,
                     self._config.statute_section_id_field: 1,
                     self._config.statute_jurisdiction_field: 1,
                     "score": {"$meta": "vectorSearchScore"},
@@ -152,13 +162,16 @@ class VectorRetriever:
 
         raw_results = await _run_in_thread(run_aggregate)
         candidates = []
+        sec_field = self._config.statute_section_field
+        sec_id_field = self._config.statute_section_id_field
         for result in raw_results:
+            section_val = result.get(sec_field) or result.get(sec_id_field)
             candidates.append(
                 StatuteCandidate(
                     statute_id=str(result.get(self._config.statute_id_field, "")),
                     jurisdiction=str(result.get(self._config.statute_jurisdiction_field, "")),
                     title=str(result.get(self._config.statute_title_field, "")),
-                    section_id=str(result.get(self._config.statute_section_id_field, "")),
+                    section_id=str(section_val or ""),
                     chunk_text=safe_truncate(
                         str(result.get(self._config.statute_text_field, "")),
                         self._config.max_statute_chunk_chars,
@@ -210,9 +223,15 @@ class VectorRetriever:
         collection_tag = statute_corpus_id or self._config.statute_collection_tag
         if collection_tag:
             filter_doc[self._config.embedding_collection_tag_field] = collection_tag
-        # Hard-coded jurisdiction for vector search: California (not CA).
+        # Use passed jurisdiction; resolvable via jurisdiction_filter_values (e.g. CA -> California).
+        eff_jurisdiction = (jurisdiction or "").strip() or VECTOR_SEARCH_JURISDICTION
+        filter_values = jurisdiction_filter_values(normalize_jurisdiction(eff_jurisdiction))
+        if not filter_values:
+            filter_values = [VECTOR_SEARCH_JURISDICTION]
         field = self._config.statute_jurisdiction_field or "jurisdiction"
-        filter_doc[field] = VECTOR_SEARCH_JURISDICTION
+        filter_doc[field] = (
+            {"$in": filter_values} if len(filter_values) > 1 else filter_values[0]
+        )
 
         vector_search_stage: Dict[str, Any] = {
             "index": self._config.vector_index_name,
@@ -232,6 +251,9 @@ class VectorRetriever:
                     self._config.embedding_text_field: 1,
                     self._config.embedding_chunk_id_field: 1,
                     self._config.statute_jurisdiction_field: 1,
+                    self._config.statute_section_field: 1,
+                    self._config.statute_section_id_field: 1,
+                    self._config.statute_chunk_header_field: 1,
                     "jurisdiction": 1,
                     "score": {"$meta": "vectorSearchScore"},
                 }
@@ -265,7 +287,17 @@ class VectorRetriever:
         statutes_collection = self._mongo_client[database][self._config.statutes_collection]
 
         def run_fetch() -> List[Dict[str, Any]]:
-            return list(statutes_collection.find({self._config.statute_id_field: {"$in": doc_ids}}))
+            # Try both statute_id_field (_id) and document_id for lookup; embeddings may reference document_id
+            return list(
+                statutes_collection.find(
+                    {
+                        "$or": [
+                            {self._config.statute_id_field: {"$in": doc_ids}},
+                            {"document_id": {"$in": doc_ids}},
+                        ]
+                    }
+                )
+            )
 
         statute_docs = await _run_in_thread(run_fetch) if doc_ids else []
         # #region agent log
@@ -278,16 +310,27 @@ class VectorRetriever:
         except Exception:
             pass
         # #endregion
-        statute_map = {
-            str(doc.get(self._config.statute_id_field)): doc for doc in statute_docs
-        }
+        statute_map: Dict[str, Dict[str, Any]] = {}
+        for doc in statute_docs:
+            key_id = str(doc.get(self._config.statute_id_field, ""))
+            doc_id_key = str(doc.get("document_id", ""))
+            if key_id:
+                statute_map[key_id] = doc
+            if doc_id_key:
+                statute_map[doc_id_key] = doc
 
         candidates = []
+        section_field = self._config.statute_section_field  # e.g. "section" (§ 1798.100)
+        section_id_field = self._config.statute_section_id_field
+        header_field = self._config.statute_chunk_header_field
         for result in raw_results:
             doc_id = str(result.get(self._config.embedding_doc_id_field, ""))
             statute_doc = statute_map.get(doc_id, {})
-            header_field = getattr(self._config, "statute_chunk_header_field", None)
-            chunk_header = str(statute_doc.get(header_field, "")) if header_field else ""
+            # Prefer section (formal citation) from embedding doc; else section_id; else from statute doc
+            emb_section = result.get(section_field) or result.get(section_id_field)
+            stat_section = statute_doc.get(section_field) or statute_doc.get(section_id_field)
+            section_id = str(emb_section or stat_section or "")
+            chunk_header = str(emb_header or statute_doc.get(header_field, "") or "")
             # Prefer jurisdiction from embedding doc (e.g. "California") when present; else statute doc
             emb_jur = result.get(self._config.statute_jurisdiction_field) or result.get("jurisdiction")
             cand_jurisdiction = str(statute_doc.get(self._config.statute_jurisdiction_field) or emb_jur or "")
@@ -296,7 +339,7 @@ class VectorRetriever:
                     statute_id=doc_id,
                     jurisdiction=cand_jurisdiction,
                     title=str(statute_doc.get(self._config.statute_title_field, "")),
-                    section_id=str(statute_doc.get(self._config.statute_section_id_field, "")),
+                    section_id=section_id,
                     chunk_text=safe_truncate(
                         str(result.get(self._config.embedding_text_field, "")),
                         self._config.max_statute_chunk_chars,
