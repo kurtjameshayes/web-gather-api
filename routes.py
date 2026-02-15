@@ -1007,8 +1007,8 @@ def build_openapi_spec():
             },
             "/vector-index": {
                 "post": {
-                    "summary": "Index collection rows by chunk_text",
-                    "description": "Index all rows in a source collection by embedding the chunk_text field and writing the results to an index collection. The embedding model is determined by the index_database_name.",
+                    "summary": "Index collection rows by embedding text column",
+                    "description": "Index all rows in a source collection by embedding the text from the specified column and writing the results to an index collection. The embedding model is determined by the index_database_name.",
                     "requestBody": {
                         "required": True,
                         "content": {
@@ -1031,6 +1031,11 @@ def build_openapi_spec():
                                         "index_collection_name": {
                                             "type": "string",
                                             "description": "The indexed data will be written to this collection",
+                                        },
+                                        "text_column": {
+                                            "type": "string",
+                                            "default": "chunk_text",
+                                            "description": "Column containing the text to embed (default: chunk_text)",
                                         },
                                         "source_query": {
                                             "type": "string",
@@ -1133,6 +1138,54 @@ def build_openapi_spec():
                     },
                     "responses": {"200": {"description": "Vector search results with score"}},
                 },
+            },
+            "/create-subsections": {
+                "post": {
+                    "summary": "Split column into paragraph subsections in new collection",
+                    "description": "For each record in source_collection, splits the column by paragraph boundaries (double newlines) and creates one record per subchunk in destination_collection. Each destination record has all source columns except the split column, plus subsection_column and a unique subchunk_id (guid). Example: database=privacy-compliance, source_collection=statute_chunks, destination_collection=statute_subchunks, column=chunk_text, subsection_column=subchunk_text.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "database": {"type": "string"},
+                                        "source_collection": {"type": "string", "description": "Source collection to read from"},
+                                        "destination_collection": {"type": "string", "description": "New collection to write subchunks to"},
+                                        "column": {"type": "string", "description": "Source field to split (e.g. chunk_text)"},
+                                        "subsection_column": {"type": "string", "description": "Field name for subchunk text in destination (e.g. subchunk_text)"},
+                                    },
+                                    "required": ["database", "source_collection", "destination_collection", "column", "subsection_column"],
+                                }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Records inserted and counts",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "database": {"type": "string"},
+                                            "source_collection": {"type": "string"},
+                                            "destination_collection": {"type": "string"},
+                                            "column": {"type": "string"},
+                                            "subsection_column": {"type": "string"},
+                                            "records_inserted": {"type": "integer"},
+                                            "source_rows_processed": {"type": "integer"},
+                                            "source_rows_skipped": {"type": "integer"},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                        "400": {"description": "Missing required parameters"},
+                        "500": {"description": "Failed to read source collection"},
+                    },
+                }
             },
             "/embedding-models": {
                 "get": {

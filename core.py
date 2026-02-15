@@ -1,6 +1,6 @@
 """Core endpoints for the Web Gather API.
 
-Includes endpoints: gather, ingest, parse-llm, gap-check, search, vector-search, index, and crawl.
+Includes endpoints: gather, ingest, parse-llm, gap-check, search, vector-search, create-subsections, index, and crawl.
 """
 from __future__ import annotations
 
@@ -1128,7 +1128,7 @@ def ingest():
 
 @core_bp.post("/vector-index")
 def index_document():
-    """Index collection rows using the chunk_text field."""
+    """Index collection rows by embedding text from the specified column."""
     logger.info("POST /vector-index - Starting document indexing")
     payload = request.get_json(silent=True) or {}
 
@@ -1138,6 +1138,7 @@ def index_document():
     index_database_name = payload.get("index_database_name")
     index_collection_name = payload.get("index_collection_name")
     source_query_param = payload.get("source_query")
+    text_column = payload.get("text_column") or "chunk_text"
 
     source_query = {}
     if source_query_param is not None:
@@ -1166,11 +1167,12 @@ def index_document():
     logger.info(
         "POST /vector-index - Parameters: source_database_name=%s, "
         "source_collection_name=%s, index_database_name=%s, "
-        "index_collection_name=%s",
+        "index_collection_name=%s, text_column=%s",
         source_database_name,
         source_collection_name,
         index_database_name,
         index_collection_name,
+        text_column,
     )
     if source_query:
         logger.info(
@@ -1199,6 +1201,10 @@ def index_document():
         return jsonify({
             "error": f"Missing required parameters: {', '.join(missing_params)}"
         }), 400
+
+    if not isinstance(text_column, str) or not text_column.strip():
+        return jsonify({"error": "text_column must be a non-empty string"}), 400
+    text_column = text_column.strip()
 
     logger.info(
         "POST /vector-index - Source: %s.%s",
@@ -1242,21 +1248,22 @@ def index_document():
     chunk_texts = []
     skipped_rows = 0
     for doc in source_docs:
-        raw_chunk_text = doc.get("chunk_text")
-        chunk_text = str(raw_chunk_text) if raw_chunk_text is not None else ""
-        if not chunk_text.strip():
+        raw_text = doc.get(text_column)
+        text = str(raw_text) if raw_text is not None else ""
+        if not text.strip():
             skipped_rows += 1
             continue
         docs_to_index.append(doc)
-        chunk_texts.append(chunk_text)
+        chunk_texts.append(text)
 
     if not docs_to_index:
         logger.warning(
-            "POST /vector-index - No rows with chunk_text found in %s.%s",
+            "POST /vector-index - No rows with %s found in %s.%s",
+            text_column,
             source_database_name,
             source_collection_name,
         )
-        return jsonify({"error": "no rows with chunk_text to index"}), 400
+        return jsonify({"error": f"no rows with '{text_column}' to index"}), 400
 
     logger.info("POST /vector-index - Loading embedding model: %s", model_name)
     model = get_model(model_name)
@@ -1335,6 +1342,7 @@ def index_document():
             "source_collection_name": source_collection_name,
             "index_database_name": index_database_name,
             "index_collection_name": index_collection_name,
+            "text_column": text_column,
             "chunks_indexed": len(docs_to_index),
             "skipped_rows": skipped_rows,
             "embedding_model": model_name,
@@ -1558,6 +1566,115 @@ def vector_search():
         "index": index,
         "query": query,
         "results": out,
+    })
+
+
+def _split_into_paragraph_chunks(text: str) -> list[str]:
+    """Split text into paragraph chunks (by double newlines)."""
+    if not text:
+        return []
+    paragraphs = text.split("\n\n")
+    return [p.strip() for p in paragraphs if p.strip()]
+
+
+@core_bp.post("/create-subsections")
+def create_subsections():
+    """Split source column into paragraph chunks and write to a new collection.
+
+    For each record in source_collection, reads the value from `column`, splits
+    it by paragraph boundaries (double newlines), and creates one record per
+    subchunk in destination_collection. Each destination record includes all
+    source columns except the split column, plus subsection_column (the subchunk
+    text) and a unique subchunk_id (guid).
+
+    Example: database=privacy-compliance, source_collection=statute_chunks,
+    destination_collection=statute_subchunks, column=chunk_text,
+    subsection_column=subchunk_text.
+    """
+    logger.info("POST /create-subsections - Starting")
+    payload = request.get_json(silent=True) or {}
+    database = payload.get("database")
+    source_collection = payload.get("source_collection")
+    destination_collection = payload.get("destination_collection")
+    column = payload.get("column")
+    subsection_column = payload.get("subsection_column")
+
+    missing = []
+    if not database:
+        missing.append("database")
+    if not source_collection:
+        missing.append("source_collection")
+    if not destination_collection:
+        missing.append("destination_collection")
+    if not column:
+        missing.append("column")
+    if not subsection_column:
+        missing.append("subsection_column")
+
+    if missing:
+        logger.warning("POST /create-subsections - Missing required parameters: %s", missing)
+        return jsonify({"error": f"Missing required parameters: {', '.join(missing)}"}), 400
+
+    logger.info(
+        "POST /create-subsections - %s.%s -> %s.%s column=%s subsection_column=%s",
+        database, source_collection, database, destination_collection,
+        column, subsection_column,
+    )
+
+    try:
+        db = mongo_client[database]
+        source_coll = db[source_collection]
+        dest_coll = db[destination_collection]
+        docs = list(source_coll.find({}))
+    except Exception as e:
+        logger.exception("POST /create-subsections - Failed to read source collection")
+        return jsonify({"error": f"Failed to read source collection: {e!s}"}), 500
+
+    records_inserted = 0
+    source_rows_processed = 0
+    source_rows_skipped = 0
+
+    for doc in docs:
+        raw = doc.get(column)
+        text = str(raw) if raw is not None else ""
+        subchunks = _split_into_paragraph_chunks(text)
+        if not subchunks:
+            source_rows_skipped += 1
+            continue
+
+        # Base document: all columns except the split column and _id
+        base = {k: v for k, v in doc.items() if k != column and k != "_id"}
+        # Add source_id for traceability
+        if "_id" in doc:
+            base["source_id"] = str(doc["_id"])
+
+        for subchunk_text in subchunks:
+            record = {
+                **base,
+                subsection_column: subchunk_text,
+                "subchunk_id": str(uuid.uuid4()),
+            }
+            try:
+                dest_coll.insert_one(record)
+                records_inserted += 1
+            except Exception as e:
+                logger.warning("POST /create-subsections - Failed to insert: %s", e)
+                break
+        source_rows_processed += 1
+
+    logger.info(
+        "POST /create-subsections - Inserted %d records, processed %d source rows, skipped %d",
+        records_inserted, source_rows_processed, source_rows_skipped,
+    )
+    return jsonify({
+        "database": database,
+        "source_collection": source_collection,
+        "destination_collection": destination_collection,
+        "column": column,
+        "subsection_column": subsection_column,
+        "records_inserted": records_inserted,
+        "source_rows_processed": source_rows_processed,
+        "source_rows_skipped": source_rows_skipped,
     })
 
 
