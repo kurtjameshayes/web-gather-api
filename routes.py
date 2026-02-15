@@ -1094,6 +1094,46 @@ def build_openapi_spec():
                     "responses": {"200": {"description": "Search results"}},
                 }
             },
+            "/vector-search": {
+                "get": {
+                    "summary": "Vector search over MongoDB Atlas index",
+                    "description": "Converts the query to embeddings and runs $vectorSearch. Model from web-gather.embedding_model (same as /vector-index). Requires embedding_model configured (POST /embedding-models).",
+                    "parameters": [
+                        {"name": "database", "in": "query", "required": True, "schema": {"type": "string"}},
+                        {"name": "collection", "in": "query", "required": True, "schema": {"type": "string"}},
+                        {"name": "index", "in": "query", "required": True, "schema": {"type": "string"}},
+                        {"name": "query", "in": "query", "required": True, "schema": {"type": "string"}},
+                        {"name": "limit", "in": "query", "schema": {"type": "integer", "default": 10}},
+                        {"name": "path", "in": "query", "schema": {"type": "string"}, "description": "Vector field path (default from embedding_model)"},
+                        {"name": "filter", "in": "query", "schema": {"type": "string"}, "description": "MongoDB filter as JSON (e.g. {\"jurisdiction\": \"CA\"})"},
+                    ],
+                    "responses": {"200": {"description": "Vector search results with score"}},
+                },
+                "post": {
+                    "summary": "Vector search over MongoDB Atlas index",
+                    "description": "Same as GET. Use POST for long queries. Body: database, collection, index, query; optional limit, path, filter. Model from web-gather.embedding_model.",
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "database": {"type": "string"},
+                                        "collection": {"type": "string"},
+                                        "index": {"type": "string"},
+                                        "query": {"type": "string"},
+                                        "limit": {"type": "integer", "default": 10},
+                                        "path": {"type": "string"},
+                                        "filter": {"type": "object", "description": "MongoDB filter for $vectorSearch"},
+                                    },
+                                    "required": ["database", "collection", "index", "query"],
+                                }
+                            }
+                        }
+                    },
+                    "responses": {"200": {"description": "Vector search results with score"}},
+                },
+            },
             "/embedding-models": {
                 "get": {
                     "summary": "List embedding models",

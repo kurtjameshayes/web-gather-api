@@ -1,6 +1,6 @@
 """Core endpoints for the Web Gather API.
 
-Includes endpoints: gather, ingest, parse-llm, gap-check, search, index, and crawl.
+Includes endpoints: gather, ingest, parse-llm, gap-check, search, vector-search, index, and crawl.
 """
 from __future__ import annotations
 
@@ -28,6 +28,7 @@ from db import (
     WEB_GATHER_DB,
     get_application_embedding_model,
     get_embedding_model_name,
+    get_embedding_model_record,
     utc_now,
 )
 
@@ -1414,6 +1415,150 @@ def search():
             "results": top_results,
         }
     )
+
+
+@core_bp.route("/vector-search", methods=["GET", "POST"])
+def vector_search():
+    """Vector search over a MongoDB Atlas vector index.
+
+    Converts the query to embeddings and runs $vectorSearch on the given
+    database, collection, and index.
+
+    Parameters (query string or JSON body):
+        database (str): Database name
+        collection (str): Collection name
+        index (str): Vector search index name
+        query (str): Search query text (will be embedded)
+        limit (int, optional): Max results to return (default 10)
+        path (str, optional): Path to vector field in documents. If omitted,
+            uses the first field path from the embedding_model for the database.
+        filter (object, optional): MongoDB filter for $vectorSearch (e.g. {"jurisdiction": "CA"}).
+            Can be a JSON object or JSON string. Model is from web-gather.embedding_model.
+    """
+    logger.info("%s /vector-search - Starting vector search", request.method)
+    if request.method == "POST" and request.is_json:
+        payload = request.get_json(silent=True) or {}
+    else:
+        payload = dict(request.args)
+    database = payload.get("database")
+    collection = payload.get("collection")
+    index = payload.get("index")
+    query = payload.get("query")
+    limit = payload.get("limit", 10)
+    path = payload.get("path")
+    filter_param = payload.get("filter")
+
+    missing = []
+    if not database:
+        missing.append("database")
+    if not collection:
+        missing.append("collection")
+    if not index:
+        missing.append("index")
+    if not query:
+        missing.append("query")
+
+    if missing:
+        logger.warning("POST /vector-search - Missing required parameters: %s", missing)
+        return jsonify({"error": f"Missing required parameters: {', '.join(missing)}"}), 400
+
+    try:
+        limit = int(limit) if limit is not None else 10
+    except (TypeError, ValueError):
+        limit = 10
+    if limit < 1 or limit > 100:
+        limit = 10
+
+    filter_doc = None
+    if filter_param is not None:
+        if isinstance(filter_param, dict):
+            filter_doc = filter_param
+        elif isinstance(filter_param, str):
+            try:
+                filter_doc = json.loads(filter_param)
+            except json.JSONDecodeError as exc:
+                logger.warning("POST /vector-search - Invalid JSON in filter: %s", exc)
+                return jsonify({"error": f"filter must be valid JSON: {exc!s}"}), 400
+        else:
+            return jsonify({"error": "filter must be a JSON object or JSON string"}), 400
+        if not isinstance(filter_doc, dict):
+            return jsonify({"error": "filter must be a JSON object"}), 400
+
+    # Resolve embedding model and path from web-gather.embedding_model (same as /vector-index)
+    if database == PRIVACY_COMPLIANCE_DB:
+        model_name = get_application_embedding_model() or get_embedding_model_name(database)
+    else:
+        model_name = get_embedding_model_name(database)
+
+    if not model_name:
+        logger.warning("POST /vector-search - No embedding model for database: %s", database)
+        return jsonify({
+            "error": f"No embedding model configured for database '{database}'. "
+            "Use POST /embedding-models to configure one."
+        }), 400
+
+    if not path:
+        record = get_embedding_model_record(database)
+        if record and isinstance(record.get("fields"), list) and record["fields"]:
+            path = record["fields"][0].get("path")
+        if not path:
+            logger.warning("POST /vector-search - Cannot determine vector path for database: %s", database)
+            return jsonify({
+                "error": "Vector field path unknown. Either configure embedding_model with 'fields' "
+                "or pass 'path' in the request body."
+            }), 400
+
+    logger.info(
+        "POST /vector-search - Querying %s.%s index=%s path=%s limit=%s",
+        database, collection, index, path, limit,
+    )
+
+    model = get_model(model_name)
+    query_vector = model.encode(
+        [query], convert_to_numpy=True, normalize_embeddings=True
+    )[0].tolist()
+
+    vector_search_stage = {
+        "index": index,
+        "path": path,
+        "queryVector": query_vector,
+        "numCandidates": max(int(limit) * 10, 100),
+        "limit": int(limit),
+    }
+    if filter_doc:
+        vector_search_stage["filter"] = filter_doc
+
+    pipeline = [
+        {"$vectorSearch": vector_search_stage},
+        {"$addFields": {"score": {"$meta": "vectorSearchScore"}}},
+    ]
+
+    try:
+        db = mongo_client[database]
+        coll = db[collection]
+        results = list(coll.aggregate(pipeline))
+    except Exception as e:
+        logger.exception("POST /vector-search - Aggregation failed")
+        return jsonify({"error": f"Vector search failed: {e!s}"}), 500
+
+    # Exclude raw vector from response (keep score from $meta)
+    out = []
+    for doc in results:
+        d = dict(doc)
+        if path in d:
+            del d[path]
+        if "_id" in d:
+            d["_id"] = str(d["_id"])
+        out.append(d)
+
+    logger.info("POST /vector-search - Returning %d results", len(out))
+    return jsonify({
+        "database": database,
+        "collection": collection,
+        "index": index,
+        "query": query,
+        "results": out,
+    })
 
 
 @core_bp.post("/parse-llm")
