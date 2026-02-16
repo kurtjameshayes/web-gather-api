@@ -89,6 +89,37 @@ Output only valid JSON with this exact structure:
 }
 """
 
+SUBCHUNK_GAP_CHECK_PROMPT = """You are a privacy law analyst. Compare the following statute subchunk to the policy subchunk for compliance. Use the enclosing chunk text for context, but base your determination on the subchunk-to-subchunk comparison.
+
+Statute subchunk (focus here):
+<<<STATUTE_SUBCHUNK>>>
+
+Statute enclosing chunk (context):
+<<<STATUTE_CHUNK>>>
+
+Policy subchunk (focus here):
+<<<POLICY_SUBCHUNK>>>
+
+Policy enclosing chunk (context):
+<<<POLICY_CHUNK>>>
+
+Answer:
+(a) Is the required disclosure/obligation in the statute subchunk addressed in the policy subchunk? (yes/no)
+(b) If yes, quote the exact policy phrase that addresses it in policy_quote. If no, use null.
+(c) Is there any statement in the policy subchunk that conflicts with the statute subchunk? (yes/no)
+(d) If conflict, briefly describe it in conflict_description. If the policy contains a phrase that conflicts, also quote that exact phrase in policy_quote.
+(e) policy_quote must be a verbatim substring of the policy subchunk or policy enclosing chunk (for addressed or conflict cases).
+
+Output only valid JSON with this exact structure:
+{
+  "addressed": true or false,
+  "policy_quote": "exact phrase from policy or null",
+  "missing": true or false,
+  "conflict": true or false,
+  "conflict_description": "brief description or null"
+}
+"""
+
 REQUIREMENT_EXTRACTION_PROMPT = """You are a privacy law analyst. From the following statute chunk, list each discrete privacy/consumer right or obligation. One per item: short label and one-sentence description.
 
 Statute chunk:
@@ -280,6 +311,37 @@ class AnthropicLLMClient:
         prompt = (
             GAP_CHECK_PROMPT.replace("<<<STATUTE_CHUNK>>>", statute_chunk_text[:3000])
             .replace("<<<POLICY_TEXT>>>", (policy_text or "")[:6000])
+        )
+        out = await self._call_json(prompt)
+        if not out:
+            return {
+                "addressed": False,
+                "policy_quote": None,
+                "missing": True,
+                "conflict": False,
+                "conflict_description": None,
+            }
+        return {
+            "addressed": bool(out.get("addressed")),
+            "policy_quote": out.get("policy_quote") if out.get("policy_quote") else None,
+            "missing": bool(out.get("missing", True)),
+            "conflict": bool(out.get("conflict")),
+            "conflict_description": out.get("conflict_description") if out.get("conflict_description") else None,
+        }
+
+    async def gap_check_subchunks(
+        self,
+        statute_subchunk_text: str,
+        statute_chunk_text: str,
+        policy_subchunk_text: str,
+        policy_chunk_text: str,
+    ) -> Dict[str, Any]:
+        """Compare subchunks for compliance with enclosing chunk context. Same schema as gap_check."""
+        prompt = (
+            SUBCHUNK_GAP_CHECK_PROMPT.replace("<<<STATUTE_SUBCHUNK>>>", (statute_subchunk_text or "")[:3000])
+            .replace("<<<STATUTE_CHUNK>>>", (statute_chunk_text or "")[:3000])
+            .replace("<<<POLICY_SUBCHUNK>>>", (policy_subchunk_text or "")[:3000])
+            .replace("<<<POLICY_CHUNK>>>", (policy_chunk_text or "")[:3000])
         )
         out = await self._call_json(prompt)
         if not out:

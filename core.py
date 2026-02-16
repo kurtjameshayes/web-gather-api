@@ -1,6 +1,6 @@
 """Core endpoints for the Web Gather API.
 
-Includes endpoints: gather, ingest, parse-llm, gap-check, search, vector-search, create-subsections, index, and crawl.
+Includes endpoints: gather, ingest, parse-llm, gap-check, search, vector-search, create-paragraph-sections, create-statute-subsections, create-policy-subsections, create-chunks, index, and crawl.
 """
 from __future__ import annotations
 
@@ -38,6 +38,20 @@ logger = logging.getLogger("web-gather-api")
 mongo_client = None
 firecrawl_client = None
 anthropic_client = None
+
+
+def _get_json_payload_or_error():
+    """Get request JSON. Returns (payload, None) on success, or (None, (response, status)) on error."""
+    payload = request.get_json(silent=True)
+    if payload is not None:
+        return (payload if isinstance(payload, dict) else {}, None)
+    raw = request.get_data(as_text=True) or ""
+    if not raw.strip():
+        return ({}, None)
+    try:
+        return (json.loads(raw), None)
+    except json.JSONDecodeError as exc:
+        return (None, (jsonify({"error": f"Invalid JSON in request body: {str(exc)}"}), 400))
 
 
 def calculate_relevance_score(query, title, description):
@@ -1290,7 +1304,7 @@ def index_document():
                 {
                     "$set": {
                         "embedding": embedding.tolist(),
-                        "chunk_text": chunk_text,
+                        text_column: chunk_text,  # Embedded text goes to text_column (e.g. subchunk_text)
                         "indexed_at": utc_now(),
                         "source_id": str(doc.get("_id")),
                         "source_database_name": source_database_name,
@@ -1317,7 +1331,7 @@ def index_document():
                 {
                     **base_doc,
                     "source_id": str(doc.get("_id")),
-                    "chunk_text": chunk_text,
+                    text_column: chunk_text,  # Embedded text to text_column; chunk_text preserved from base_doc
                     "embedding": embedding.tolist(),
                     "indexed_at": utc_now(),
                     "source_database_name": source_database_name,
@@ -1436,7 +1450,8 @@ def vector_search():
         database (str): Database name
         collection (str): Collection name
         index (str): Vector search index name
-        query (str): Search query text (will be embedded)
+        query (str): Search query text (will be embedded). Omit if query_vector provided.
+        query_vector (list): Precomputed vector for search. If provided, skips embedding.
         limit (int, optional): Max results to return (default 10)
         path (str, optional): Path to vector field in documents. If omitted,
             uses the first field path from the embedding_model for the database.
@@ -1452,6 +1467,7 @@ def vector_search():
     collection = payload.get("collection")
     index = payload.get("index")
     query = payload.get("query")
+    query_vector_param = payload.get("query_vector")
     limit = payload.get("limit", 10)
     path = payload.get("path")
     filter_param = payload.get("filter")
@@ -1463,12 +1479,27 @@ def vector_search():
         missing.append("collection")
     if not index:
         missing.append("index")
-    if not query:
-        missing.append("query")
+    if not query and not query_vector_param:
+        missing.append("query or query_vector")
 
     if missing:
         logger.warning("POST /vector-search - Missing required parameters: %s", missing)
         return jsonify({"error": f"Missing required parameters: {', '.join(missing)}"}), 400
+
+    if query_vector_param is not None:
+        if isinstance(query_vector_param, str):
+            try:
+                query_vector_param = json.loads(query_vector_param)
+            except json.JSONDecodeError as exc:
+                return jsonify({"error": f"query_vector must be valid JSON: {exc!s}"}), 400
+        if not isinstance(query_vector_param, list):
+            return jsonify({"error": "query_vector must be a list of numbers"}), 400
+        try:
+            query_vector = [float(x) for x in query_vector_param]
+        except (TypeError, ValueError):
+            return jsonify({"error": "query_vector must contain only numbers"}), 400
+        if not query_vector:
+            return jsonify({"error": "query_vector must not be empty"}), 400
 
     try:
         limit = int(limit) if limit is not None else 10
@@ -1492,18 +1523,24 @@ def vector_search():
         if not isinstance(filter_doc, dict):
             return jsonify({"error": "filter must be a JSON object"}), 400
 
-    # Resolve embedding model and path from web-gather.embedding_model (same as /vector-index)
-    if database == PRIVACY_COMPLIANCE_DB:
-        model_name = get_application_embedding_model() or get_embedding_model_name(database)
-    else:
-        model_name = get_embedding_model_name(database)
+    if query_vector_param is None:
+        # Resolve embedding model and path from web-gather.embedding_model (same as /vector-index)
+        if database == PRIVACY_COMPLIANCE_DB:
+            model_name = get_application_embedding_model() or get_embedding_model_name(database)
+        else:
+            model_name = get_embedding_model_name(database)
 
-    if not model_name:
-        logger.warning("POST /vector-search - No embedding model for database: %s", database)
-        return jsonify({
-            "error": f"No embedding model configured for database '{database}'. "
-            "Use POST /embedding-models to configure one."
-        }), 400
+        if not model_name:
+            logger.warning("POST /vector-search - No embedding model for database: %s", database)
+            return jsonify({
+                "error": f"No embedding model configured for database '{database}'. "
+                "Use POST /embedding-models to configure one."
+            }), 400
+
+        model = get_model(model_name)
+        query_vector = model.encode(
+            [query], convert_to_numpy=True, normalize_embeddings=True
+        )[0].tolist()
 
     if not path:
         record = get_embedding_model_record(database)
@@ -1520,11 +1557,6 @@ def vector_search():
         "POST /vector-search - Querying %s.%s index=%s path=%s limit=%s",
         database, collection, index, path, limit,
     )
-
-    model = get_model(model_name)
-    query_vector = model.encode(
-        [query], convert_to_numpy=True, normalize_embeddings=True
-    )[0].tolist()
 
     vector_search_stage = {
         "index": index,
@@ -1560,13 +1592,15 @@ def vector_search():
         out.append(d)
 
     logger.info("POST /vector-search - Returning %d results", len(out))
-    return jsonify({
+    resp = {
         "database": database,
         "collection": collection,
         "index": index,
-        "query": query,
         "results": out,
-    })
+    }
+    if query is not None:
+        resp["query"] = query
+    return jsonify(resp)
 
 
 def _split_into_paragraph_chunks(text: str) -> list[str]:
@@ -1577,7 +1611,7 @@ def _split_into_paragraph_chunks(text: str) -> list[str]:
     return [p.strip() for p in paragraphs if p.strip()]
 
 
-@core_bp.post("/create-subsections")
+@core_bp.post("/create-paragraph-sections")
 def create_subsections():
     """Split source column into paragraph chunks and write to a new collection.
 
@@ -1587,17 +1621,41 @@ def create_subsections():
     source columns except the split column, plus subsection_column (the subchunk
     text) and a unique subchunk_id (guid).
 
+    Optional source_query: MongoDB query to filter source records (e.g. {"document_id": "x"}).
+    When omitted, all records are processed.
+
     Example: database=privacy-compliance, source_collection=statute_chunks,
     destination_collection=statute_subchunks, column=chunk_text,
-    subsection_column=subchunk_text.
+    subsection_column=subchunk_text, source_query={"jurisdiction": "California"}.
     """
-    logger.info("POST /create-subsections - Starting")
+    logger.info("POST /create-paragraph-sections - Starting")
     payload = request.get_json(silent=True) or {}
     database = payload.get("database")
     source_collection = payload.get("source_collection")
     destination_collection = payload.get("destination_collection")
     column = payload.get("column")
     subsection_column = payload.get("subsection_column")
+    source_query_param = payload.get("source_query")
+    source_query = {}
+    if source_query_param is not None:
+        if isinstance(source_query_param, dict):
+            source_query = source_query_param
+        elif isinstance(source_query_param, str) and source_query_param.strip():
+            try:
+                source_query = json.loads(source_query_param)
+            except json.JSONDecodeError as exc:
+                logger.warning("POST /create-paragraph-sections - Invalid JSON in source_query: %s", exc)
+                return jsonify({"error": f"Invalid JSON in source_query: {str(exc)}"}), 400
+        if not isinstance(source_query, dict):
+            source_query = {}
+    # #region agent log
+    try:
+        import json as _json
+        with open("/Users/kurthayes/Dev/AI/web-gather-api/.cursor/debug.log", "a") as _f:
+            _f.write(_json.dumps({"timestamp": __import__("time").time() * 1000, "location": "core.py:create_paragraph_sections", "message": "source_query_resolved", "data": {"source_query_param_type": type(source_query_param).__name__ if source_query_param is not None else "None", "source_query": source_query}, "hypothesisId": "H1"}) + "\n")
+    except Exception:
+        pass
+    # #endregion
 
     missing = []
     if not database:
@@ -1612,22 +1670,31 @@ def create_subsections():
         missing.append("subsection_column")
 
     if missing:
-        logger.warning("POST /create-subsections - Missing required parameters: %s", missing)
+        logger.warning("POST /create-paragraph-sections - Missing required parameters: %s", missing)
         return jsonify({"error": f"Missing required parameters: {', '.join(missing)}"}), 400
 
     logger.info(
-        "POST /create-subsections - %s.%s -> %s.%s column=%s subsection_column=%s",
+        "POST /create-paragraph-sections - %s.%s -> %s.%s column=%s subsection_column=%s source_query=%s",
         database, source_collection, database, destination_collection,
-        column, subsection_column,
+        column, subsection_column, source_query,
     )
 
     try:
         db = mongo_client[database]
         source_coll = db[source_collection]
         dest_coll = db[destination_collection]
-        docs = list(source_coll.find({}))
+        docs = list(source_coll.find(source_query))
     except Exception as e:
-        logger.exception("POST /create-subsections - Failed to read source collection")
+        # #region agent log
+        try:
+            import json as _json
+            import traceback as _tb
+            with open("/Users/kurthayes/Dev/AI/web-gather-api/.cursor/debug.log", "a") as _f:
+                _f.write(_json.dumps({"timestamp": __import__("time").time() * 1000, "location": "core.py:create_paragraph_sections", "message": "exception", "data": {"type": type(e).__name__, "msg": str(e), "tb": _tb.format_exc()}, "hypothesisId": "H1,H3"}) + "\n")
+        except Exception:
+            pass
+        # #endregion
+        logger.exception("POST /create-paragraph-sections - Failed to read source collection")
         return jsonify({"error": f"Failed to read source collection: {e!s}"}), 500
 
     records_inserted = 0
@@ -1653,17 +1720,18 @@ def create_subsections():
                 **base,
                 subsection_column: subchunk_text,
                 "subchunk_id": str(uuid.uuid4()),
+                column: text,  # Original full chunk text for context
             }
             try:
                 dest_coll.insert_one(record)
                 records_inserted += 1
             except Exception as e:
-                logger.warning("POST /create-subsections - Failed to insert: %s", e)
+                logger.warning("POST /create-paragraph-sections - Failed to insert: %s", e)
                 break
         source_rows_processed += 1
 
     logger.info(
-        "POST /create-subsections - Inserted %d records, processed %d source rows, skipped %d",
+        "POST /create-paragraph-sections - Inserted %d records, processed %d source rows, skipped %d",
         records_inserted, source_rows_processed, source_rows_skipped,
     )
     return jsonify({
@@ -1672,6 +1740,519 @@ def create_subsections():
         "destination_collection": destination_collection,
         "column": column,
         "subsection_column": subsection_column,
+        "records_inserted": records_inserted,
+        "source_rows_processed": source_rows_processed,
+        "source_rows_skipped": source_rows_skipped,
+    })
+
+
+# Default prompt for statute subsection extraction when parse_prompt is blank.
+# Subsections are typically prefaced with (a), (b), (1), (2), etc.
+STATUTE_SUBSECTION_DEFAULT_PROMPT = """You are a legal text parser specializing in statutory interpretation.
+
+Task:
+Parse the provided statute section into its subsections. Statute subsections are typically prefaced with lowercase letters in parentheses (e.g., (a), (b), (c)) or numbers in parentheses (e.g., (1), (2), (3)). A subsection includes its identifier and all text until the next subsection identifier or end of the section.
+
+Instructions:
+- Preserve the original statutory language verbatim. Do NOT summarize, paraphrase, or interpret.
+- Extract each subsection as a separate item, including its identifier (e.g., (a), (b), (1)) and full text.
+- Maintain the original order of subsections.
+- If the text has no clear subsection markers, return a single subsection with the full text and identifier "(0)" or "()".
+
+Output Format:
+Return ONLY valid JSON with this exact structure (no surrounding text):
+{
+  "subsections": [
+    {
+      "identifier": "(a)",
+      "text": "Full text of subsection (a) including the identifier line..."
+    },
+    {
+      "identifier": "(b)",
+      "text": "Full text of subsection (b)..."
+    }
+  ]
+}"""
+
+
+@core_bp.post("/create-statute-subsections")
+def create_statute_subsections():
+    """Split statute section column into subsections using LLM and write to destination collection.
+
+    For each record in source_collection, reads the value from `column`, uses an LLM
+    to identify statute subsections (typically prefaced with (a), (b), (1), (2), etc.),
+    and creates one record per subsection in destination_collection. Each destination
+    record includes all source columns except the split column, plus subsection_column
+    (the subsection text), subsection_identifier (e.g., (a), (b)), and a unique
+    subchunk_id (guid).
+
+    Optional parse_prompt: when provided, appended as additional parsing instructions.
+    When blank, uses the default prompt for statute subsection extraction.
+    """
+    logger.info("POST /create-statute-subsections - Starting")
+    payload = request.get_json(silent=True) or {}
+    database = payload.get("database")
+    source_collection = payload.get("source_collection")
+    destination_collection = payload.get("destination_collection")
+    column = payload.get("column")
+    subsection_column = payload.get("subsection_column")
+    parse_prompt = payload.get("parse_prompt") or ""
+    source_query_param = payload.get("source_query")
+    source_query = {}
+    if source_query_param is not None:
+        if isinstance(source_query_param, dict):
+            source_query = source_query_param
+        elif isinstance(source_query_param, str) and source_query_param.strip():
+            try:
+                source_query = json.loads(source_query_param)
+            except json.JSONDecodeError as exc:
+                logger.warning("POST /create-statute-subsections - Invalid JSON in source_query: %s", exc)
+                return jsonify({"error": f"Invalid JSON in source_query: {str(exc)}"}), 400
+        if not isinstance(source_query, dict):
+            source_query = {}
+
+    missing = []
+    if not database:
+        missing.append("database")
+    if not source_collection:
+        missing.append("source_collection")
+    if not destination_collection:
+        missing.append("destination_collection")
+    if not column:
+        missing.append("column")
+    if not subsection_column:
+        missing.append("subsection_column")
+
+    if missing:
+        logger.warning("POST /create-statute-subsections - Missing required parameters: %s", missing)
+        return jsonify({"error": f"Missing required parameters: {', '.join(missing)}"}), 400
+
+    logger.info(
+        "POST /create-statute-subsections - %s.%s -> %s.%s column=%s subsection_column=%s",
+        database, source_collection, database, destination_collection,
+        column, subsection_column,
+    )
+
+    try:
+        db = mongo_client[database]
+        source_coll = db[source_collection]
+        dest_coll = db[destination_collection]
+        docs = list(source_coll.find(source_query))
+    except Exception as e:
+        logger.exception("POST /create-statute-subsections - Failed to read source collection")
+        return jsonify({"error": f"Failed to read source collection: {e!s}"}), 500
+
+    base_instructions = STATUTE_SUBSECTION_DEFAULT_PROMPT
+    if parse_prompt.strip():
+        base_instructions = base_instructions.rstrip() + "\n\nAdditional parsing instructions:\n" + parse_prompt.strip()
+
+    records_inserted = 0
+    source_rows_processed = 0
+    source_rows_skipped = 0
+    llm_errors = 0
+
+    for doc in docs:
+        raw = doc.get(column)
+        text = str(raw) if raw is not None else ""
+        if not text or not text.strip():
+            source_rows_skipped += 1
+            continue
+
+        user_message = f"""{base_instructions}
+
+Statute section to parse:
+
+<statute_section>
+{text[:50000]}
+</statute_section>
+
+Return only valid JSON with the subsections array."""
+
+        try:
+            response = anthropic_client.messages.create(
+                model="claude-3-5-haiku-20241022",
+                max_tokens=8192,
+                messages=[{"role": "user", "content": user_message}],
+            )
+            content = []
+            for block in response.content:
+                if block.type == "text":
+                    content.append(block.text)
+            response_text = "".join(content)
+        except Exception as e:
+            logger.warning("POST /create-statute-subsections - LLM call failed for doc: %s", e)
+            llm_errors += 1
+            source_rows_skipped += 1
+            continue
+
+        raw_json = extract_json_block(response_text)
+        if not raw_json:
+            logger.warning("POST /create-statute-subsections - No JSON block in LLM response")
+            llm_errors += 1
+            source_rows_skipped += 1
+            continue
+
+        try:
+            parsed = json.loads(raw_json)
+        except json.JSONDecodeError as e:
+            logger.warning("POST /create-statute-subsections - Invalid JSON from LLM: %s", e)
+            llm_errors += 1
+            source_rows_skipped += 1
+            continue
+
+        subsections = parsed.get("subsections")
+        if not isinstance(subsections, list) or not subsections:
+            source_rows_skipped += 1
+            continue
+
+        base = {k: v for k, v in doc.items() if k != column and k != "_id"}
+        if "_id" in doc:
+            base["source_id"] = str(doc["_id"])
+
+        for sub in subsections:
+            sub_text = sub.get("text", "")
+            sub_id = sub.get("identifier", "")
+            if not sub_text and not sub_id:
+                continue
+            record = {
+                **base,
+                subsection_column: sub_text,
+                "subsection_identifier": sub_id,
+                "subchunk_id": str(uuid.uuid4()),
+                column: text,
+            }
+            try:
+                dest_coll.insert_one(record)
+                records_inserted += 1
+            except Exception as e:
+                logger.warning("POST /create-statute-subsections - Failed to insert: %s", e)
+                break
+        source_rows_processed += 1
+
+    logger.info(
+        "POST /create-statute-subsections - Inserted %d records, processed %d source rows, skipped %d, llm_errors=%d",
+        records_inserted, source_rows_processed, source_rows_skipped, llm_errors,
+    )
+    return jsonify({
+        "database": database,
+        "source_collection": source_collection,
+        "destination_collection": destination_collection,
+        "column": column,
+        "subsection_column": subsection_column,
+        "records_inserted": records_inserted,
+        "source_rows_processed": source_rows_processed,
+        "source_rows_skipped": source_rows_skipped,
+        "llm_errors": llm_errors,
+    })
+
+
+# Default prompt for policy subsection extraction when parse_prompt is blank.
+# Splits policy sections into logical chunks, excluding headers and irrelevant text.
+POLICY_SUBSECTION_DEFAULT_PROMPT = """You are a privacy policy parser specializing in compliance-relevant content.
+
+Task:
+Parse the provided policy section into logical subsections (chunks). Each chunk should be a coherent paragraph or block of text that is relevant to privacy policies and compliance.
+
+Instructions:
+- Do NOT include section headers (e.g. lines starting with #, such as "# What Information We Collect").
+- Do NOT include text that is irrelevant to privacy policies and compliance.
+- Split the body content into logical chunks by paragraph or semantic boundaries.
+- Preserve the original language verbatim. Do NOT summarize or paraphrase.
+- Maintain the original order of chunks.
+- If the text has no clear chunk boundaries, return a single chunk with the relevant body text (excluding headers).
+
+Output Format:
+Return ONLY valid JSON with this exact structure (no surrounding text):
+{
+  "subsections": [
+    {
+      "identifier": "1",
+      "text": "First logical chunk of body text..."
+    },
+    {
+      "identifier": "2",
+      "text": "Second logical chunk..."
+    }
+  ]
+}"""
+
+
+@core_bp.post("/create-policy-subsections")
+def create_policy_subsections():
+    """Split policy section column into subsections using LLM and write to destination collection.
+
+    For each record in source_collection, reads the value from `column`, uses an LLM
+    to identify policy subsections (logical chunks), excluding section headers and
+    irrelevant text. Creates one record per subsection in destination_collection.
+    Each destination record includes all source columns except the split column,
+    plus subsection_column, subsection_identifier, and a unique subchunk_id (guid).
+
+    Optional source_query: MongoDB query to filter source records.
+    Optional parse_prompt: when provided, appended as additional parsing instructions.
+    When blank, uses the default prompt for policy subsection extraction.
+    """
+    logger.info("POST /create-policy-subsections - Starting")
+    payload, err = _get_json_payload_or_error()
+    if err is not None:
+        return err[0], err[1]
+    payload = payload or {}
+    database = payload.get("database")
+    source_collection = payload.get("source_collection")
+    destination_collection = payload.get("destination_collection")
+    column = payload.get("column")
+    subsection_column = payload.get("subsection_column")
+    parse_prompt = payload.get("parse_prompt") or ""
+    source_query_param = payload.get("source_query")
+    source_query = {}
+    if source_query_param is not None:
+        if isinstance(source_query_param, dict):
+            source_query = source_query_param
+        elif isinstance(source_query_param, str) and source_query_param.strip():
+            try:
+                source_query = json.loads(source_query_param)
+            except json.JSONDecodeError as exc:
+                logger.warning("POST /create-policy-subsections - Invalid JSON in source_query: %s", exc)
+                return jsonify({"error": f"Invalid JSON in source_query: {str(exc)}"}), 400
+        if not isinstance(source_query, dict):
+            source_query = {}
+
+    missing = []
+    if not database:
+        missing.append("database")
+    if not source_collection:
+        missing.append("source_collection")
+    if not destination_collection:
+        missing.append("destination_collection")
+    if not column:
+        missing.append("column")
+    if not subsection_column:
+        missing.append("subsection_column")
+
+    if missing:
+        logger.warning("POST /create-policy-subsections - Missing required parameters: %s", missing)
+        return jsonify({"error": f"Missing required parameters: {', '.join(missing)}"}), 400
+
+    logger.info(
+        "POST /create-policy-subsections - %s.%s -> %s.%s column=%s subsection_column=%s",
+        database, source_collection, database, destination_collection,
+        column, subsection_column,
+    )
+
+    try:
+        db = mongo_client[database]
+        source_coll = db[source_collection]
+        dest_coll = db[destination_collection]
+        docs = list(source_coll.find(source_query))
+    except Exception as e:
+        logger.exception("POST /create-policy-subsections - Failed to read source collection")
+        return jsonify({"error": f"Failed to read source collection: {e!s}"}), 500
+
+    base_instructions = POLICY_SUBSECTION_DEFAULT_PROMPT
+    if parse_prompt.strip():
+        base_instructions = base_instructions.rstrip() + "\n\nAdditional parsing instructions:\n" + parse_prompt.strip()
+
+    records_inserted = 0
+    source_rows_processed = 0
+    source_rows_skipped = 0
+    llm_errors = 0
+
+    for doc in docs:
+        raw = doc.get(column)
+        text = str(raw) if raw is not None else ""
+        if not text or not text.strip():
+            source_rows_skipped += 1
+            continue
+
+        user_message = f"""{base_instructions}
+
+Policy section to parse:
+
+<policy_section>
+{text[:50000]}
+</policy_section>
+
+Return only valid JSON with the subsections array."""
+
+        try:
+            response = anthropic_client.messages.create(
+                model="claude-3-5-haiku-20241022",
+                max_tokens=8192,
+                messages=[{"role": "user", "content": user_message}],
+            )
+            content = []
+            for block in response.content:
+                if block.type == "text":
+                    content.append(block.text)
+            response_text = "".join(content)
+        except Exception as e:
+            logger.warning("POST /create-policy-subsections - LLM call failed for doc: %s", e)
+            llm_errors += 1
+            source_rows_skipped += 1
+            continue
+
+        raw_json = extract_json_block(response_text)
+        if not raw_json:
+            logger.warning("POST /create-policy-subsections - No JSON block in LLM response")
+            llm_errors += 1
+            source_rows_skipped += 1
+            continue
+
+        try:
+            parsed = json.loads(raw_json)
+        except json.JSONDecodeError as e:
+            logger.warning("POST /create-policy-subsections - Invalid JSON from LLM: %s", e)
+            llm_errors += 1
+            source_rows_skipped += 1
+            continue
+
+        subsections = parsed.get("subsections")
+        if not isinstance(subsections, list) or not subsections:
+            source_rows_skipped += 1
+            continue
+
+        base = {k: v for k, v in doc.items() if k != column and k != "_id"}
+        if "_id" in doc:
+            base["source_id"] = str(doc["_id"])
+
+        for sub in subsections:
+            sub_text = sub.get("text", "")
+            sub_id = sub.get("identifier", "")
+            if not sub_text and not sub_id:
+                continue
+            record = {
+                **base,
+                subsection_column: sub_text,
+                "subsection_identifier": sub_id,
+                "subchunk_id": str(uuid.uuid4()),
+                column: text,
+            }
+            try:
+                dest_coll.insert_one(record)
+                records_inserted += 1
+            except Exception as e:
+                logger.warning("POST /create-policy-subsections - Failed to insert: %s", e)
+                break
+        source_rows_processed += 1
+
+    logger.info(
+        "POST /create-policy-subsections - Inserted %d records, processed %d source rows, skipped %d, llm_errors=%d",
+        records_inserted, source_rows_processed, source_rows_skipped, llm_errors,
+    )
+    return jsonify({
+        "database": database,
+        "source_collection": source_collection,
+        "destination_collection": destination_collection,
+        "column": column,
+        "subsection_column": subsection_column,
+        "records_inserted": records_inserted,
+        "source_rows_processed": source_rows_processed,
+        "source_rows_skipped": source_rows_skipped,
+        "llm_errors": llm_errors,
+    })
+
+
+@core_bp.post("/create-chunks")
+def create_chunks():
+    """Chunk source column with overlap and write to destination collection.
+
+    For each record in source_collection, reads source_column, splits into
+    overlapping chunks (chunk_size, overlap), and writes one record per chunk
+    to destination_collection. Each record has all source columns except the
+    source column, plus chunk_column (chunk text), source_id, and chunk_index.
+
+    Example: database=privacy-compliance, source_collection=documents,
+    destination_collection=chunks, chunk_size=1200, overlap=200,
+    source_column=text, chunk_column=chunk_text.
+    """
+    logger.info("POST /create-chunks - Starting")
+    payload = request.get_json(silent=True) or {}
+    database = payload.get("database")
+    source_collection = payload.get("source_collection")
+    destination_collection = payload.get("destination_collection")
+    chunk_size = payload.get("chunk_size", DEFAULT_CHUNK_SIZE)
+    overlap = payload.get("overlap", DEFAULT_CHUNK_OVERLAP)
+    source_column = payload.get("source_column")
+    chunk_column = payload.get("chunk_column")
+
+    missing = []
+    if not database:
+        missing.append("database")
+    if not source_collection:
+        missing.append("source_collection")
+    if not destination_collection:
+        missing.append("destination_collection")
+    if not source_column:
+        missing.append("source_column")
+    if not chunk_column:
+        missing.append("chunk_column")
+
+    if missing:
+        logger.warning("POST /create-chunks - Missing required parameters: %s", missing)
+        return jsonify({"error": f"Missing required parameters: {', '.join(missing)}"}), 400
+
+    try:
+        chunk_size = int(chunk_size)
+        overlap = int(overlap)
+    except (TypeError, ValueError):
+        return jsonify({"error": "chunk_size and overlap must be integers"}), 400
+
+    logger.info(
+        "POST /create-chunks - %s.%s -> %s.%s chunk_size=%d overlap=%d source_column=%s chunk_column=%s",
+        database, source_collection, database, destination_collection,
+        chunk_size, overlap, source_column, chunk_column,
+    )
+
+    try:
+        db = mongo_client[database]
+        source_coll = db[source_collection]
+        dest_coll = db[destination_collection]
+        docs = list(source_coll.find({}))
+    except Exception as e:
+        logger.exception("POST /create-chunks - Failed to read source collection")
+        return jsonify({"error": f"Failed to read source collection: {e!s}"}), 500
+
+    records_inserted = 0
+    source_rows_processed = 0
+    source_rows_skipped = 0
+
+    for doc in docs:
+        raw = doc.get(source_column)
+        text = str(raw) if raw is not None else ""
+        chunks_list = chunk_text(text, chunk_size=chunk_size, overlap=overlap)
+        if not chunks_list:
+            source_rows_skipped += 1
+            continue
+
+        base = {k: v for k, v in doc.items() if k != source_column and k != "_id"}
+        if "_id" in doc:
+            base["source_id"] = str(doc["_id"])
+
+        for idx, chunk_text_val in enumerate(chunks_list):
+            record = {
+                **base,
+                chunk_column: chunk_text_val,
+                "chunk_index": idx,
+            }
+            try:
+                dest_coll.insert_one(record)
+                records_inserted += 1
+            except Exception as e:
+                logger.warning("POST /create-chunks - Failed to insert: %s", e)
+                break
+        source_rows_processed += 1
+
+    logger.info(
+        "POST /create-chunks - Inserted %d records, processed %d source rows, skipped %d",
+        records_inserted, source_rows_processed, source_rows_skipped,
+    )
+    return jsonify({
+        "database": database,
+        "source_collection": source_collection,
+        "destination_collection": destination_collection,
+        "chunk_size": chunk_size,
+        "overlap": overlap,
+        "source_column": source_column,
+        "chunk_column": chunk_column,
         "records_inserted": records_inserted,
         "source_rows_processed": source_rows_processed,
         "source_rows_skipped": source_rows_skipped,

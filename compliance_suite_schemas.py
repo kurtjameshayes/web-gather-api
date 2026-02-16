@@ -43,6 +43,11 @@ class GapItem(BaseModel):
     statute_quote: Optional[str] = None
     conflict_description: Optional[str] = None
     analysis_failed: bool = False
+    # Subchunk gap analysis context
+    policy_subchunk_text: Optional[str] = None
+    policy_chunk_text: Optional[str] = None
+    statute_subchunk_text: Optional[str] = None
+    statute_chunk_text: Optional[str] = None
 
 
 class GapSummary(BaseModel):
@@ -56,6 +61,7 @@ class GapAnalysisRequest(BaseModel):
     policy_document_id: Optional[str] = None
     company_name: Optional[str] = None
     applicable_jurisdictions: Optional[List[str]] = None
+    statute_document_id: Optional[str] = None  # Optional filter for statute subchunks
     database: Optional[str] = None
     policy_collection: Optional[str] = None
     save_results: bool = True  # If False, do not persist (e.g. for report run_now)

@@ -37,7 +37,7 @@ from compliance_storage import ComplianceStorage
 from compliance_utils import truncate_at_sentence, utc_now
 from llm_client import AnthropicLLMClient
 from rate_limiter import RateLimiter
-from vector_retriever import StatuteCandidate, VectorRetriever
+from vector_retriever import StatuteCandidate, SubchunkPair, VectorRetriever
 
 
 async def _run_in_thread(func, *args, **kwargs):
@@ -181,13 +181,11 @@ class ComplianceSuiteService:
         if not policy_document_id:
             raise ComplianceSuiteServiceError("policy_document_id is required.", status_code=400)
 
-        policy_text, company_name = await self._load_policy_text(
+        _, company_name = await self._load_policy_text(
             policy_document_id,
             database=req.database,
             policy_collection=req.policy_collection,
         )
-        if not policy_text:
-            raise ComplianceSuiteServiceError("Policy not found or empty.", status_code=404)
 
         jurisdictions = req.applicable_jurisdictions or self._config.default_jurisdictions
         if not jurisdictions:
@@ -196,81 +194,105 @@ class ComplianceSuiteService:
             )
             jurisdictions = appl.applicable_jurisdictions or self._config.default_jurisdictions
 
-        queries = self._config.disclosure_queries or [
-            "right to know what personal information is collected",
-            "right to delete personal information",
-            "opt out of sale of personal data",
-        ]
-        top_k_per_query = max(2, (self._config.top_k_statutes or 5) // 2)
+        # #region agent log
+        try:
+            import json as _json
+            cfg = self._config
+            with open("/Users/kurthayes/Dev/AI/web-gather-api/.cursor/debug.log", "a") as _f:
+                _f.write(_json.dumps({"timestamp": __import__("time").time() * 1000, "location": "compliance_suite_service.py:gap_analysis", "message": "before_retrieve", "data": {"database": self._retrieval_database, "policy_document_id": policy_document_id, "jurisdictions": jurisdictions[:5], "statute_sub_coll": getattr(cfg, "statute_sub_embeddings_collection", "MISSING"), "policy_sub_coll": getattr(cfg, "policy_sub_embeddings_collection", "MISSING")}, "hypothesisId": "H1,H2"}) + "\n")
+        except Exception:
+            pass
+        # #endregion
+
+        pairs = await self._retriever.retrieve_policy_subchunks_for_statute_subchunks(
+            database=self._retrieval_database,
+            policy_document_id=policy_document_id,
+            applicable_jurisdictions=jurisdictions,
+            statute_document_id=req.statute_document_id,
+            top_k_per_statute=1,
+        )
 
         gaps: List[GapItem] = []
         seen: Set[Tuple[str, str]] = set()
         statute_chunk_ids_used: List[str] = []
 
-        for jurisdiction in jurisdictions:
-            candidates = await self._retriever.retrieve_by_queries(
-                database=self._retrieval_database,
-                jurisdiction=jurisdiction,
-                queries=queries,
-                top_k_per_query=top_k_per_query,
-            )
-            for c in candidates:
-                key = (c.statute_id, c.chunk_header_text or c.chunk_text[:80])
-                if key in seen:
-                    continue
-                seen.add(key)
-                statute_chunk_ids_used.append(f"{c.statute_id}:{c.chunk_id}")
+        stat_sub_field = self._config.statute_subchunk_text_field
+        stat_chunk_field = self._config.statute_chunk_text_field
+        pol_sub_field = self._config.policy_subchunk_text_field
+        pol_chunk_field = self._config.policy_chunk_text_field
+        jur_field = self._config.statute_jurisdiction_field
 
-                async with self._semaphore:
-                    result = await self._llm_client.gap_check(
-                        statute_chunk_text=c.chunk_text,
-                        statute_reference=c.statute_id or c.section_id,
-                        policy_text=policy_text,
-                    )
+        for pair in pairs:
+            stat_doc = pair.statute_doc
+            pol_doc = pair.policy_doc
+            statute_subchunk = (stat_doc.get(stat_sub_field) or "").strip()
+            statute_chunk = (stat_doc.get(stat_chunk_field) or "").strip()
+            policy_subchunk = (pol_doc.get(pol_sub_field) or "").strip()
+            policy_chunk = (pol_doc.get(pol_chunk_field) or "").strip()
 
-                addressed = bool(result.get("addressed"))
-                policy_quote = result.get("policy_quote") if result.get("policy_quote") else None
-                if addressed and policy_quote and not _citation_binding(policy_quote, policy_text):
-                    addressed = False
-                    policy_quote = None
-                missing = bool(result.get("missing")) or not addressed
-                conflict = bool(result.get("conflict"))
-                analysis_failed = not result
+            subchunk_id = stat_doc.get("subchunk_id") or ""
+            statute_ref = str(stat_doc.get("document_id") or stat_doc.get("source_id") or "")
+            jurisdiction = str(stat_doc.get(jur_field) or "")
 
-                if analysis_failed:
-                    status = "missing"
-                elif conflict:
-                    status = "conflict"
-                elif addressed:
-                    status = "addressed"
-                else:
-                    status = "missing"
+            key = (statute_ref, subchunk_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            statute_chunk_ids_used.append(f"{statute_ref}:{subchunk_id}")
 
-                requirement_summary = (
-                    c.chunk_header_text or truncate_at_sentence(c.chunk_text, 350) or "Requirement"
-                ).strip()
-                section = _section_value(c.section_id or "", c.chunk_header_text or "")
-                statute_name = c.title.strip() if c.title else None
-                chunk_text = (c.chunk_text or "").strip()
-                statute_quote = (
-                    truncate_at_sentence(chunk_text, self._config.max_statute_quote_chars).strip()
-                    or None
-                ) if chunk_text else None
-                gaps.append(
-                    GapItem(
-                        jurisdiction=jurisdiction,
-                        statute_reference=c.statute_id or c.section_id or "",
-                        statute_name=statute_name,
-                        statute_chunk_id=c.chunk_id or None,
-                        section=section,
-                        requirement_summary=requirement_summary,
-                        status=status,
-                        policy_quote=policy_quote,
-                        statute_quote=statute_quote,
-                        conflict_description=result.get("conflict_description") if result else None,
-                        analysis_failed=analysis_failed,
-                    )
+            async with self._semaphore:
+                result = await self._llm_client.gap_check_subchunks(
+                    statute_subchunk_text=statute_subchunk,
+                    statute_chunk_text=statute_chunk,
+                    policy_subchunk_text=policy_subchunk,
+                    policy_chunk_text=policy_chunk,
                 )
+
+            addressed = bool(result.get("addressed"))
+            policy_quote = result.get("policy_quote") if result.get("policy_quote") else None
+            policy_text_for_binding = policy_subchunk or policy_chunk
+            if addressed and policy_quote and not _citation_binding(policy_quote, policy_text_for_binding):
+                addressed = False
+                policy_quote = None
+            missing = bool(result.get("missing")) or not addressed
+            conflict = bool(result.get("conflict"))
+            analysis_failed = not result
+
+            if analysis_failed:
+                status = "missing"
+            elif conflict:
+                status = "conflict"
+            elif addressed:
+                status = "addressed"
+            else:
+                status = "missing"
+
+            requirement_summary = (
+                truncate_at_sentence(statute_subchunk, 350) or "Requirement"
+            ).strip()
+            statute_quote = (
+                truncate_at_sentence(statute_subchunk, self._config.max_statute_quote_chars).strip()
+                or None
+            )
+            gaps.append(
+                GapItem(
+                    jurisdiction=jurisdiction,
+                    statute_reference=statute_ref,
+                    statute_name=None,
+                    statute_chunk_id=subchunk_id or None,
+                    section=None,
+                    requirement_summary=requirement_summary,
+                    status=status,
+                    policy_quote=policy_quote,
+                    statute_quote=statute_quote,
+                    conflict_description=result.get("conflict_description") if result else None,
+                    analysis_failed=analysis_failed,
+                    policy_subchunk_text=policy_subchunk or None,
+                    policy_chunk_text=policy_chunk or None,
+                    statute_subchunk_text=statute_subchunk or None,
+                    statute_chunk_text=statute_chunk or None,
+                )
+            )
 
         total = len(gaps)
         summary = GapSummary(

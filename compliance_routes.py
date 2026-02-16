@@ -215,9 +215,25 @@ async def applicability():
 async def gap_analysis():
     logger.info("POST /gap-analysis - Gap analysis")
     payload = request.get_json(silent=True) or {}
+    # #region agent log
+    try:
+        import json as _json
+        with open("/Users/kurthayes/Dev/AI/web-gather-api/.cursor/debug.log", "a") as _f:
+            _f.write(_json.dumps({"timestamp": __import__("time").time() * 1000, "location": "compliance_routes.py:gap_analysis", "message": "entry", "data": {"payload_keys": list(payload.keys()) if isinstance(payload, dict) else "not_dict"}, "hypothesisId": "H4"}) + "\n")
+    except Exception:
+        pass
+    # #endregion
     try:
         request_model = GapAnalysisRequest.model_validate(payload)
     except ValidationError as exc:
+        # #region agent log
+        try:
+            import json as _json
+            with open("/Users/kurthayes/Dev/AI/web-gather-api/.cursor/debug.log", "a") as _f:
+                _f.write(_json.dumps({"timestamp": __import__("time").time() * 1000, "location": "compliance_routes.py:gap_analysis", "message": "validation_error", "data": {"errors": exc.errors(), "payload_keys": list(payload.keys()) if isinstance(payload, dict) else "not_dict"}, "hypothesisId": "H2"}) + "\n")
+        except Exception:
+            pass
+        # #endregion
         return jsonify({"error": "Validation error", "details": exc.errors()}), 422
     try:
         authorize_request(_get_config(), request)
@@ -230,7 +246,16 @@ async def gap_analysis():
         return jsonify(result.model_dump())
     except ComplianceSuiteServiceError as exc:
         return jsonify({"error": str(exc)}), exc.status_code
-    except Exception:
+    except Exception as e:
+        # #region agent log
+        try:
+            import json as _json
+            import traceback as _tb
+            with open("/Users/kurthayes/Dev/AI/web-gather-api/.cursor/debug.log", "a") as _f:
+                _f.write(_json.dumps({"timestamp": __import__("time").time() * 1000, "location": "compliance_routes.py:gap_analysis", "message": "exception", "data": {"type": type(e).__name__, "msg": str(e), "tb": _tb.format_exc()}, "hypothesisId": "H5"}) + "\n")
+        except Exception:
+            pass
+        # #endregion
         logger.exception("Unhandled error in gap_analysis")
         return jsonify({"error": "Internal server error"}), 500
 

@@ -40,6 +40,15 @@ class StatuteCandidate:
     chunk_header_text: str = ""
 
 
+@dataclass
+class SubchunkPair:
+    """Statute subchunk doc and best-matching policy subchunk doc for gap analysis."""
+
+    statute_doc: Dict[str, Any]
+    policy_doc: Dict[str, Any]
+    score: float
+
+
 class VectorRetriever:
     def __init__(
         self,
@@ -355,3 +364,138 @@ class VectorRetriever:
         if want_jurisdiction:
             candidates = [c for c in candidates if normalize_jurisdiction(c.jurisdiction) == want_jurisdiction]
         return candidates
+
+    async def retrieve_policy_subchunks_for_statute_subchunks(
+        self,
+        database: str,
+        policy_document_id: str,
+        applicable_jurisdictions: List[str],
+        statute_document_id: Optional[str] = None,
+        top_k_per_statute: int = 1,
+    ) -> List[SubchunkPair]:
+        """Fetch statute subchunks, vector-search policy subchunks for each, return pairs.
+
+        For each statute subchunk in statute_sub_embeddings (filtered by jurisdiction,
+        optionally statute_document_id), runs $vectorSearch on policy_sub_embeddings
+        using the statute embedding, filtered by policy_document_id.
+        """
+        # #region agent log
+        try:
+            import json as _json
+            with open("/Users/kurthayes/Dev/AI/web-gather-api/.cursor/debug.log", "a") as _f:
+                _f.write(_json.dumps({"timestamp": __import__("time").time() * 1000, "location": "vector_retriever.py:retrieve_policy_subchunks", "message": "entry", "data": {"database": database, "stat_coll": self._config.statute_sub_embeddings_collection, "pol_coll": self._config.policy_sub_embeddings_collection}, "hypothesisId": "H1"}) + "\n")
+        except Exception:
+            pass
+        # #endregion
+
+        statute_coll = self._mongo_client[database][self._config.statute_sub_embeddings_collection]
+        policy_coll = self._mongo_client[database][self._config.policy_sub_embeddings_collection]
+        vec_path = self._config.embedding_vector_field
+        idx_name = self._config.vector_index_name
+        jur_field = self._config.statute_jurisdiction_field
+        doc_id_field = self._config.policy_document_id_field
+
+        # Build jurisdiction filter
+        all_jur_values: List[str] = []
+        for j in applicable_jurisdictions or []:
+            vals = jurisdiction_filter_values(normalize_jurisdiction(j))
+            all_jur_values.extend(vals)
+        if not all_jur_values:
+            all_jur_values = jurisdiction_filter_values(VECTOR_SEARCH_JURISDICTION)
+
+        statute_filter: Dict[str, Any] = {
+            jur_field: {"$in": all_jur_values} if len(all_jur_values) > 1 else all_jur_values[0]
+        }
+        if statute_document_id:
+            statute_filter["document_id"] = statute_document_id
+
+        def fetch_statute_subchunks() -> List[Dict[str, Any]]:
+            return list(statute_coll.find(statute_filter))
+
+        statute_docs = await _run_in_thread(fetch_statute_subchunks)
+        # #region agent log
+        try:
+            import json as _json
+            with open("/Users/kurthayes/Dev/AI/web-gather-api/.cursor/debug.log", "a") as _f:
+                _f.write(_json.dumps({"timestamp": __import__("time").time() * 1000, "location": "vector_retriever.py:retrieve_policy_subchunks", "message": "after_fetch_statute", "data": {"statute_count": len(statute_docs), "statute_filter": statute_filter}, "hypothesisId": "H1,H5"}) + "\n")
+        except Exception:
+            pass
+        # #endregion
+        if not statute_docs:
+            return []
+
+        policy_filter: Dict[str, Any] = {doc_id_field: policy_document_id}
+        pairs: List[SubchunkPair] = []
+
+        for stat_doc in statute_docs:
+            query_vector = stat_doc.get(vec_path)
+            if not query_vector or not isinstance(query_vector, list):
+                continue
+            try:
+                qv = [float(x) for x in query_vector]
+            except (TypeError, ValueError):
+                continue
+
+            # $vectorSearch filter requires indexed fields; document_id may not be in index.
+            # Run vector search without filter, then $match by document_id in pipeline.
+            pipeline = [
+                {
+                    "$vectorSearch": {
+                        "index": idx_name,
+                        "path": vec_path,
+                        "queryVector": qv,
+                        "numCandidates": max(500, top_k_per_statute * 50),
+                        "limit": 100,
+                    }
+                },
+                {"$addFields": {"score": {"$meta": "vectorSearchScore"}}},
+                {"$match": policy_filter},
+                {"$limit": top_k_per_statute},
+            ]
+
+            def run_search() -> List[Dict[str, Any]]:
+                return list(policy_coll.aggregate(pipeline))
+
+            try:
+                policy_results = await _run_in_thread(run_search)
+            except Exception as agg_err:
+                # #region agent log
+                try:
+                    import json as _json
+                    with open("/Users/kurthayes/Dev/AI/web-gather-api/.cursor/debug.log", "a") as _f:
+                        _f.write(_json.dumps({"timestamp": __import__("time").time() * 1000, "location": "vector_retriever.py:retrieve_policy_subchunks", "message": "aggregate_error", "data": {"error": str(agg_err), "index": idx_name, "path": vec_path}, "hypothesisId": "H3,H5"}) + "\n")
+                except Exception:
+                    pass
+                # #endregion
+                raise
+
+            # #region agent log
+            if not policy_results and statute_docs:
+                try:
+                    import json as _json
+                    with open("/Users/kurthayes/Dev/AI/web-gather-api/.cursor/debug.log", "a") as _f:
+                        _f.write(_json.dumps({"timestamp": __import__("time").time() * 1000, "location": "vector_retriever.py:retrieve_policy_subchunks", "message": "no_policy_results", "data": {"policy_filter": policy_filter}, "hypothesisId": "H3", "runId": "post-fix"}) + "\n")
+                except Exception:
+                    pass
+            # #endregion
+            if not policy_results:
+                continue
+            best = policy_results[0]
+            score = float(best.get("score", 0.0))
+            # Exclude raw vector from policy_doc for response
+            policy_doc = {k: v for k, v in best.items() if k != vec_path}
+            if "_id" in policy_doc:
+                policy_doc["_id"] = str(policy_doc["_id"])
+            pairs.append(
+                SubchunkPair(statute_doc=stat_doc, policy_doc=policy_doc, score=score)
+            )
+
+        # #region agent log
+        try:
+            import json as _json
+            with open("/Users/kurthayes/Dev/AI/web-gather-api/.cursor/debug.log", "a") as _f:
+                _f.write(_json.dumps({"timestamp": __import__("time").time() * 1000, "location": "vector_retriever.py:retrieve_policy_subchunks", "message": "return", "data": {"pairs_count": len(pairs)}, "hypothesisId": "H3", "runId": "post-fix"}) + "\n")
+        except Exception:
+            pass
+        # #endregion
+        return pairs

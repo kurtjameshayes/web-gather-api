@@ -98,6 +98,12 @@ class ComplianceConfig:
     requirement_weights: Dict[str, float]
     canonical_requirement_ids: List[str]
     disclosure_queries: List[str]
+    # Subchunk gap analysis
+    statute_sub_embeddings_collection: str
+    policy_sub_embeddings_collection: str
+    statute_subchunk_text_field: str
+    policy_subchunk_text_field: str
+    statute_chunk_text_field: str  # Enclosing chunk in statute subchunks
 
 
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -170,6 +176,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "opt out of sale of personal data",
         "sensitive data disclosure and consent",
     ],
+    # Subchunk gap analysis
+    "statute_sub_embeddings_collection": "statute_sub_embeddings",
+    "policy_sub_embeddings_collection": "policy_sub_embeddings",
+    "statute_subchunk_text_field": "subchunk_text",
+    "policy_subchunk_text_field": "subchunk_text",
+    "statute_chunk_text_field": "chunk_text",
 }
 
 
@@ -305,4 +317,9 @@ def load_config() -> ComplianceConfig:
         requirement_weights=data.get("requirement_weights", DEFAULT_CONFIG["requirement_weights"]) or {},
         canonical_requirement_ids=data.get("canonical_requirement_ids", DEFAULT_CONFIG["canonical_requirement_ids"]),
         disclosure_queries=data.get("disclosure_queries", DEFAULT_CONFIG["disclosure_queries"]),
+        statute_sub_embeddings_collection=data.get("statute_sub_embeddings_collection", DEFAULT_CONFIG["statute_sub_embeddings_collection"]),
+        policy_sub_embeddings_collection=data.get("policy_sub_embeddings_collection", DEFAULT_CONFIG["policy_sub_embeddings_collection"]),
+        statute_subchunk_text_field=data.get("statute_subchunk_text_field", DEFAULT_CONFIG["statute_subchunk_text_field"]),
+        policy_subchunk_text_field=data.get("policy_subchunk_text_field", DEFAULT_CONFIG["policy_subchunk_text_field"]),
+        statute_chunk_text_field=data.get("statute_chunk_text_field", DEFAULT_CONFIG["statute_chunk_text_field"]),
     )

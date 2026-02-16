@@ -196,6 +196,10 @@ def build_openapi_spec():
                         "statute_quote": {"type": ["string", "null"]},
                         "conflict_description": {"type": ["string", "null"]},
                         "analysis_failed": {"type": "boolean"},
+                        "policy_subchunk_text": {"type": ["string", "null"], "description": "Policy subchunk text (subchunk gap analysis)"},
+                        "policy_chunk_text": {"type": ["string", "null"], "description": "Policy enclosing chunk (subchunk gap analysis)"},
+                        "statute_subchunk_text": {"type": ["string", "null"], "description": "Statute subchunk text (subchunk gap analysis)"},
+                        "statute_chunk_text": {"type": ["string", "null"], "description": "Statute enclosing chunk (subchunk gap analysis)"},
                     },
                 },
                 "GapSummary": {
@@ -212,6 +216,7 @@ def build_openapi_spec():
                     "properties": {
                         "policy_document_id": {"type": "string"},
                         "applicable_jurisdictions": {"type": "array", "items": {"type": "string"}},
+                        "statute_document_id": {"type": "string", "description": "Optional filter for statute subchunks"},
                         "database": {"type": "string"},
                         "policy_collection": {"type": "string"},
                         "save_results": {"type": "boolean", "default": True},
@@ -1035,7 +1040,7 @@ def build_openapi_spec():
                                         "text_column": {
                                             "type": "string",
                                             "default": "chunk_text",
-                                            "description": "Column containing the text to embed (default: chunk_text)",
+                                            "description": "Column to read text from and write embedded text to (default: chunk_text). For subchunks, use subchunk_text so chunk_text from source is preserved.",
                                         },
                                         "source_query": {
                                             "type": "string",
@@ -1066,6 +1071,7 @@ def build_openapi_spec():
                                             "source_collection_name": {"type": "string"},
                                             "index_database_name": {"type": "string"},
                                             "index_collection_name": {"type": "string"},
+                                            "text_column": {"type": "string"},
                                             "chunks_indexed": {"type": "integer"},
                                             "embedding_model": {"type": "string"},
                                             "skipped_rows": {"type": "integer"},
@@ -1102,12 +1108,13 @@ def build_openapi_spec():
             "/vector-search": {
                 "get": {
                     "summary": "Vector search over MongoDB Atlas index",
-                    "description": "Converts the query to embeddings and runs $vectorSearch. Model from web-gather.embedding_model (same as /vector-index). Requires embedding_model configured (POST /embedding-models).",
+                    "description": "Runs $vectorSearch. Provide query (embedded) or query_vector (precomputed). Model from web-gather.embedding_model when using query. Requires embedding_model configured (POST /embedding-models).",
                     "parameters": [
                         {"name": "database", "in": "query", "required": True, "schema": {"type": "string"}},
                         {"name": "collection", "in": "query", "required": True, "schema": {"type": "string"}},
                         {"name": "index", "in": "query", "required": True, "schema": {"type": "string"}},
-                        {"name": "query", "in": "query", "required": True, "schema": {"type": "string"}},
+                        {"name": "query", "in": "query", "schema": {"type": "string"}, "description": "Search text (embedded). Omit if query_vector provided."},
+                        {"name": "query_vector", "in": "query", "schema": {"type": "array", "items": {"type": "number"}}, "description": "Precomputed vector. Omit if query provided."},
                         {"name": "limit", "in": "query", "schema": {"type": "integer", "default": 10}},
                         {"name": "path", "in": "query", "schema": {"type": "string"}, "description": "Vector field path (default from embedding_model)"},
                         {"name": "filter", "in": "query", "schema": {"type": "string"}, "description": "MongoDB filter as JSON (e.g. {\"jurisdiction\": \"CA\"})"},
@@ -1116,7 +1123,7 @@ def build_openapi_spec():
                 },
                 "post": {
                     "summary": "Vector search over MongoDB Atlas index",
-                    "description": "Same as GET. Use POST for long queries. Body: database, collection, index, query; optional limit, path, filter. Model from web-gather.embedding_model.",
+                    "description": "Same as GET. Use POST for long queries or query_vector. Body: database, collection, index; query or query_vector; optional limit, path, filter.",
                     "requestBody": {
                         "content": {
                             "application/json": {
@@ -1127,11 +1134,12 @@ def build_openapi_spec():
                                         "collection": {"type": "string"},
                                         "index": {"type": "string"},
                                         "query": {"type": "string"},
+                                        "query_vector": {"type": "array", "items": {"type": "number"}, "description": "Precomputed vector (skips embedding)"},
                                         "limit": {"type": "integer", "default": 10},
                                         "path": {"type": "string"},
                                         "filter": {"type": "object", "description": "MongoDB filter for $vectorSearch"},
                                     },
-                                    "required": ["database", "collection", "index", "query"],
+                                    "required": ["database", "collection", "index"],
                                 }
                             }
                         }
@@ -1139,10 +1147,10 @@ def build_openapi_spec():
                     "responses": {"200": {"description": "Vector search results with score"}},
                 },
             },
-            "/create-subsections": {
+            "/create-paragraph-sections": {
                 "post": {
                     "summary": "Split column into paragraph subsections in new collection",
-                    "description": "For each record in source_collection, splits the column by paragraph boundaries (double newlines) and creates one record per subchunk in destination_collection. Each destination record has all source columns except the split column, plus subsection_column and a unique subchunk_id (guid). Example: database=privacy-compliance, source_collection=statute_chunks, destination_collection=statute_subchunks, column=chunk_text, subsection_column=subchunk_text.",
+                    "description": "For each record in source_collection (optionally filtered by source_query), splits the column by paragraph boundaries (double newlines) and creates one record per subchunk in destination_collection. Each destination record has all source columns except the split column, plus subsection_column and a unique subchunk_id (guid). Example: database=privacy-compliance, source_collection=statute_chunks, destination_collection=statute_subchunks, column=chunk_text, subsection_column=subchunk_text, source_query={\"jurisdiction\": \"California\"}.",
                     "requestBody": {
                         "required": True,
                         "content": {
@@ -1155,6 +1163,7 @@ def build_openapi_spec():
                                         "destination_collection": {"type": "string", "description": "New collection to write subchunks to"},
                                         "column": {"type": "string", "description": "Source field to split (e.g. chunk_text)"},
                                         "subsection_column": {"type": "string", "description": "Field name for subchunk text in destination (e.g. subchunk_text)"},
+                                        "source_query": {"type": "object", "description": "Optional MongoDB query to filter source records (e.g. {\"document_id\": \"x\"}). When omitted, all records are processed."},
                                     },
                                     "required": ["database", "source_collection", "destination_collection", "column", "subsection_column"],
                                 }
@@ -1183,6 +1192,160 @@ def build_openapi_spec():
                             },
                         },
                         "400": {"description": "Missing required parameters"},
+                        "500": {"description": "Failed to read source collection"},
+                    },
+                }
+            },
+            "/create-statute-subsections": {
+                "post": {
+                    "summary": "Split statute section column into subsections using LLM",
+                    "description": "For each record in source_collection (optionally filtered by source_query), reads the column value and uses an LLM to identify statute subsections (typically prefaced with (a), (b), (1), (2), etc.). Creates one record per subsection in destination_collection. Optional source_query, parse_prompt.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "database": {"type": "string"},
+                                        "source_collection": {"type": "string", "description": "Source collection to read from"},
+                                        "destination_collection": {"type": "string", "description": "Collection to write subsections to"},
+                                        "column": {"type": "string", "description": "Source field containing statute text (e.g. chunk_text)"},
+                                        "subsection_column": {"type": "string", "description": "Field name for subsection text in destination (e.g. subchunk_text)"},
+                                        "source_query": {"type": "object", "description": "Optional MongoDB query to filter source records."},
+                                        "parse_prompt": {"type": "string", "description": "Optional. Additional parsing instructions. When blank, uses default prompt."},
+                                    },
+                                    "required": ["database", "source_collection", "destination_collection", "column", "subsection_column"],
+                                }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Records inserted and counts",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "database": {"type": "string"},
+                                            "source_collection": {"type": "string"},
+                                            "destination_collection": {"type": "string"},
+                                            "column": {"type": "string"},
+                                            "subsection_column": {"type": "string"},
+                                            "records_inserted": {"type": "integer"},
+                                            "source_rows_processed": {"type": "integer"},
+                                            "source_rows_skipped": {"type": "integer"},
+                                            "llm_errors": {"type": "integer"},
+                                        },
+                                    }
+                                }
+                            }
+                        },
+                        "400": {"description": "Missing required parameters or invalid source_query JSON"},
+                        "500": {"description": "Failed to read source collection"},
+                    },
+                }
+            },
+            "/create-policy-subsections": {
+                "post": {
+                    "summary": "Split policy section column into subsections using LLM",
+                    "description": "For each record in source_collection (optionally filtered by source_query), reads the column value and uses an LLM to identify policy subsections (logical chunks). Excludes section headers (e.g. # What Information We Collect) and text irrelevant to privacy policies. Creates one record per subsection in destination_collection. Optional parse_prompt: when provided, appended as additional instructions; when blank, uses the default prompt.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "database": {"type": "string"},
+                                        "source_collection": {"type": "string", "description": "Source collection to read from"},
+                                        "destination_collection": {"type": "string", "description": "Collection to write subsections to"},
+                                        "column": {"type": "string", "description": "Source field containing policy text (e.g. chunk_text)"},
+                                        "subsection_column": {"type": "string", "description": "Field name for subsection text in destination (e.g. subchunk_text)"},
+                                        "source_query": {"type": "object", "description": "Optional MongoDB query to filter source records."},
+                                        "parse_prompt": {"type": "string", "description": "Optional. Additional parsing instructions. When blank, uses default prompt."},
+                                    },
+                                    "required": ["database", "source_collection", "destination_collection", "column", "subsection_column"],
+                                }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Records inserted and counts",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "database": {"type": "string"},
+                                            "source_collection": {"type": "string"},
+                                            "destination_collection": {"type": "string"},
+                                            "column": {"type": "string"},
+                                            "subsection_column": {"type": "string"},
+                                            "records_inserted": {"type": "integer"},
+                                            "source_rows_processed": {"type": "integer"},
+                                            "source_rows_skipped": {"type": "integer"},
+                                            "llm_errors": {"type": "integer"},
+                                        },
+                                    }
+                                }
+                            }
+                        },
+                        "400": {"description": "Missing required parameters"},
+                        "500": {"description": "Failed to read source collection"},
+                    },
+                }
+            },
+            "/create-chunks": {
+                "post": {
+                    "summary": "Chunk source column with overlap into destination collection",
+                    "description": "For each record in source_collection, reads source_column, splits into overlapping chunks (chunk_size, overlap) using character-based chunking, and writes one record per chunk to destination_collection. Each record has all source columns except the source column, plus chunk_column (chunk text), source_id, and chunk_index. Example: database=privacy-compliance, source_collection=documents, destination_collection=chunks, chunk_size=1200, overlap=200, source_column=text, chunk_column=chunk_text.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "database": {"type": "string"},
+                                        "source_collection": {"type": "string", "description": "Source collection to read from"},
+                                        "destination_collection": {"type": "string", "description": "Collection to write chunks to"},
+                                        "chunk_size": {"type": "integer", "default": 1200, "description": "Max characters per chunk"},
+                                        "overlap": {"type": "integer", "default": 200, "description": "Overlap between chunks"},
+                                        "source_column": {"type": "string", "description": "Field to read text from (e.g. text)"},
+                                        "chunk_column": {"type": "string", "description": "Field to write chunk text to (e.g. chunk_text)"},
+                                    },
+                                    "required": ["database", "source_collection", "destination_collection", "source_column", "chunk_column"],
+                                }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Records inserted and counts",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "database": {"type": "string"},
+                                            "source_collection": {"type": "string"},
+                                            "destination_collection": {"type": "string"},
+                                            "chunk_size": {"type": "integer"},
+                                            "overlap": {"type": "integer"},
+                                            "source_column": {"type": "string"},
+                                            "chunk_column": {"type": "string"},
+                                            "records_inserted": {"type": "integer"},
+                                            "source_rows_processed": {"type": "integer"},
+                                            "source_rows_skipped": {"type": "integer"},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                        "400": {"description": "Missing required parameters or invalid chunk_size/overlap"},
                         "500": {"description": "Failed to read source collection"},
                     },
                 }
