@@ -101,19 +101,28 @@ def add_embedding_model():
     return jsonify(set_doc)
 
 
+def _build_filter_field(path: str) -> dict:
+    """Build a MongoDB vector search filter field definition."""
+    return {"type": "filter", "path": path}
+
+
 @util_bp.post("/create-vector-index")
 def create_vector_index():
     """Create a vector search index on a collection using the embedding_model document from web-gather.
 
-    Body: database_name (str), collection_name (str), index_name (str, optional, default "vector_index").
-    Looks up web-gather.embedding_model by database_name and uses its fields (path, numDimensions, similarity, type)
-    to create an Atlas vector search index. Requires Atlas (create_search_index).
+    Drops the index first if it exists, then creates it. Body: database_name (str), collection_name (str), index_name (str, optional),
+    filter_fields (array of strings or objects, optional): field paths to index for pre-filtering
+    (e.g. ["document_id", "jurisdiction"]). Each string is converted to {"type": "filter", "path": "..."}.
+    Objects must have "path" key. If omitted, uses embedding_model.filter_fields when present.
+    Looks up web-gather.embedding_model by database_name and uses its fields for the vector index.
+    Requires Atlas (create_search_index).
     """
     logger.info("POST /create-vector-index - Creating vector index")
     payload = request.get_json(silent=True) or {}
     database_name = payload.get("database_name")
     collection_name = payload.get("collection_name")
     index_name = payload.get("index_name") or "vector_index"
+    filter_fields_param = payload.get("filter_fields")
 
     if not database_name or not isinstance(database_name, str) or not database_name.strip():
         return jsonify({"error": "database_name is required and must be a non-empty string"}), 400
@@ -128,15 +137,53 @@ def create_vector_index():
             "error": f"No embedding_model configured for database '{database_name}'. Use POST /embedding-models first."
         }), 400
 
-    fields = record.get("fields")
-    if not isinstance(fields, list) or len(fields) == 0:
+    fields = list(record.get("fields") or [])
+    if not fields:
         return jsonify({
             "error": f"embedding_model for '{database_name}' has no valid 'fields' array for vector index."
         }), 400
 
+    # Resolve filter fields: request body overrides embedding_model
+    filter_field_defs: list[dict] = []
+    if filter_fields_param is not None:
+        if isinstance(filter_fields_param, list):
+            for item in filter_fields_param:
+                if isinstance(item, str) and item.strip():
+                    filter_field_defs.append(_build_filter_field(item.strip()))
+                elif isinstance(item, dict) and item.get("path"):
+                    path = str(item["path"]).strip()
+                    if path:
+                        filter_field_defs.append(_build_filter_field(path))
+        else:
+            return jsonify({"error": "filter_fields must be an array of field paths (strings) or objects with 'path'"}), 400
+    elif isinstance(record.get("filter_fields"), list):
+        for item in record["filter_fields"]:
+            if isinstance(item, str) and item.strip():
+                filter_field_defs.append(_build_filter_field(item.strip()))
+            elif isinstance(item, dict) and item.get("path"):
+                path = str(item["path"]).strip()
+                if path:
+                    filter_field_defs.append(_build_filter_field(path))
+
+    fields = fields + filter_field_defs
     definition = {"fields": fields}
+    db = mongo_client[database_name]
     try:
-        db = mongo_client[database_name]
+        drop_res = db.command(
+            {"dropSearchIndex": collection_name, "name": index_name}
+        )
+        if drop_res.get("ok"):
+            logger.info(
+                "POST /create-vector-index - Dropped existing index %r on %s.%s",
+                index_name, database_name, collection_name,
+            )
+    except Exception as drop_err:  # noqa: BLE001
+        # Index may not exist; continue to creation
+        logger.debug(
+            "POST /create-vector-index - Drop index %r (may not exist): %s",
+            index_name, drop_err,
+        )
+    try:
         res = db.command(
             {
                 "createSearchIndexes": collection_name,
@@ -156,12 +203,13 @@ def create_vector_index():
         return jsonify({"error": f"Failed to create vector index: {e!s}"}), 500
 
     logger.info(
-        "POST /create-vector-index - Created index %r on %s.%s",
-        index_name, database_name, collection_name,
+        "POST /create-vector-index - Created index %r on %s.%s (filter_fields=%d)",
+        index_name, database_name, collection_name, len(filter_field_defs),
     )
     return jsonify({
         "database_name": database_name,
         "collection_name": collection_name,
         "index_name": index_name,
         "definition": definition,
+        "filter_fields_added": len(filter_field_defs),
     })

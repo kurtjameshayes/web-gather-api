@@ -1401,7 +1401,7 @@ def build_openapi_spec():
             "/create-vector-index": {
                 "post": {
                     "summary": "Create vector search index from embedding_model",
-                    "description": "Create an Atlas vector search index on a collection using the embedding_model document from web-gather (database_name). Body: database_name, collection_name, optional index_name (default vector_index). Requires Atlas.",
+                    "description": "Create an Atlas vector search index on a collection using the embedding_model document from web-gather (database_name). Drops the index first if it exists. Body: database_name, collection_name, optional index_name (default vector_index). Requires Atlas.",
                     "requestBody": {
                         "required": True,
                         "content": {
@@ -1412,9 +1412,25 @@ def build_openapi_spec():
                                         "database_name": {"type": "string"},
                                         "collection_name": {"type": "string"},
                                         "index_name": {"type": "string"},
+                                        "filter_fields": {
+                                            "type": "array",
+                                            "description": "Field paths to index for pre-filtering (e.g. document_id, jurisdiction). If omitted, uses embedding_model.filter_fields when present.",
+                                            "items": {
+                                                "oneOf": [
+                                                    {"type": "string"},
+                                                    {"type": "object", "required": ["path"], "properties": {"path": {"type": "string"}}}
+                                                ]
+                                            },
+                                        },
                                     },
                                     "required": ["database_name", "collection_name"],
-                                }
+                                },
+                                "example": {
+                                    "database_name": "compliance",
+                                    "collection_name": "statute_sub_embeddings",
+                                    "index_name": "vector_index",
+                                    "filter_fields": ["jurisdiction", "document_id"]
+                                },
                             }
                         },
                     },
