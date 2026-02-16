@@ -211,6 +211,8 @@ class ComplianceSuiteService:
             statute_document_id=req.statute_document_id,
             top_k_per_statute=1,
         )
+        if req.num_rows is not None:
+            pairs = pairs[: req.num_rows]
 
         gaps: List[GapItem] = []
         seen: Set[Tuple[str, str]] = set()

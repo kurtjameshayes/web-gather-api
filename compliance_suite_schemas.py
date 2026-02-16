@@ -65,6 +65,7 @@ class GapAnalysisRequest(BaseModel):
     database: Optional[str] = None
     policy_collection: Optional[str] = None
     save_results: bool = True  # If False, do not persist (e.g. for report run_now)
+    num_rows: Optional[int] = None  # If set, limit to this many statute subchunks (partial run)
 
 
 class GapAnalysisResponse(BaseModel):

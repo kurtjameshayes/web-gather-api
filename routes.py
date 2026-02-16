@@ -220,6 +220,7 @@ def build_openapi_spec():
                         "database": {"type": "string"},
                         "policy_collection": {"type": "string"},
                         "save_results": {"type": "boolean", "default": True},
+                        "num_rows": {"type": "integer", "description": "If set, limit to this many statute subchunks (partial run)"},
                     },
                     "required": ["policy_document_id"],
                 },
