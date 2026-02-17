@@ -7,6 +7,8 @@ routes_bp = Blueprint("routes", __name__)
 
 # Must match app.py url_prefix when registering compliance_bp.
 COMPLIANCE_API_PREFIX = "/api/compliance"
+COMPLIANCE_V2_API_PREFIX = "/api/v2/compliance"
+COMPLIANCE_V3_API_PREFIX = "/api/v3/compliance"
 
 
 def build_openapi_spec():
@@ -187,19 +189,19 @@ def build_openapi_spec():
                     "properties": {
                         "jurisdiction": {"type": "string"},
                         "statute_reference": {"type": "string"},
-                        "statute_name": {"type": ["string", "null"]},
-                        "statute_chunk_id": {"type": ["string", "null"]},
-                        "section": {"type": ["string", "null"]},
+                        "statute_name": {"type": "string", "nullable": True},
+                        "statute_chunk_id": {"type": "string", "nullable": True},
+                        "section": {"type": "string", "nullable": True},
                         "requirement_summary": {"type": "string"},
                         "status": {"type": "string", "enum": ["missing", "addressed", "conflict"]},
-                        "policy_quote": {"type": ["string", "null"]},
-                        "statute_quote": {"type": ["string", "null"]},
-                        "conflict_description": {"type": ["string", "null"]},
+                        "policy_quote": {"type": "string", "nullable": True},
+                        "statute_quote": {"type": "string", "nullable": True},
+                        "conflict_description": {"type": "string", "nullable": True},
                         "analysis_failed": {"type": "boolean"},
-                        "policy_subchunk_text": {"type": ["string", "null"], "description": "Policy subchunk text (subchunk gap analysis)"},
-                        "policy_chunk_text": {"type": ["string", "null"], "description": "Policy enclosing chunk (subchunk gap analysis)"},
-                        "statute_subchunk_text": {"type": ["string", "null"], "description": "Statute subchunk text (subchunk gap analysis)"},
-                        "statute_chunk_text": {"type": ["string", "null"], "description": "Statute enclosing chunk (subchunk gap analysis)"},
+                        "policy_subchunk_text": {"type": "string", "nullable": True, "description": "Policy subchunk text (subchunk gap analysis)"},
+                        "policy_chunk_text": {"type": "string", "nullable": True, "description": "Policy enclosing chunk (subchunk gap analysis)"},
+                        "statute_subchunk_text": {"type": "string", "nullable": True, "description": "Statute subchunk text (subchunk gap analysis)"},
+                        "statute_chunk_text": {"type": "string", "nullable": True, "description": "Statute enclosing chunk (subchunk gap analysis)"},
                     },
                 },
                 "GapSummary": {
@@ -215,24 +217,35 @@ def build_openapi_spec():
                     "type": "object",
                     "properties": {
                         "policy_document_id": {"type": "string"},
+                        "company_name": {"type": "string", "nullable": True},
                         "applicable_jurisdictions": {"type": "array", "items": {"type": "string"}},
                         "statute_document_id": {"type": "string", "description": "Optional filter for statute subchunks"},
                         "database": {"type": "string"},
                         "policy_collection": {"type": "string"},
                         "save_results": {"type": "boolean", "default": True},
-                        "num_rows": {"type": "integer", "description": "If set, limit to this many statute subchunks (partial run)"},
+                        "num_rows": {"type": "integer", "minimum": 1, "description": "If set, limit to this many statute subchunks (partial run)"},
                     },
                     "required": ["policy_document_id"],
+                },
+                "RetrievalMetadata": {
+                    "type": "object",
+                    "description": "Metadata about statute-policy retrieval for transparency when gaps=[].",
+                    "properties": {
+                        "statute_subchunks_considered": {"type": "integer", "description": "Number of statute subchunks retrieved for comparison (v1)."},
+                        "statute_chunks_considered": {"type": "integer", "description": "Number of statute chunks retrieved for comparison (v2)."},
+                        "statute_pairs_matched": {"type": "integer", "description": "Number of statute-policy pairs matched and analyzed."},
+                    },
                 },
                 "GapAnalysisResponse": {
                     "type": "object",
                     "properties": {
                         "policy_document_id": {"type": "string"},
-                        "company_name": {"type": ["string", "null"]},
+                        "company_name": {"type": "string", "nullable": True},
                         "applicable_jurisdictions": {"type": "array", "items": {"type": "string"}},
                         "analyzed_at": {"type": "string"},
                         "gaps": {"type": "array", "items": {"$ref": "#/components/schemas/GapItem"}},
                         "summary": {"$ref": "#/components/schemas/GapSummary"},
+                        "retrieval_metadata": {"$ref": "#/components/schemas/RetrievalMetadata"},
                     },
                 },
                 "HealthScoreRequest": {
@@ -251,12 +264,12 @@ def build_openapi_spec():
                     "type": "object",
                     "properties": {
                         "policy_document_id": {"type": "string"},
-                        "company_name": {"type": ["string", "null"]},
-                        "privacy_health_score": {"type": ["integer", "null"]},
+                        "company_name": {"type": "string", "nullable": True},
+                        "privacy_health_score": {"type": "integer", "nullable": True},
                         "score_breakdown": {"type": "object"},
                         "components": {"type": "object"},
                         "analyzed_at": {"type": "string"},
-                        "error": {"type": ["string", "null"]},
+                        "error": {"type": "string", "nullable": True},
                     },
                 },
                 "MultiJurisdictionalRequest": {
@@ -344,10 +357,10 @@ def build_openapi_spec():
                             "type": "object",
                             "properties": {
                                 "addressed": {"type": "boolean"},
-                                "policy_quote": {"type": ["string", "null"]},
+                                "policy_quote": {"type": "string", "nullable": True},
                                 "missing": {"type": "boolean"},
                                 "conflict": {"type": "boolean"},
-                                "conflict_description": {"type": ["string", "null"]},
+                                "conflict_description": {"type": "string", "nullable": True},
                             },
                             "required": ["addressed", "policy_quote", "missing", "conflict", "conflict_description"],
                         }
@@ -1200,7 +1213,7 @@ def build_openapi_spec():
             "/create-statute-subsections": {
                 "post": {
                     "summary": "Split statute section column into subsections using LLM",
-                    "description": "For each record in source_collection (optionally filtered by source_query), reads the column value and uses an LLM to identify statute subsections (typically prefaced with (a), (b), (1), (2), etc.). Creates one record per subsection in destination_collection. Optional source_query, parse_prompt.",
+                    "description": "For each record in source_collection (optionally filtered by source_query), reads the column value and uses an LLM to identify statute sections by alphabetic markers (a), (b), (c), (d) only. Numeric markers (1), (2), (8) are nested and kept together. Each subsection includes the chunk header and has linefeeds removed. Creates one record per section in destination_collection. Optional source_query, parse_prompt.",
                     "requestBody": {
                         "required": True,
                         "content": {
@@ -1660,8 +1673,8 @@ def build_openapi_spec():
             },
             f"{COMPLIANCE_API_PREFIX}/gap-analysis": {
                 "post": {
-                    "summary": "Full gap analysis",
-                    "description": "Retrieve relevant statute chunks for the policy's jurisdictions, run gap checks against each, and return a full gap analysis with gaps, summary, and optional persistence.",
+                    "summary": "Full gap analysis (subchunk)",
+                    "description": "Retrieve relevant statute subchunks for the policy's jurisdictions, run gap checks against each, and return a full gap analysis with gaps, summary, and optional persistence. Uses statute_sub_embeddings and policy_sub_embeddings.",
                     "requestBody": {
                         "required": True,
                         "content": {
@@ -1670,6 +1683,7 @@ def build_openapi_spec():
                                 "example": {
                                     "policy_document_id": "doc-123",
                                     "applicable_jurisdictions": ["CA", "VA"],
+                                    "num_rows": 10,
                                 },
                             }
                         },
@@ -1684,6 +1698,71 @@ def build_openapi_spec():
                             },
                         },
                         "400": {"description": "Bad request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "404": {"description": "Policy not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "422": {"description": "Validation error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                    },
+                }
+            },
+            f"{COMPLIANCE_V2_API_PREFIX}/gap-analysis": {
+                "post": {
+                    "summary": "Gap analysis (chunk-level, v2)",
+                    "description": "Chunk-level gap analysis: compares statute_embeddings to policy_embeddings. Uses a YAML-configurable prompt (prompts/gap_analysis_chunk.yaml). Different from v1 which uses statute_sub_embeddings and policy_sub_embeddings.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/GapAnalysisRequest"},
+                                "example": {
+                                    "policy_document_id": "doc-123",
+                                    "applicable_jurisdictions": ["CA", "VA"],
+                                    "num_rows": 10,
+                                },
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Gap analysis with gaps and summary",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/GapAnalysisResponse"},
+                                }
+                            },
+                        },
+                        "400": {"description": "Bad request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "404": {"description": "Policy not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "422": {"description": "Validation error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                    },
+                }
+            },
+            f"{COMPLIANCE_V3_API_PREFIX}/gap-analysis": {
+                "post": {
+                    "summary": "Gap analysis (v3)",
+                    "description": "Gap analysis v3 per GapAnalysisProcessDesign.md: statute→policy vector search with top-k matches and score threshold, LLM analysis per pair, citation binding validation against full policy text. Uses statute_embeddings and policy_embeddings.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/GapAnalysisRequest"},
+                                "example": {
+                                    "policy_document_id": "doc-123",
+                                    "applicable_jurisdictions": ["CA", "VA"],
+                                    "num_rows": 10,
+                                    "save_results": True,
+                                },
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Gap analysis with gaps, summary, retrieval_metadata (statute_items_considered, statute_pairs_matched)",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/GapAnalysisResponse"},
+                                }
+                            },
+                        },
+                        "400": {"description": "Bad request (e.g. policy not indexed)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
                         "404": {"description": "Policy not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
                         "422": {"description": "Validation error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
                     },

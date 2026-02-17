@@ -1648,14 +1648,6 @@ def create_subsections():
                 return jsonify({"error": f"Invalid JSON in source_query: {str(exc)}"}), 400
         if not isinstance(source_query, dict):
             source_query = {}
-    # #region agent log
-    try:
-        import json as _json
-        with open("/Users/kurthayes/Dev/AI/web-gather-api/.cursor/debug.log", "a") as _f:
-            _f.write(_json.dumps({"timestamp": __import__("time").time() * 1000, "location": "core.py:create_paragraph_sections", "message": "source_query_resolved", "data": {"source_query_param_type": type(source_query_param).__name__ if source_query_param is not None else "None", "source_query": source_query}, "hypothesisId": "H1"}) + "\n")
-    except Exception:
-        pass
-    # #endregion
 
     missing = []
     if not database:
@@ -1685,15 +1677,6 @@ def create_subsections():
         dest_coll = db[destination_collection]
         docs = list(source_coll.find(source_query))
     except Exception as e:
-        # #region agent log
-        try:
-            import json as _json
-            import traceback as _tb
-            with open("/Users/kurthayes/Dev/AI/web-gather-api/.cursor/debug.log", "a") as _f:
-                _f.write(_json.dumps({"timestamp": __import__("time").time() * 1000, "location": "core.py:create_paragraph_sections", "message": "exception", "data": {"type": type(e).__name__, "msg": str(e), "tb": _tb.format_exc()}, "hypothesisId": "H1,H3"}) + "\n")
-        except Exception:
-            pass
-        # #endregion
         logger.exception("POST /create-paragraph-sections - Failed to read source collection")
         return jsonify({"error": f"Failed to read source collection: {e!s}"}), 500
 
@@ -1747,17 +1730,21 @@ def create_subsections():
 
 
 # Default prompt for statute subsection extraction when parse_prompt is blank.
-# Subsections are typically prefaced with (a), (b), (1), (2), etc.
+# Sections are defined by alphabetic (a), (b), (c), (d) only. Numeric (1), (2), (8) are nested.
 STATUTE_SUBSECTION_DEFAULT_PROMPT = """You are a legal text parser specializing in statutory interpretation.
 
 Task:
-Parse the provided statute section into its subsections. Statute subsections are typically prefaced with lowercase letters in parentheses (e.g., (a), (b), (c)) or numbers in parentheses (e.g., (1), (2), (3)). A subsection includes its identifier and all text until the next subsection identifier or end of the section.
+Parse the provided statute section into its subsections. Statute SECTIONS are defined ONLY by lowercase letters in parentheses: (a), (b), (c), (d), etc. Do NOT split on numeric markers like (1), (2), (3), (8)—those are nested subsections within a parent section and must be kept together.
+
+Example: Section (d) may contain (1) through (8) as nested items. Output ONE subsection for (d) that includes all of (1) through (8) as part of its text.
 
 Instructions:
 - Preserve the original statutory language verbatim. Do NOT summarize, paraphrase, or interpret.
-- Extract each subsection as a separate item, including its identifier (e.g., (a), (b), (1)) and full text.
-- Maintain the original order of subsections.
-- If the text has no clear subsection markers, return a single subsection with the full text and identifier "(0)" or "()".
+- Split ONLY at alphabetic section markers: (a), (b), (c), (d), (e), etc.
+- Each subsection must include the chunk header (e.g., "# 1798.105. Consumers' Right to Delete Personal Information") at the start, followed by the section content.
+- Remove all linefeeds from the output text: use spaces instead of newlines. Output each subsection as a single continuous line.
+- Maintain the original order of sections.
+- If the text has no clear alphabetic section markers, return a single subsection with the full text and identifier "(0)" or "()".
 
 Output Format:
 Return ONLY valid JSON with this exact structure (no surrounding text):
@@ -1765,11 +1752,11 @@ Return ONLY valid JSON with this exact structure (no surrounding text):
   "subsections": [
     {
       "identifier": "(a)",
-      "text": "Full text of subsection (a) including the identifier line..."
+      "text": "# 1798.105. Consumers' Right to Delete Personal Information (a) Full text of subsection (a)..."
     },
     {
       "identifier": "(b)",
-      "text": "Full text of subsection (b)..."
+      "text": "# 1798.105. Consumers' Right to Delete Personal Information (b) Full text of subsection (b)..."
     }
   ]
 }"""
@@ -1780,11 +1767,12 @@ def create_statute_subsections():
     """Split statute section column into subsections using LLM and write to destination collection.
 
     For each record in source_collection, reads the value from `column`, uses an LLM
-    to identify statute subsections (typically prefaced with (a), (b), (1), (2), etc.),
-    and creates one record per subsection in destination_collection. Each destination
-    record includes all source columns except the split column, plus subsection_column
-    (the subsection text), subsection_identifier (e.g., (a), (b)), and a unique
-    subchunk_id (guid).
+    to identify statute sections by alphabetic markers (a), (b), (c), (d) only. Numeric
+    markers (1), (2), (8) are nested within a section and are kept together. Each
+    subsection includes the chunk header and has all linefeeds removed. Creates one
+    record per section in destination_collection. Each destination record includes all
+    source columns except the split column, plus subsection_column (the subsection text),
+    subsection_identifier (e.g., (a), (b)), and a unique subchunk_id (guid).
 
     Optional parse_prompt: when provided, appended as additional parsing instructions.
     When blank, uses the default prompt for statute subsection extraction.
@@ -1909,11 +1897,22 @@ Return only valid JSON with the subsections array."""
         if "_id" in doc:
             base["source_id"] = str(doc["_id"])
 
+        # Extract chunk header (first line starting with #) for prepending if LLM omits it
+        chunk_header = ""
+        first_line = text.split("\n")[0].strip() if text else ""
+        if first_line.startswith("#"):
+            chunk_header = first_line
+
         for sub in subsections:
             sub_text = sub.get("text", "")
             sub_id = sub.get("identifier", "")
             if not sub_text and not sub_id:
                 continue
+            # Remove all linefeeds from subsection text (normalize to spaces)
+            sub_text = " ".join(sub_text.split())
+            # Prepend chunk header if present and subsection does not already start with it
+            if chunk_header and not sub_text.strip().startswith("#"):
+                sub_text = f"{chunk_header} {sub_text}".strip()
             record = {
                 **base,
                 subsection_column: sub_text,

@@ -52,6 +52,8 @@ from core import core_bp, init_core
 from util import util_bp, init_util
 from routes import routes_bp
 from compliance_routes import compliance_bp, init_compliance
+from compliance_routes_v2 import compliance_v2_bp
+from compliance_routes_v3 import compliance_v3_bp
 
 # Initialize modules with required clients
 init_db(mongo_client)
@@ -66,6 +68,8 @@ app.register_blueprint(core_bp)
 app.register_blueprint(util_bp)
 app.register_blueprint(routes_bp)
 app.register_blueprint(compliance_bp, url_prefix="/api/compliance")
+app.register_blueprint(compliance_v2_bp, url_prefix="/api/v2/compliance")
+app.register_blueprint(compliance_v3_bp, url_prefix="/api/v3/compliance")
 # Also mount at root so POST /policy-statute-compliance works (Swagger/docs and legacy clients).
 app.register_blueprint(compliance_bp, url_prefix="", name="compliance_root")
 
@@ -84,15 +88,6 @@ def log_request_params():
         params["form"] = dict(request.form)
     logger.info("API request: %s", json.dumps(params, default=str))
 
-
-# #region agent log
-try:
-    import json as _json
-    with open("/Users/kurthayes/Dev/AI/web-gather-api/.cursor/debug.log", "a") as _f:
-        _f.write(_json.dumps({"timestamp": __import__("time").time() * 1000, "location": "app.py:blueprint_registration", "message": "Blueprints registered", "data": {"compliance_root_registered": True}, "hypothesisId": "H1"}) + "\n")
-except Exception:
-    pass
-# #endregion
 
 if __name__ == "__main__":
     logger.info("Starting Web Gather API server on port 7005")

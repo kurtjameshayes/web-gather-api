@@ -43,6 +43,8 @@ class GapItem(BaseModel):
     statute_quote: Optional[str] = None
     conflict_description: Optional[str] = None
     analysis_failed: bool = False
+    confidence: Optional[str] = Field(None, pattern="^(high|medium|low)$")  # v3
+    citation_binding_failed: Optional[bool] = None  # v3: True when policy_quote not in policy text
     # Subchunk gap analysis context
     policy_subchunk_text: Optional[str] = None
     policy_chunk_text: Optional[str] = None
@@ -55,6 +57,16 @@ class GapSummary(BaseModel):
     missing: int = 0
     addressed: int = 0
     conflicts: int = 0
+    analysis_failures: int = 0  # v3: count of items where analysis_failed
+
+
+class RetrievalMetadata(BaseModel):
+    """Metadata about statute-policy retrieval for transparency when gaps=[]."""
+
+    statute_subchunks_considered: int = 0
+    statute_chunks_considered: int = 0  # v2: chunk-level
+    statute_items_considered: int = 0  # v3: generic term
+    statute_pairs_matched: int = 0
 
 
 class GapAnalysisRequest(BaseModel):
@@ -65,7 +77,7 @@ class GapAnalysisRequest(BaseModel):
     database: Optional[str] = None
     policy_collection: Optional[str] = None
     save_results: bool = True  # If False, do not persist (e.g. for report run_now)
-    num_rows: Optional[int] = None  # If set, limit to this many statute subchunks (partial run)
+    num_rows: Optional[int] = Field(None, gt=0)  # If set, limit to this many statute subchunks (partial run)
 
 
 class GapAnalysisResponse(BaseModel):
@@ -75,6 +87,7 @@ class GapAnalysisResponse(BaseModel):
     analyzed_at: str  # ISO8601
     gaps: List[GapItem] = Field(default_factory=list)
     summary: GapSummary = Field(default_factory=GapSummary)
+    retrieval_metadata: Optional[RetrievalMetadata] = None
 
 
 # ----- Multi-Jurisdictional (3.x) -----

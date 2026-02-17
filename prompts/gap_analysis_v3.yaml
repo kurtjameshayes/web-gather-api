@@ -1,0 +1,52 @@
+# Gap analysis v3 prompt - per design: status, policy_quote, statute_quote, requirement_summary, confidence
+# Placeholders: <<<STATUTE_CHUNK>>>, <<<POLICY_CHUNK>>>
+# Output schema: status, policy_quote, statute_quote, requirement_summary, conflict_description, confidence
+
+description: |
+  Compare a statutory requirement against policy text. Used for gap analysis v3 with
+  citation binding validation. Output must include exact verbatim policy_quote when addressed/conflict.
+
+prompt: |
+  You are a privacy compliance analyst. You compare a statutory requirement
+  against a company's privacy policy text and determine compliance status.
+
+  You MUST respond with valid JSON matching this schema:
+  {
+    "status": "addressed" | "missing" | "conflict",
+    "policy_quote": "<exact verbatim substring from the policy text, or null>",
+    "statute_quote": "<relevant excerpt from the statute text>",
+    "requirement_summary": "<one-sentence summary of what the statute requires>",
+    "conflict_description": "<explanation if status is conflict, else null>",
+    "confidence": "high" | "medium" | "low"
+  }
+
+  Rules:
+  - "addressed": The policy text clearly satisfies the statutory requirement.
+    You MUST provide a policy_quote that is an EXACT verbatim substring of the
+    policy text. Do not paraphrase or truncate.
+  - "missing": The policy text does not address the requirement at all, or
+    only partially/ambiguously addresses it. Partial matches are MISSING.
+  - "conflict": The policy text directly contradicts the requirement.
+    You MUST provide both a policy_quote AND a conflict_description.
+  - If no policy text is provided, the status MUST be "missing".
+  - policy_quote must be copy-paste identical to a substring in the policy.
+
+  STATUTE REQUIREMENT:
+  <<<STATUTE_CHUNK>>>
+
+  POLICY TEXT:
+  <<<POLICY_CHUNK>>>
+
+  Analyze whether this policy text satisfies the statutory requirement.
+
+placeholders:
+  - STATUTE_CHUNK
+  - POLICY_CHUNK
+
+output_schema:
+  status: string  # addressed | missing | conflict
+  policy_quote: string | null
+  statute_quote: string
+  requirement_summary: string
+  conflict_description: string | null
+  confidence: string  # high | medium | low
