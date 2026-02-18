@@ -98,6 +98,22 @@ class ComplianceConfig:
     requirement_weights: Dict[str, float]
     canonical_requirement_ids: List[str]
     disclosure_queries: List[str]
+    # Chunk-level gap analysis (v2: statute_embeddings vs policy_embeddings)
+    statute_embeddings_collection: str
+    policy_embeddings_collection: str
+    gap_analysis_chunk_prompt_path: str
+    # Subchunk gap analysis
+    statute_sub_embeddings_collection: str
+    policy_sub_embeddings_collection: str
+    statute_subchunk_text_field: str
+    policy_subchunk_text_field: str
+    statute_chunk_text_field: str  # Enclosing chunk in statute subchunks
+    # Gap analysis v3 (design: statute→policy vector search, top-k, score threshold)
+    gap_analysis_v3_top_k: int
+    gap_analysis_v3_num_candidates: int
+    gap_analysis_v3_score_threshold: float
+    policy_embeddings_vector_index: str  # Vector index name for policy_embeddings
+    gap_analysis_v3_prompt_path: str
 
 
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -170,6 +186,22 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "opt out of sale of personal data",
         "sensitive data disclosure and consent",
     ],
+    # Chunk-level gap analysis (v2)
+    "statute_embeddings_collection": "statute_embeddings",
+    "policy_embeddings_collection": "policy_embeddings",
+    "gap_analysis_chunk_prompt_path": "prompts/gap_analysis_chunk.yaml",
+    # Subchunk gap analysis
+    "statute_sub_embeddings_collection": "statute_sub_embeddings",
+    "policy_sub_embeddings_collection": "policy_sub_embeddings",
+    "statute_subchunk_text_field": "subchunk_text",
+    "policy_subchunk_text_field": "subchunk_text",
+    "statute_chunk_text_field": "chunk_text",
+    # Gap analysis v3
+    "gap_analysis_v3_top_k": 5,
+    "gap_analysis_v3_num_candidates": 50,
+    "gap_analysis_v3_score_threshold": 0.70,
+    "policy_embeddings_vector_index": "policy_embeddings_vector_index",
+    "gap_analysis_v3_prompt_path": "prompts/gap_analysis_v3.yaml",
 }
 
 
@@ -305,4 +337,17 @@ def load_config() -> ComplianceConfig:
         requirement_weights=data.get("requirement_weights", DEFAULT_CONFIG["requirement_weights"]) or {},
         canonical_requirement_ids=data.get("canonical_requirement_ids", DEFAULT_CONFIG["canonical_requirement_ids"]),
         disclosure_queries=data.get("disclosure_queries", DEFAULT_CONFIG["disclosure_queries"]),
+        statute_embeddings_collection=data.get("statute_embeddings_collection", DEFAULT_CONFIG["statute_embeddings_collection"]),
+        policy_embeddings_collection=data.get("policy_embeddings_collection", DEFAULT_CONFIG["policy_embeddings_collection"]),
+        gap_analysis_chunk_prompt_path=data.get("gap_analysis_chunk_prompt_path", DEFAULT_CONFIG["gap_analysis_chunk_prompt_path"]),
+        statute_sub_embeddings_collection=data.get("statute_sub_embeddings_collection", DEFAULT_CONFIG["statute_sub_embeddings_collection"]),
+        policy_sub_embeddings_collection=data.get("policy_sub_embeddings_collection", DEFAULT_CONFIG["policy_sub_embeddings_collection"]),
+        statute_subchunk_text_field=data.get("statute_subchunk_text_field", DEFAULT_CONFIG["statute_subchunk_text_field"]),
+        policy_subchunk_text_field=data.get("policy_subchunk_text_field", DEFAULT_CONFIG["policy_subchunk_text_field"]),
+        statute_chunk_text_field=data.get("statute_chunk_text_field", DEFAULT_CONFIG["statute_chunk_text_field"]),
+        gap_analysis_v3_top_k=_to_int(os.getenv("GAP_ANALYSIS_V3_TOP_K"), data.get("gap_analysis_v3_top_k", DEFAULT_CONFIG["gap_analysis_v3_top_k"])),
+        gap_analysis_v3_num_candidates=_to_int(os.getenv("GAP_ANALYSIS_V3_NUM_CANDIDATES"), data.get("gap_analysis_v3_num_candidates", DEFAULT_CONFIG["gap_analysis_v3_num_candidates"])),
+        gap_analysis_v3_score_threshold=_to_float(os.getenv("GAP_ANALYSIS_V3_SCORE_THRESHOLD"), data.get("gap_analysis_v3_score_threshold", DEFAULT_CONFIG["gap_analysis_v3_score_threshold"])),
+        policy_embeddings_vector_index=data.get("policy_embeddings_vector_index", DEFAULT_CONFIG["policy_embeddings_vector_index"]),
+        gap_analysis_v3_prompt_path=data.get("gap_analysis_v3_prompt_path", DEFAULT_CONFIG["gap_analysis_v3_prompt_path"]),
     )

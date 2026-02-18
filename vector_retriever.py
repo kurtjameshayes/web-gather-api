@@ -6,10 +6,6 @@ import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-# Debug log path: project .cursor/debug.log (not ~/.cursor)
-_DEBUG_LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cursor")
-_DEBUG_LOG_PATH = os.path.join(_DEBUG_LOG_DIR, "debug.log")
-
 # Jurisdiction for vector search (override all callers). Configurable via env for DB values like "CA".
 VECTOR_SEARCH_JURISDICTION = (os.getenv("COMPLIANCE_VECTOR_SEARCH_JURISDICTION") or "California").strip() or "California"
 
@@ -38,6 +34,58 @@ class StatuteCandidate:
     score: float
     chunk_id: str
     chunk_header_text: str = ""
+
+
+@dataclass
+class SubchunkPair:
+    """Statute subchunk doc and best-matching policy subchunk doc for gap analysis."""
+
+    statute_doc: Dict[str, Any]
+    policy_doc: Dict[str, Any]
+    score: float
+
+
+@dataclass
+class RetrievePolicySubchunksResult:
+    """Result of retrieve_policy_subchunks_for_statute_subchunks with metadata."""
+
+    pairs: List[SubchunkPair]
+    statute_subchunks_considered: int
+
+
+@dataclass
+class ChunkPair:
+    """Statute chunk doc and best-matching policy chunk doc for chunk-level gap analysis (v2)."""
+
+    statute_doc: Dict[str, Any]
+    policy_doc: Dict[str, Any]
+    score: float
+
+
+@dataclass
+class RetrievePolicyChunksResult:
+    """Result of retrieve_policy_chunks_for_statute_chunks with metadata."""
+
+    pairs: List[ChunkPair]
+    statute_chunks_considered: int
+
+
+@dataclass
+class PolicyMatch:
+    """A single policy chunk match from vector search (v3)."""
+
+    text: str
+    score: float
+    section_id: Optional[str] = None
+
+
+@dataclass
+class StatutePolicyPairV3:
+    """Statute item and its top-k policy matches (v3 design)."""
+
+    statute_doc: Dict[str, Any]
+    policy_matches: List[PolicyMatch]
+    above_threshold_count: int  # Matches with score >= threshold
 
 
 class VectorRetriever:
@@ -72,17 +120,6 @@ class VectorRetriever:
         if not query_vector:
             return []
 
-        # #region agent log
-        try:
-            import json as _json
-            os.makedirs(_DEBUG_LOG_DIR, exist_ok=True)
-            eff_jur = (jurisdiction or "").strip() or VECTOR_SEARCH_JURISDICTION
-            fv = jurisdiction_filter_values(normalize_jurisdiction(eff_jur)) if eff_jur else [VECTOR_SEARCH_JURISDICTION]
-            with open(_DEBUG_LOG_PATH, "a") as _f:
-                _f.write(_json.dumps({"timestamp": __import__("time").time() * 1000, "location": "vector_retriever.py:retrieve", "message": "retrieval path", "data": {"use_embeddings_collection": self._config.use_embeddings_collection, "jurisdiction": jurisdiction, "effective_filter_values": fv[:5]}, "hypothesisId": "H1", "runId": "post-fix"}) + "\n")
-        except Exception:
-            pass
-        # #endregion
         if self._config.use_embeddings_collection:
             results = await self._retrieve_from_embeddings(
                 database, query_vector, jurisdiction, statute_corpus_id, top_k
@@ -91,15 +128,6 @@ class VectorRetriever:
             results = await self._retrieve_from_statutes(
                 database, query_vector, jurisdiction, statute_corpus_id, top_k
             )
-        # #region agent log
-        try:
-            import json as _json
-            os.makedirs(_DEBUG_LOG_DIR, exist_ok=True)
-            with open(_DEBUG_LOG_PATH, "a") as _f:
-                _f.write(_json.dumps({"timestamp": __import__("time").time() * 1000, "location": "vector_retriever.py:retrieve", "message": "retrieval result count", "data": {"count": len(results)}, "hypothesisId": "H1"}) + "\n")
-        except Exception:
-            pass
-        # #endregion
         self._cache.set(cache_key, results)
         return results
 
@@ -265,22 +293,9 @@ class VectorRetriever:
         def run_aggregate() -> List[Dict[str, Any]]:
             return list(embedding_collection.aggregate(pipeline))
 
-        # #region agent log
-        _agg_err = None
-        raw_results: List[Dict[str, Any]] = []
         try:
             raw_results = await _run_in_thread(run_aggregate)
-        except Exception as _e:
-            _agg_err = str(_e)
-        try:
-            import json as _json
-            os.makedirs(_DEBUG_LOG_DIR, exist_ok=True)
-            with open(_DEBUG_LOG_PATH, "a") as _f:
-                _f.write(_json.dumps({"timestamp": __import__("time").time() * 1000, "location": "vector_retriever.py:_retrieve_from_embeddings", "message": "after vectorSearch", "data": {"database": database, "embeddings_collection": self._config.embeddings_collection, "vector_index_name": self._config.vector_index_name, "path": self._config.embedding_vector_field, "query_vector_dim": len(query_vector) if query_vector else 0, "filter": filter_doc, "jurisdiction_requested": jurisdiction, "raw_count": len(raw_results), "aggregate_error": _agg_err}, "hypothesisId": "H2"}) + "\n")
         except Exception:
-            pass
-        # #endregion
-        if _agg_err:
             return []
         doc_ids = [r.get(self._config.embedding_doc_id_field) for r in raw_results if r.get(self._config.embedding_doc_id_field)]
 
@@ -300,16 +315,6 @@ class VectorRetriever:
             )
 
         statute_docs = await _run_in_thread(run_fetch) if doc_ids else []
-        # #region agent log
-        try:
-            import json as _json
-            _sample_id = str(doc_ids[0]) if doc_ids else None
-            os.makedirs(_DEBUG_LOG_DIR, exist_ok=True)
-            with open(_DEBUG_LOG_PATH, "a") as _f:
-                _f.write(_json.dumps({"timestamp": __import__("time").time() * 1000, "location": "vector_retriever.py:_retrieve_from_embeddings", "message": "after statute lookup", "data": {"doc_ids_count": len(doc_ids), "statute_docs_count": len(statute_docs), "sample_doc_id": _sample_id}, "hypothesisId": "H2"}) + "\n")
-        except Exception:
-            pass
-        # #endregion
         statute_map: Dict[str, Dict[str, Any]] = {}
         for doc in statute_docs:
             key_id = str(doc.get(self._config.statute_id_field, ""))
@@ -355,3 +360,301 @@ class VectorRetriever:
         if want_jurisdiction:
             candidates = [c for c in candidates if normalize_jurisdiction(c.jurisdiction) == want_jurisdiction]
         return candidates
+
+    async def retrieve_policy_subchunks_for_statute_subchunks(
+        self,
+        database: str,
+        policy_document_id: str,
+        applicable_jurisdictions: List[str],
+        statute_document_id: Optional[str] = None,
+        top_k_per_statute: int = 1,
+    ) -> RetrievePolicySubchunksResult:
+        """Fetch statute subchunks, vector-search policy subchunks for each, return pairs.
+
+        For each statute subchunk in statute_sub_embeddings (filtered by jurisdiction,
+        optionally statute_document_id), runs $vectorSearch on policy_sub_embeddings
+        using the statute embedding, filtered by policy_document_id.
+        """
+        statute_coll = self._mongo_client[database][self._config.statute_sub_embeddings_collection]
+        policy_coll = self._mongo_client[database][self._config.policy_sub_embeddings_collection]
+        vec_path = self._config.embedding_vector_field
+        idx_name = self._config.vector_index_name
+        jur_field = self._config.statute_jurisdiction_field
+        doc_id_field = self._config.policy_document_id_field
+
+        # Build jurisdiction filter
+        all_jur_values: List[str] = []
+        for j in applicable_jurisdictions or []:
+            vals = jurisdiction_filter_values(normalize_jurisdiction(j))
+            all_jur_values.extend(vals)
+        if not all_jur_values:
+            all_jur_values = jurisdiction_filter_values(VECTOR_SEARCH_JURISDICTION)
+
+        statute_filter: Dict[str, Any] = {
+            jur_field: {"$in": all_jur_values} if len(all_jur_values) > 1 else all_jur_values[0]
+        }
+        if statute_document_id:
+            statute_filter["document_id"] = statute_document_id
+
+        def fetch_statute_subchunks() -> List[Dict[str, Any]]:
+            return list(statute_coll.find(statute_filter))
+
+        statute_docs = await _run_in_thread(fetch_statute_subchunks)
+        if not statute_docs:
+            return RetrievePolicySubchunksResult(pairs=[], statute_subchunks_considered=0)
+
+        policy_filter: Dict[str, Any] = {doc_id_field: policy_document_id}
+        pairs: List[SubchunkPair] = []
+
+        for stat_doc in statute_docs:
+            query_vector = stat_doc.get(vec_path)
+            if not query_vector or not isinstance(query_vector, list):
+                continue
+            try:
+                qv = [float(x) for x in query_vector]
+            except (TypeError, ValueError):
+                continue
+
+            # Prefer filter in $vectorSearch when index supports it (searches only this policy's chunks).
+            # Fallback: no filter, $match after, with higher limit to avoid missing policy chunks.
+            # MongoDB requires limit <= numCandidates.
+            _limit = max(500, top_k_per_statute * 500)
+            _num_cand = max(1000, top_k_per_statute * 100, _limit)
+            _vs_base = {"index": idx_name, "path": vec_path, "queryVector": qv, "numCandidates": _num_cand, "limit": _limit}
+            pipeline_with_filter = [
+                {"$vectorSearch": {**_vs_base, "filter": policy_filter}},
+                {"$addFields": {"score": {"$meta": "vectorSearchScore"}}},
+                {"$limit": top_k_per_statute},
+            ]
+            pipeline_fallback = [
+                {"$vectorSearch": _vs_base},
+                {"$addFields": {"score": {"$meta": "vectorSearchScore"}}},
+                {"$match": policy_filter},
+                {"$limit": top_k_per_statute},
+            ]
+
+            def run_search(pipe) -> List[Dict[str, Any]]:
+                return list(policy_coll.aggregate(pipe))
+
+            try:
+                policy_results = await _run_in_thread(lambda: run_search(pipeline_with_filter))
+            except Exception:
+                policy_results = await _run_in_thread(lambda: run_search(pipeline_fallback))
+
+            if not policy_results:
+                continue
+            best = policy_results[0]
+            score = float(best.get("score", 0.0))
+            # Exclude raw vector from policy_doc for response
+            policy_doc = {k: v for k, v in best.items() if k != vec_path}
+            if "_id" in policy_doc:
+                policy_doc["_id"] = str(policy_doc["_id"])
+            pairs.append(
+                SubchunkPair(statute_doc=stat_doc, policy_doc=policy_doc, score=score)
+            )
+
+        return RetrievePolicySubchunksResult(
+            pairs=pairs,
+            statute_subchunks_considered=len(statute_docs),
+        )
+
+    async def retrieve_policy_chunks_for_statute_chunks(
+        self,
+        database: str,
+        policy_document_id: str,
+        applicable_jurisdictions: List[str],
+        statute_document_id: Optional[str] = None,
+        top_k_per_statute: int = 1,
+    ) -> RetrievePolicyChunksResult:
+        """Fetch statute chunks from statute_embeddings, vector-search policy_embeddings for each, return pairs.
+
+        Chunk-level (v2): uses statute_embeddings and policy_embeddings instead of subchunk collections.
+        """
+        statute_coll = self._mongo_client[database][self._config.statute_embeddings_collection]
+        policy_coll = self._mongo_client[database][self._config.policy_embeddings_collection]
+        vec_path = self._config.embedding_vector_field
+        idx_name = self._config.vector_index_name
+        jur_field = self._config.statute_jurisdiction_field
+        doc_id_field = self._config.policy_document_id_field
+
+        all_jur_values: List[str] = []
+        for j in applicable_jurisdictions or []:
+            vals = jurisdiction_filter_values(normalize_jurisdiction(j))
+            all_jur_values.extend(vals)
+        if not all_jur_values:
+            all_jur_values = jurisdiction_filter_values(VECTOR_SEARCH_JURISDICTION)
+
+        statute_filter: Dict[str, Any] = {
+            jur_field: {"$in": all_jur_values} if len(all_jur_values) > 1 else all_jur_values[0]
+        }
+        if statute_document_id:
+            statute_filter["document_id"] = statute_document_id
+
+        def fetch_statute_chunks() -> List[Dict[str, Any]]:
+            return list(statute_coll.find(statute_filter))
+
+        statute_docs = await _run_in_thread(fetch_statute_chunks)
+        if not statute_docs:
+            return RetrievePolicyChunksResult(pairs=[], statute_chunks_considered=0)
+
+        policy_filter: Dict[str, Any] = {doc_id_field: policy_document_id}
+        pairs: List[ChunkPair] = []
+
+        for stat_doc in statute_docs:
+            query_vector = stat_doc.get(vec_path)
+            if not query_vector or not isinstance(query_vector, list):
+                continue
+            try:
+                qv = [float(x) for x in query_vector]
+            except (TypeError, ValueError):
+                continue
+
+            _limit = max(500, top_k_per_statute * 500)
+            _num_cand = max(1000, top_k_per_statute * 100, _limit)  # MongoDB requires limit <= numCandidates
+            _vs_base = {"index": idx_name, "path": vec_path, "queryVector": qv, "numCandidates": _num_cand, "limit": _limit}
+            pipeline_with_filter = [
+                {"$vectorSearch": {**_vs_base, "filter": policy_filter}},
+                {"$addFields": {"score": {"$meta": "vectorSearchScore"}}},
+                {"$limit": top_k_per_statute},
+            ]
+            pipeline_fallback = [
+                {"$vectorSearch": _vs_base},
+                {"$addFields": {"score": {"$meta": "vectorSearchScore"}}},
+                {"$match": policy_filter},
+                {"$limit": top_k_per_statute},
+            ]
+
+            def run_search(pipe) -> List[Dict[str, Any]]:
+                return list(policy_coll.aggregate(pipe))
+
+            try:
+                policy_results = await _run_in_thread(lambda: run_search(pipeline_with_filter))
+            except Exception:
+                policy_results = await _run_in_thread(lambda: run_search(pipeline_fallback))
+
+            if not policy_results:
+                continue
+            best = policy_results[0]
+            score = float(best.get("score", 0.0))
+            policy_doc = {k: v for k, v in best.items() if k != vec_path}
+            if "_id" in policy_doc:
+                policy_doc["_id"] = str(policy_doc["_id"])
+            pairs.append(
+                ChunkPair(statute_doc=stat_doc, policy_doc=policy_doc, score=score)
+            )
+
+        return RetrievePolicyChunksResult(
+            pairs=pairs,
+            statute_chunks_considered=len(statute_docs),
+        )
+
+    async def retrieve_statute_policy_pairs_v3(
+        self,
+        database: str,
+        policy_document_id: str,
+        applicable_jurisdictions: List[str],
+        statute_document_id: Optional[str] = None,
+        top_k: int = 5,
+        num_candidates: int = 50,
+        score_threshold: float = 0.70,
+        num_rows: Optional[int] = None,
+    ) -> List[StatutePolicyPairV3]:
+        """V3 design: Fetch statute items, vector-search policy for each, return (statute, [policy_matches]) with score threshold.
+
+        Uses statute_embeddings and policy_embeddings. Filters matches below score_threshold.
+        """
+        statute_coll = self._mongo_client[database][self._config.statute_embeddings_collection]
+        policy_coll = self._mongo_client[database][self._config.policy_embeddings_collection]
+        vec_path = self._config.embedding_vector_field
+        idx_name = getattr(
+            self._config, "policy_embeddings_vector_index", None
+        ) or self._config.vector_index_name
+        jur_field = self._config.statute_jurisdiction_field
+        doc_id_field = self._config.policy_document_id_field
+        text_field = self._config.policy_chunk_text_field or "chunk_text"
+
+        all_jur_values: List[str] = []
+        for j in applicable_jurisdictions or []:
+            vals = jurisdiction_filter_values(normalize_jurisdiction(j))
+            all_jur_values.extend(vals)
+        if not all_jur_values:
+            all_jur_values = jurisdiction_filter_values(VECTOR_SEARCH_JURISDICTION)
+
+        statute_filter: Dict[str, Any] = {
+            jur_field: {"$in": all_jur_values} if len(all_jur_values) > 1 else all_jur_values[0]
+        }
+        if statute_document_id:
+            statute_filter["document_id"] = statute_document_id
+
+        emb_text = self._config.embedding_text_field
+        def fetch_statute_items() -> List[Dict[str, Any]]:
+            cursor = statute_coll.find(
+                statute_filter,
+                {vec_path: 1, emb_text: 1, "text": 1, "statute_reference": 1, jur_field: 1, "_id": 1},
+            )
+            items = list(cursor)
+            if num_rows is not None:
+                items = items[:num_rows]
+            return items
+
+        statute_docs = await _run_in_thread(fetch_statute_items)
+        if not statute_docs:
+            return []
+
+        policy_filter: Dict[str, Any] = {doc_id_field: policy_document_id}
+        pairs: List[StatutePolicyPairV3] = []
+
+        for stat_doc in statute_docs:
+            query_vector = stat_doc.get(vec_path) or stat_doc.get("embedding")
+            if not query_vector or not isinstance(query_vector, list):
+                continue
+            try:
+                qv = [float(x) for x in query_vector]
+            except (TypeError, ValueError):
+                continue
+
+            _limit = max(500, top_k * 500)
+            _num_cand = max(num_candidates, _limit)  # MongoDB requires limit <= numCandidates
+            _vs_base = {"index": idx_name, "path": vec_path, "queryVector": qv, "numCandidates": _num_cand, "limit": _limit}
+            _proj = {"$project": {"text": 1, "score": 1, "section_id": 1, "chunk_index": 1}}
+            pipeline_with_filter = [
+                {"$vectorSearch": {**_vs_base, "filter": policy_filter}},
+                {"$addFields": {"score": {"$meta": "vectorSearchScore"}}},
+                {"$limit": top_k},
+                _proj,
+            ]
+            pipeline_fallback = [
+                {"$vectorSearch": _vs_base},
+                {"$addFields": {"score": {"$meta": "vectorSearchScore"}}},
+                {"$match": policy_filter},
+                {"$limit": top_k},
+                _proj,
+            ]
+
+            def run_v3_search(pipe) -> List[Dict[str, Any]]:
+                return list(policy_coll.aggregate(pipe))
+
+            try:
+                policy_results = await _run_in_thread(lambda: run_v3_search(pipeline_with_filter))
+            except Exception:
+                policy_results = await _run_in_thread(lambda: run_v3_search(pipeline_fallback))
+
+            matches: List[PolicyMatch] = []
+            above_threshold = 0
+            for r in policy_results:
+                score = float(r.get("score", 0.0))
+                txt = (r.get("text") or r.get(text_field) or "").strip()
+                section_id = str(r.get("section_id") or r.get("chunk_index") or "")
+                if score >= score_threshold:
+                    above_threshold += 1
+                matches.append(PolicyMatch(text=txt, score=score, section_id=section_id or None))
+
+            pairs.append(
+                StatutePolicyPairV3(
+                    statute_doc=stat_doc,
+                    policy_matches=matches,
+                    above_threshold_count=above_threshold,
+                )
+            )
+
+        return pairs

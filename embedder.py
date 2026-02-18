@@ -38,15 +38,6 @@ class Embedder:
             return cached
 
         model = self._get_model()
-        # #region agent log
-        _use_to_thread = hasattr(asyncio, "to_thread")
-        try:
-            import json as _json
-            with open("/Users/kurthayes/Dev/AI/web-gather-api/.cursor/debug.log", "a") as _f:
-                _f.write(_json.dumps({"timestamp": __import__("time").time() * 1000, "location": "embedder.py:embed", "message": "embed branch", "data": {"use_to_thread": _use_to_thread}, "hypothesisId": "H5"}) + "\n")
-        except Exception:
-            pass
-        # #endregion
         embedding = await _run_in_thread(
             lambda: model.encode(
                 [text],

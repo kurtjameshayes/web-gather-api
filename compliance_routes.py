@@ -28,6 +28,7 @@ from compliance_suite_schemas import (
     RunsListResponse,
 )
 from compliance_suite_service import ComplianceSuiteService, ComplianceSuiteServiceError
+from gap_analysis_service_v3 import GapAnalysisServiceV3, GapAnalysisServiceV3Error
 from db import get_embedding_model_name, set_application_embedding_model
 from embedder import Embedder
 from llm_client import AnthropicLLMClient
@@ -44,11 +45,12 @@ compliance_bp = Blueprint("compliance", __name__)
 
 _service: ComplianceService | None = None
 _suite_service: ComplianceSuiteService | None = None
+_gap_analysis_v3_service: GapAnalysisServiceV3 | None = None
 _config: ComplianceConfig | None = None
 
 
 def init_compliance(mongo_client) -> None:
-    global _service, _suite_service, _config
+    global _service, _suite_service, _gap_analysis_v3_service, _config
     _config = load_config()
 
     # Resolve embedding model from web-gather for privacy-compliance; set app default for all vector queries.
@@ -102,6 +104,14 @@ def init_compliance(mongo_client) -> None:
         storage=storage,
         rate_limiter=rate_limiter,
     )
+    _gap_analysis_v3_service = GapAnalysisServiceV3(
+        mongo_client=mongo_client,
+        config=_config,
+        retriever=retriever,
+        llm_client=llm_client,
+        storage=storage,
+        rate_limiter=rate_limiter,
+    )
 
 
 def set_compliance_service(service: ComplianceService | None, config: ComplianceConfig | None = None) -> None:
@@ -147,35 +157,11 @@ async def policy_statute_compliance():
         return jsonify({"error": str(exc)}), 500
 
     try:
-        # #region agent log
-        try:
-            import json as _json
-            with open("/Users/kurthayes/Dev/AI/web-gather-api/.cursor/debug.log", "a") as _f:
-                _f.write(_json.dumps({"timestamp": __import__("time").time() * 1000, "location": "compliance_routes.py:before_compare_policy", "message": "Calling compare_policy", "data": {"policy_id": request_model.policy_id, "jurisdiction": request_model.jurisdiction}, "hypothesisId": "H2"}) + "\n")
-        except Exception:
-            pass
-        # #endregion
         result = await _get_service().compare_policy(request_model)
-        # #region agent log
-        try:
-            import json as _json
-            with open("/Users/kurthayes/Dev/AI/web-gather-api/.cursor/debug.log", "a") as _f:
-                _f.write(_json.dumps({"timestamp": __import__("time").time() * 1000, "location": "compliance_routes.py:after_compare_policy", "message": "compare_policy returned", "data": {"sections_count": len(result.sections)}, "hypothesisId": "H2"}) + "\n")
-        except Exception:
-            pass
-        # #endregion
         return jsonify(result.model_dump())
     except ServiceError as exc:
         return jsonify({"error": str(exc)}), exc.status_code
     except Exception as e:  # pragma: no cover - defensive fallback
-        # #region agent log
-        try:
-            import json as _json
-            with open("/Users/kurthayes/Dev/AI/web-gather-api/.cursor/debug.log", "a") as _f:
-                _f.write(_json.dumps({"timestamp": __import__("time").time() * 1000, "location": "compliance_routes.py:exception", "message": "Unhandled error", "data": {"type": type(e).__name__, "str": str(e)}, "hypothesisId": "H2"}) + "\n")
-        except Exception:
-            pass
-        # #endregion
         logger.exception("Unhandled error in policy_statute_compliance")
         return jsonify({"error": "Internal server error"}), 500
 
@@ -184,6 +170,12 @@ def _get_suite_service() -> ComplianceSuiteService:
     if _suite_service is None:
         raise RuntimeError("Compliance suite service not initialized.")
     return _suite_service
+
+
+def _get_gap_analysis_v3_service() -> GapAnalysisServiceV3:
+    if _gap_analysis_v3_service is None:
+        raise RuntimeError("Gap analysis v3 service not initialized.")
+    return _gap_analysis_v3_service
 
 
 @compliance_bp.post("/applicability")
@@ -230,7 +222,7 @@ async def gap_analysis():
         return jsonify(result.model_dump())
     except ComplianceSuiteServiceError as exc:
         return jsonify({"error": str(exc)}), exc.status_code
-    except Exception:
+    except Exception as e:
         logger.exception("Unhandled error in gap_analysis")
         return jsonify({"error": "Internal server error"}), 500
 

@@ -57,7 +57,7 @@ Design the backend functionality (routes, services, storage, vector search, and 
 | Endpoint | Purpose | Key request body | Key response |
 |----------|----------|-------------------|--------------|
 | `POST /api/compliance/applicability` | Jurisdiction inference (spec 6.1) | `policy_document_id` or `text`; optional `database`, `policy_collection` | `applicable_jurisdictions`, optional `confidence` per jurisdiction |
-| `POST /api/compliance/gap-analysis` | Compare policy to Golden Standard (spec 2) | `policy_document_id` (or company + selection); optional `applicable_jurisdictions[]` | `gaps[]`, `summary` (total/missing/addressed/conflicts), `analyzed_at` |
+| `POST /api/compliance/gap-analysis` | Compare policy to Golden Standard (spec 2) | `policy_document_id` (or company + selection); optional `applicable_jurisdictions[]`, `num_rows` (partial run) | `gaps[]`, `summary` (total/missing/addressed/conflicts), `analyzed_at` |
 | `POST /api/compliance/multi-jurisdictional` | Strictest common denominator (spec 3) | `applicable_jurisdictions[]`; optional `policy_document_id` | `strictest_common_denominator[]`, `conflicts_between_jurisdictions[]` |
 | `POST /api/compliance/health-score` | Privacy Health Score 0–100 (spec 4) | `policy_document_id`; optional `applicable_jurisdictions[]`, `weights` | `privacy_health_score`, `score_breakdown`, `components`, `analyzed_at` |
 | `POST /api/compliance/drift-check` | Regulatory drift alerts (spec 5) | optional `since`, `policy_document_ids[]` | List of alert payloads and/or stored in `compliance_alerts` |

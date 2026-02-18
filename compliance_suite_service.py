@@ -14,6 +14,7 @@ from compliance_config import ComplianceConfig
 from compliance_suite_schemas import (
     ApplicabilityResponse,
     CitationItem,
+    RetrievalMetadata,
     CitationsRequest,
     CitationsResponse,
     CitationsSummary,
@@ -37,7 +38,7 @@ from compliance_storage import ComplianceStorage
 from compliance_utils import truncate_at_sentence, utc_now
 from llm_client import AnthropicLLMClient
 from rate_limiter import RateLimiter
-from vector_retriever import StatuteCandidate, VectorRetriever
+from vector_retriever import ChunkPair, StatuteCandidate, SubchunkPair, VectorRetriever
 
 
 async def _run_in_thread(func, *args, **kwargs):
@@ -181,13 +182,11 @@ class ComplianceSuiteService:
         if not policy_document_id:
             raise ComplianceSuiteServiceError("policy_document_id is required.", status_code=400)
 
-        policy_text, company_name = await self._load_policy_text(
+        _, company_name = await self._load_policy_text(
             policy_document_id,
             database=req.database,
             policy_collection=req.policy_collection,
         )
-        if not policy_text:
-            raise ComplianceSuiteServiceError("Policy not found or empty.", status_code=404)
 
         jurisdictions = req.applicable_jurisdictions or self._config.default_jurisdictions
         if not jurisdictions:
@@ -196,81 +195,118 @@ class ComplianceSuiteService:
             )
             jurisdictions = appl.applicable_jurisdictions or self._config.default_jurisdictions
 
-        queries = self._config.disclosure_queries or [
-            "right to know what personal information is collected",
-            "right to delete personal information",
-            "opt out of sale of personal data",
-        ]
-        top_k_per_query = max(2, (self._config.top_k_statutes or 5) // 2)
+        retrieve_result = await self._retriever.retrieve_policy_subchunks_for_statute_subchunks(
+            database=self._retrieval_database,
+            policy_document_id=policy_document_id,
+            applicable_jurisdictions=jurisdictions,
+            statute_document_id=req.statute_document_id,
+            top_k_per_statute=1,
+        )
+        pairs = retrieve_result.pairs
+        statute_subchunks_considered = retrieve_result.statute_subchunks_considered
+        pairs_before_slice = len(pairs)
+        if req.num_rows is not None:
+            pairs = pairs[: req.num_rows]
+
+        if not pairs:
+            doc_id_field = self._config.policy_document_id_field
+            pol_coll = self._mongo_client[self._retrieval_database][
+                self._config.policy_sub_embeddings_collection
+            ]
+
+            def _count_policy_subchunks():
+                return pol_coll.count_documents({doc_id_field: policy_document_id})
+
+            n = await _run_in_thread(_count_policy_subchunks)
+            if n == 0:
+                raise ComplianceSuiteServiceError(
+                    "Policy not indexed for gap analysis. Index this policy into "
+                    f"{self._config.policy_sub_embeddings_collection} (run split-paragraph-chunks "
+                    "then index-by-embedding) before running gap analysis.",
+                    status_code=400,
+                )
 
         gaps: List[GapItem] = []
         seen: Set[Tuple[str, str]] = set()
         statute_chunk_ids_used: List[str] = []
 
-        for jurisdiction in jurisdictions:
-            candidates = await self._retriever.retrieve_by_queries(
-                database=self._retrieval_database,
-                jurisdiction=jurisdiction,
-                queries=queries,
-                top_k_per_query=top_k_per_query,
-            )
-            for c in candidates:
-                key = (c.statute_id, c.chunk_header_text or c.chunk_text[:80])
-                if key in seen:
-                    continue
-                seen.add(key)
-                statute_chunk_ids_used.append(f"{c.statute_id}:{c.chunk_id}")
+        stat_sub_field = self._config.statute_subchunk_text_field
+        stat_chunk_field = self._config.statute_chunk_text_field
+        pol_sub_field = self._config.policy_subchunk_text_field
+        pol_chunk_field = self._config.policy_chunk_text_field
+        jur_field = self._config.statute_jurisdiction_field
 
-                async with self._semaphore:
-                    result = await self._llm_client.gap_check(
-                        statute_chunk_text=c.chunk_text,
-                        statute_reference=c.statute_id or c.section_id,
-                        policy_text=policy_text,
-                    )
+        for pair in pairs:
+            stat_doc = pair.statute_doc
+            pol_doc = pair.policy_doc
+            statute_subchunk = (stat_doc.get(stat_sub_field) or "").strip()
+            statute_chunk = (stat_doc.get(stat_chunk_field) or "").strip()
+            policy_subchunk = (pol_doc.get(pol_sub_field) or "").strip()
+            policy_chunk = (pol_doc.get(pol_chunk_field) or "").strip()
 
-                addressed = bool(result.get("addressed"))
-                policy_quote = result.get("policy_quote") if result.get("policy_quote") else None
-                if addressed and policy_quote and not _citation_binding(policy_quote, policy_text):
-                    addressed = False
-                    policy_quote = None
-                missing = bool(result.get("missing")) or not addressed
-                conflict = bool(result.get("conflict"))
-                analysis_failed = not result
+            subchunk_id = stat_doc.get("subchunk_id") or ""
+            statute_ref = str(stat_doc.get("document_id") or stat_doc.get("source_id") or "")
+            jurisdiction = str(stat_doc.get(jur_field) or "")
 
-                if analysis_failed:
-                    status = "missing"
-                elif conflict:
-                    status = "conflict"
-                elif addressed:
-                    status = "addressed"
-                else:
-                    status = "missing"
+            key = (statute_ref, subchunk_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            statute_chunk_ids_used.append(f"{statute_ref}:{subchunk_id}")
 
-                requirement_summary = (
-                    c.chunk_header_text or truncate_at_sentence(c.chunk_text, 350) or "Requirement"
-                ).strip()
-                section = _section_value(c.section_id or "", c.chunk_header_text or "")
-                statute_name = c.title.strip() if c.title else None
-                chunk_text = (c.chunk_text or "").strip()
-                statute_quote = (
-                    truncate_at_sentence(chunk_text, self._config.max_statute_quote_chars).strip()
-                    or None
-                ) if chunk_text else None
-                gaps.append(
-                    GapItem(
-                        jurisdiction=jurisdiction,
-                        statute_reference=c.statute_id or c.section_id or "",
-                        statute_name=statute_name,
-                        statute_chunk_id=c.chunk_id or None,
-                        section=section,
-                        requirement_summary=requirement_summary,
-                        status=status,
-                        policy_quote=policy_quote,
-                        statute_quote=statute_quote,
-                        conflict_description=result.get("conflict_description") if result else None,
-                        analysis_failed=analysis_failed,
-                    )
+            async with self._semaphore:
+                result = await self._llm_client.gap_check_subchunks(
+                    statute_subchunk_text=statute_subchunk,
+                    statute_chunk_text=statute_chunk,
+                    policy_subchunk_text=policy_subchunk,
+                    policy_chunk_text=policy_chunk,
                 )
+
+            addressed = bool(result.get("addressed"))
+            policy_quote = result.get("policy_quote") if result.get("policy_quote") else None
+            policy_text_for_binding = policy_subchunk or policy_chunk
+            if addressed and policy_quote and not _citation_binding(policy_quote, policy_text_for_binding):
+                addressed = False
+                policy_quote = None
+            missing = bool(result.get("missing")) or not addressed
+            conflict = bool(result.get("conflict"))
+            analysis_failed = not result
+
+            if analysis_failed:
+                status = "missing"
+            elif conflict:
+                status = "conflict"
+            elif addressed:
+                status = "addressed"
+            else:
+                status = "missing"
+
+            requirement_summary = (
+                truncate_at_sentence(statute_subchunk, 350) or "Requirement"
+            ).strip()
+            statute_quote = (
+                truncate_at_sentence(statute_subchunk, self._config.max_statute_quote_chars).strip()
+                or None
+            )
+            gaps.append(
+                GapItem(
+                    jurisdiction=jurisdiction,
+                    statute_reference=statute_ref,
+                    statute_name=None,
+                    statute_chunk_id=subchunk_id or None,
+                    section=None,
+                    requirement_summary=requirement_summary,
+                    status=status,
+                    policy_quote=policy_quote,
+                    statute_quote=statute_quote,
+                    conflict_description=result.get("conflict_description") if result else None,
+                    analysis_failed=analysis_failed,
+                    policy_subchunk_text=policy_subchunk or None,
+                    policy_chunk_text=policy_chunk or None,
+                    statute_subchunk_text=statute_subchunk or None,
+                    statute_chunk_text=statute_chunk or None,
+                )
+            )
 
         total = len(gaps)
         summary = GapSummary(
@@ -281,6 +317,10 @@ class ComplianceSuiteService:
         )
 
         analyzed_at = _iso()
+        retrieval_metadata = RetrievalMetadata(
+            statute_subchunks_considered=statute_subchunks_considered,
+            statute_pairs_matched=len(gaps),
+        )
         response = GapAnalysisResponse(
             policy_document_id=policy_document_id,
             company_name=company_name,
@@ -288,6 +328,7 @@ class ComplianceSuiteService:
             analyzed_at=analyzed_at,
             gaps=gaps,
             summary=summary,
+            retrieval_metadata=retrieval_metadata,
         )
 
         if getattr(req, "save_results", True):
@@ -300,6 +341,176 @@ class ComplianceSuiteService:
                     "summary": summary.model_dump(),
                     "analyzed_at": analyzed_at,
                     "run_types": ["gap"],
+                })
+                await self._storage.write_compliance_run_log({
+                    "policy_document_id": policy_document_id,
+                    "applicable_jurisdictions": jurisdictions,
+                    "run_timestamp": analyzed_at,
+                    "statute_chunk_ids_used": statute_chunk_ids_used[:500],
+                })
+            except Exception as e:
+                import logging
+                logging.getLogger("policy-compliance").warning("Failed to write compliance result/run_log: %s", e)
+
+        return response
+
+    async def gap_analysis_v2(self, req: GapAnalysisRequest) -> GapAnalysisResponse:
+        """Chunk-level gap analysis: statute_embeddings vs policy_embeddings. Uses YAML-configurable prompt."""
+        if not await self._rate_limiter.allow():
+            raise ComplianceSuiteServiceError("Rate limit exceeded", status_code=429)
+
+        policy_document_id = req.policy_document_id
+        if not policy_document_id:
+            raise ComplianceSuiteServiceError("policy_document_id is required.", status_code=400)
+
+        _, company_name = await self._load_policy_text(
+            policy_document_id,
+            database=req.database,
+            policy_collection=req.policy_collection,
+        )
+
+        jurisdictions = req.applicable_jurisdictions or self._config.default_jurisdictions
+        if not jurisdictions:
+            appl = await self.applicability(
+                ApplicabilityRequest(policy_document_id=policy_document_id, database=req.database, policy_collection=req.policy_collection)
+            )
+            jurisdictions = appl.applicable_jurisdictions or self._config.default_jurisdictions
+
+        retrieve_result = await self._retriever.retrieve_policy_chunks_for_statute_chunks(
+            database=self._retrieval_database,
+            policy_document_id=policy_document_id,
+            applicable_jurisdictions=jurisdictions,
+            statute_document_id=req.statute_document_id,
+            top_k_per_statute=1,
+        )
+        pairs = retrieve_result.pairs
+        statute_chunks_considered = retrieve_result.statute_chunks_considered
+        if req.num_rows is not None:
+            pairs = pairs[: req.num_rows]
+
+        if not pairs:
+            doc_id_field = self._config.policy_document_id_field
+            pol_coll = self._mongo_client[self._retrieval_database][
+                self._config.policy_embeddings_collection
+            ]
+
+            def _count_policy_chunks():
+                return pol_coll.count_documents({doc_id_field: policy_document_id})
+
+            n = await _run_in_thread(_count_policy_chunks)
+            if n == 0:
+                raise ComplianceSuiteServiceError(
+                    "Policy not indexed for gap analysis (v2). Index this policy into "
+                    f"{self._config.policy_embeddings_collection} before running gap analysis.",
+                    status_code=400,
+                )
+
+        emb_text = self._config.embedding_text_field
+        pol_text_field = self._config.policy_chunk_text_field
+        jur_field = self._config.statute_jurisdiction_field
+
+        gaps: List[GapItem] = []
+        seen: Set[Tuple[str, str]] = set()
+        statute_chunk_ids_used: List[str] = []
+
+        for pair in pairs:
+            stat_doc = pair.statute_doc
+            pol_doc = pair.policy_doc
+            statute_chunk_text = (stat_doc.get(emb_text) or stat_doc.get("chunk_text") or "").strip()
+            policy_chunk_text = (pol_doc.get(pol_text_field) or pol_doc.get("chunk_text") or "").strip()
+
+            chunk_id = str(stat_doc.get("chunk_index") or stat_doc.get("_id") or "")
+            statute_ref = str(stat_doc.get("document_id") or stat_doc.get("source_id") or "")
+            jurisdiction = str(stat_doc.get(jur_field) or "")
+
+            key = (statute_ref, chunk_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            statute_chunk_ids_used.append(f"{statute_ref}:{chunk_id}")
+
+            async with self._semaphore:
+                result = await self._llm_client.gap_check_chunks(
+                    statute_chunk_text=statute_chunk_text,
+                    policy_chunk_text=policy_chunk_text,
+                )
+
+            addressed = bool(result.get("addressed"))
+            policy_quote = result.get("policy_quote") if result.get("policy_quote") else None
+            if addressed and policy_quote and not _citation_binding(policy_quote, policy_chunk_text):
+                addressed = False
+                policy_quote = None
+            missing = bool(result.get("missing")) or not addressed
+            conflict = bool(result.get("conflict"))
+            analysis_failed = not result
+
+            if analysis_failed:
+                status = "missing"
+            elif conflict:
+                status = "conflict"
+            elif addressed:
+                status = "addressed"
+            else:
+                status = "missing"
+
+            requirement_summary = (
+                truncate_at_sentence(statute_chunk_text, 350) or "Requirement"
+            ).strip()
+            statute_quote = (
+                truncate_at_sentence(statute_chunk_text, self._config.max_statute_quote_chars).strip()
+                or None
+            )
+
+            gaps.append(
+                GapItem(
+                    jurisdiction=jurisdiction,
+                    statute_reference=statute_ref,
+                    statute_name=None,
+                    statute_chunk_id=chunk_id or None,
+                    section=None,
+                    requirement_summary=requirement_summary,
+                    status=status,
+                    policy_quote=policy_quote,
+                    statute_quote=statute_quote,
+                    conflict_description=result.get("conflict_description") if result else None,
+                    analysis_failed=analysis_failed,
+                    policy_chunk_text=policy_chunk_text or None,
+                    statute_chunk_text=statute_chunk_text or None,
+                )
+            )
+
+        summary = GapSummary(
+            total_requirements=len(gaps),
+            missing=sum(1 for g in gaps if g.status == "missing"),
+            addressed=sum(1 for g in gaps if g.status == "addressed"),
+            conflicts=sum(1 for g in gaps if g.status == "conflict"),
+        )
+
+        analyzed_at = _iso()
+        retrieval_metadata = RetrievalMetadata(
+            statute_chunks_considered=statute_chunks_considered,
+            statute_pairs_matched=len(gaps),
+        )
+        response = GapAnalysisResponse(
+            policy_document_id=policy_document_id,
+            company_name=company_name,
+            applicable_jurisdictions=jurisdictions,
+            analyzed_at=analyzed_at,
+            gaps=gaps,
+            summary=summary,
+            retrieval_metadata=retrieval_metadata,
+        )
+
+        if getattr(req, "save_results", True):
+            try:
+                await self._storage.write_compliance_result({
+                    "policy_document_id": policy_document_id,
+                    "company_name": company_name,
+                    "applicable_jurisdictions": jurisdictions,
+                    "gaps": [g.model_dump() for g in gaps],
+                    "summary": summary.model_dump(),
+                    "analyzed_at": analyzed_at,
+                    "run_types": ["gap_v2"],
                 })
                 await self._storage.write_compliance_run_log({
                     "policy_document_id": policy_document_id,

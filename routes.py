@@ -7,6 +7,8 @@ routes_bp = Blueprint("routes", __name__)
 
 # Must match app.py url_prefix when registering compliance_bp.
 COMPLIANCE_API_PREFIX = "/api/compliance"
+COMPLIANCE_V2_API_PREFIX = "/api/v2/compliance"
+COMPLIANCE_V3_API_PREFIX = "/api/v3/compliance"
 
 
 def build_openapi_spec():
@@ -187,15 +189,19 @@ def build_openapi_spec():
                     "properties": {
                         "jurisdiction": {"type": "string"},
                         "statute_reference": {"type": "string"},
-                        "statute_name": {"type": ["string", "null"]},
-                        "statute_chunk_id": {"type": ["string", "null"]},
-                        "section": {"type": ["string", "null"]},
+                        "statute_name": {"type": "string", "nullable": True},
+                        "statute_chunk_id": {"type": "string", "nullable": True},
+                        "section": {"type": "string", "nullable": True},
                         "requirement_summary": {"type": "string"},
                         "status": {"type": "string", "enum": ["missing", "addressed", "conflict"]},
-                        "policy_quote": {"type": ["string", "null"]},
-                        "statute_quote": {"type": ["string", "null"]},
-                        "conflict_description": {"type": ["string", "null"]},
+                        "policy_quote": {"type": "string", "nullable": True},
+                        "statute_quote": {"type": "string", "nullable": True},
+                        "conflict_description": {"type": "string", "nullable": True},
                         "analysis_failed": {"type": "boolean"},
+                        "policy_subchunk_text": {"type": "string", "nullable": True, "description": "Policy subchunk text (subchunk gap analysis)"},
+                        "policy_chunk_text": {"type": "string", "nullable": True, "description": "Policy enclosing chunk (subchunk gap analysis)"},
+                        "statute_subchunk_text": {"type": "string", "nullable": True, "description": "Statute subchunk text (subchunk gap analysis)"},
+                        "statute_chunk_text": {"type": "string", "nullable": True, "description": "Statute enclosing chunk (subchunk gap analysis)"},
                     },
                 },
                 "GapSummary": {
@@ -211,22 +217,35 @@ def build_openapi_spec():
                     "type": "object",
                     "properties": {
                         "policy_document_id": {"type": "string"},
+                        "company_name": {"type": "string", "nullable": True},
                         "applicable_jurisdictions": {"type": "array", "items": {"type": "string"}},
+                        "statute_document_id": {"type": "string", "description": "Optional filter for statute subchunks"},
                         "database": {"type": "string"},
                         "policy_collection": {"type": "string"},
                         "save_results": {"type": "boolean", "default": True},
+                        "num_rows": {"type": "integer", "minimum": 1, "description": "If set, limit to this many statute subchunks (partial run)"},
                     },
                     "required": ["policy_document_id"],
+                },
+                "RetrievalMetadata": {
+                    "type": "object",
+                    "description": "Metadata about statute-policy retrieval for transparency when gaps=[].",
+                    "properties": {
+                        "statute_subchunks_considered": {"type": "integer", "description": "Number of statute subchunks retrieved for comparison (v1)."},
+                        "statute_chunks_considered": {"type": "integer", "description": "Number of statute chunks retrieved for comparison (v2)."},
+                        "statute_pairs_matched": {"type": "integer", "description": "Number of statute-policy pairs matched and analyzed."},
+                    },
                 },
                 "GapAnalysisResponse": {
                     "type": "object",
                     "properties": {
                         "policy_document_id": {"type": "string"},
-                        "company_name": {"type": ["string", "null"]},
+                        "company_name": {"type": "string", "nullable": True},
                         "applicable_jurisdictions": {"type": "array", "items": {"type": "string"}},
                         "analyzed_at": {"type": "string"},
                         "gaps": {"type": "array", "items": {"$ref": "#/components/schemas/GapItem"}},
                         "summary": {"$ref": "#/components/schemas/GapSummary"},
+                        "retrieval_metadata": {"$ref": "#/components/schemas/RetrievalMetadata"},
                     },
                 },
                 "HealthScoreRequest": {
@@ -245,12 +264,12 @@ def build_openapi_spec():
                     "type": "object",
                     "properties": {
                         "policy_document_id": {"type": "string"},
-                        "company_name": {"type": ["string", "null"]},
-                        "privacy_health_score": {"type": ["integer", "null"]},
+                        "company_name": {"type": "string", "nullable": True},
+                        "privacy_health_score": {"type": "integer", "nullable": True},
                         "score_breakdown": {"type": "object"},
                         "components": {"type": "object"},
                         "analyzed_at": {"type": "string"},
-                        "error": {"type": ["string", "null"]},
+                        "error": {"type": "string", "nullable": True},
                     },
                 },
                 "MultiJurisdictionalRequest": {
@@ -338,10 +357,10 @@ def build_openapi_spec():
                             "type": "object",
                             "properties": {
                                 "addressed": {"type": "boolean"},
-                                "policy_quote": {"type": ["string", "null"]},
+                                "policy_quote": {"type": "string", "nullable": True},
                                 "missing": {"type": "boolean"},
                                 "conflict": {"type": "boolean"},
-                                "conflict_description": {"type": ["string", "null"]},
+                                "conflict_description": {"type": "string", "nullable": True},
                             },
                             "required": ["addressed", "policy_quote", "missing", "conflict", "conflict_description"],
                         }
@@ -1007,8 +1026,8 @@ def build_openapi_spec():
             },
             "/vector-index": {
                 "post": {
-                    "summary": "Index collection rows by chunk_text",
-                    "description": "Index all rows in a source collection by embedding the chunk_text field and writing the results to an index collection. The embedding model is determined by the index_database_name.",
+                    "summary": "Index collection rows by embedding text column",
+                    "description": "Index all rows in a source collection by embedding the text from the specified column and writing the results to an index collection. The embedding model is determined by the index_database_name.",
                     "requestBody": {
                         "required": True,
                         "content": {
@@ -1031,6 +1050,11 @@ def build_openapi_spec():
                                         "index_collection_name": {
                                             "type": "string",
                                             "description": "The indexed data will be written to this collection",
+                                        },
+                                        "text_column": {
+                                            "type": "string",
+                                            "default": "chunk_text",
+                                            "description": "Column to read text from and write embedded text to (default: chunk_text). For subchunks, use subchunk_text so chunk_text from source is preserved.",
                                         },
                                         "source_query": {
                                             "type": "string",
@@ -1061,6 +1085,7 @@ def build_openapi_spec():
                                             "source_collection_name": {"type": "string"},
                                             "index_database_name": {"type": "string"},
                                             "index_collection_name": {"type": "string"},
+                                            "text_column": {"type": "string"},
                                             "chunks_indexed": {"type": "integer"},
                                             "embedding_model": {"type": "string"},
                                             "skipped_rows": {"type": "integer"},
@@ -1092,6 +1117,251 @@ def build_openapi_spec():
                         },
                     ],
                     "responses": {"200": {"description": "Search results"}},
+                }
+            },
+            "/vector-search": {
+                "get": {
+                    "summary": "Vector search over MongoDB Atlas index",
+                    "description": "Runs $vectorSearch. Provide query (embedded) or query_vector (precomputed). Model from web-gather.embedding_model when using query. Requires embedding_model configured (POST /embedding-models).",
+                    "parameters": [
+                        {"name": "database", "in": "query", "required": True, "schema": {"type": "string"}},
+                        {"name": "collection", "in": "query", "required": True, "schema": {"type": "string"}},
+                        {"name": "index", "in": "query", "required": True, "schema": {"type": "string"}},
+                        {"name": "query", "in": "query", "schema": {"type": "string"}, "description": "Search text (embedded). Omit if query_vector provided."},
+                        {"name": "query_vector", "in": "query", "schema": {"type": "array", "items": {"type": "number"}}, "description": "Precomputed vector. Omit if query provided."},
+                        {"name": "limit", "in": "query", "schema": {"type": "integer", "default": 10}},
+                        {"name": "path", "in": "query", "schema": {"type": "string"}, "description": "Vector field path (default from embedding_model)"},
+                        {"name": "filter", "in": "query", "schema": {"type": "string"}, "description": "MongoDB filter as JSON (e.g. {\"jurisdiction\": \"CA\"})"},
+                    ],
+                    "responses": {"200": {"description": "Vector search results with score"}},
+                },
+                "post": {
+                    "summary": "Vector search over MongoDB Atlas index",
+                    "description": "Same as GET. Use POST for long queries or query_vector. Body: database, collection, index; query or query_vector; optional limit, path, filter.",
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "database": {"type": "string"},
+                                        "collection": {"type": "string"},
+                                        "index": {"type": "string"},
+                                        "query": {"type": "string"},
+                                        "query_vector": {"type": "array", "items": {"type": "number"}, "description": "Precomputed vector (skips embedding)"},
+                                        "limit": {"type": "integer", "default": 10},
+                                        "path": {"type": "string"},
+                                        "filter": {"type": "object", "description": "MongoDB filter for $vectorSearch"},
+                                    },
+                                    "required": ["database", "collection", "index"],
+                                }
+                            }
+                        }
+                    },
+                    "responses": {"200": {"description": "Vector search results with score"}},
+                },
+            },
+            "/create-paragraph-sections": {
+                "post": {
+                    "summary": "Split column into paragraph subsections in new collection",
+                    "description": "For each record in source_collection (optionally filtered by source_query), splits the column by paragraph boundaries (double newlines) and creates one record per subchunk in destination_collection. Each destination record has all source columns except the split column, plus subsection_column and a unique subchunk_id (guid). Example: database=privacy-compliance, source_collection=statute_chunks, destination_collection=statute_subchunks, column=chunk_text, subsection_column=subchunk_text, source_query={\"jurisdiction\": \"California\"}.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "database": {"type": "string"},
+                                        "source_collection": {"type": "string", "description": "Source collection to read from"},
+                                        "destination_collection": {"type": "string", "description": "New collection to write subchunks to"},
+                                        "column": {"type": "string", "description": "Source field to split (e.g. chunk_text)"},
+                                        "subsection_column": {"type": "string", "description": "Field name for subchunk text in destination (e.g. subchunk_text)"},
+                                        "source_query": {"type": "object", "description": "Optional MongoDB query to filter source records (e.g. {\"document_id\": \"x\"}). When omitted, all records are processed."},
+                                    },
+                                    "required": ["database", "source_collection", "destination_collection", "column", "subsection_column"],
+                                }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Records inserted and counts",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "database": {"type": "string"},
+                                            "source_collection": {"type": "string"},
+                                            "destination_collection": {"type": "string"},
+                                            "column": {"type": "string"},
+                                            "subsection_column": {"type": "string"},
+                                            "records_inserted": {"type": "integer"},
+                                            "source_rows_processed": {"type": "integer"},
+                                            "source_rows_skipped": {"type": "integer"},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                        "400": {"description": "Missing required parameters"},
+                        "500": {"description": "Failed to read source collection"},
+                    },
+                }
+            },
+            "/create-statute-subsections": {
+                "post": {
+                    "summary": "Split statute section column into subsections using LLM",
+                    "description": "For each record in source_collection (optionally filtered by source_query), reads the column value and uses an LLM to identify statute sections by alphabetic markers (a), (b), (c), (d) only. Numeric markers (1), (2), (8) are nested and kept together. Each subsection includes the chunk header and has linefeeds removed. Creates one record per section in destination_collection. Optional source_query, parse_prompt.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "database": {"type": "string"},
+                                        "source_collection": {"type": "string", "description": "Source collection to read from"},
+                                        "destination_collection": {"type": "string", "description": "Collection to write subsections to"},
+                                        "column": {"type": "string", "description": "Source field containing statute text (e.g. chunk_text)"},
+                                        "subsection_column": {"type": "string", "description": "Field name for subsection text in destination (e.g. subchunk_text)"},
+                                        "source_query": {"type": "object", "description": "Optional MongoDB query to filter source records."},
+                                        "parse_prompt": {"type": "string", "description": "Optional. Additional parsing instructions. When blank, uses default prompt."},
+                                    },
+                                    "required": ["database", "source_collection", "destination_collection", "column", "subsection_column"],
+                                }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Records inserted and counts",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "database": {"type": "string"},
+                                            "source_collection": {"type": "string"},
+                                            "destination_collection": {"type": "string"},
+                                            "column": {"type": "string"},
+                                            "subsection_column": {"type": "string"},
+                                            "records_inserted": {"type": "integer"},
+                                            "source_rows_processed": {"type": "integer"},
+                                            "source_rows_skipped": {"type": "integer"},
+                                            "llm_errors": {"type": "integer"},
+                                        },
+                                    }
+                                }
+                            }
+                        },
+                        "400": {"description": "Missing required parameters or invalid source_query JSON"},
+                        "500": {"description": "Failed to read source collection"},
+                    },
+                }
+            },
+            "/create-policy-subsections": {
+                "post": {
+                    "summary": "Split policy section column into subsections using LLM",
+                    "description": "For each record in source_collection (optionally filtered by source_query), reads the column value and uses an LLM to identify policy subsections (logical chunks). Excludes section headers (e.g. # What Information We Collect) and text irrelevant to privacy policies. Creates one record per subsection in destination_collection. Optional parse_prompt: when provided, appended as additional instructions; when blank, uses the default prompt.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "database": {"type": "string"},
+                                        "source_collection": {"type": "string", "description": "Source collection to read from"},
+                                        "destination_collection": {"type": "string", "description": "Collection to write subsections to"},
+                                        "column": {"type": "string", "description": "Source field containing policy text (e.g. chunk_text)"},
+                                        "subsection_column": {"type": "string", "description": "Field name for subsection text in destination (e.g. subchunk_text)"},
+                                        "source_query": {"type": "object", "description": "Optional MongoDB query to filter source records."},
+                                        "parse_prompt": {"type": "string", "description": "Optional. Additional parsing instructions. When blank, uses default prompt."},
+                                    },
+                                    "required": ["database", "source_collection", "destination_collection", "column", "subsection_column"],
+                                }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Records inserted and counts",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "database": {"type": "string"},
+                                            "source_collection": {"type": "string"},
+                                            "destination_collection": {"type": "string"},
+                                            "column": {"type": "string"},
+                                            "subsection_column": {"type": "string"},
+                                            "records_inserted": {"type": "integer"},
+                                            "source_rows_processed": {"type": "integer"},
+                                            "source_rows_skipped": {"type": "integer"},
+                                            "llm_errors": {"type": "integer"},
+                                        },
+                                    }
+                                }
+                            }
+                        },
+                        "400": {"description": "Missing required parameters"},
+                        "500": {"description": "Failed to read source collection"},
+                    },
+                }
+            },
+            "/create-chunks": {
+                "post": {
+                    "summary": "Chunk source column with overlap into destination collection",
+                    "description": "For each record in source_collection, reads source_column, splits into overlapping chunks (chunk_size, overlap) using character-based chunking, and writes one record per chunk to destination_collection. Each record has all source columns except the source column, plus chunk_column (chunk text), source_id, and chunk_index. Example: database=privacy-compliance, source_collection=documents, destination_collection=chunks, chunk_size=1200, overlap=200, source_column=text, chunk_column=chunk_text.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "database": {"type": "string"},
+                                        "source_collection": {"type": "string", "description": "Source collection to read from"},
+                                        "destination_collection": {"type": "string", "description": "Collection to write chunks to"},
+                                        "chunk_size": {"type": "integer", "default": 1200, "description": "Max characters per chunk"},
+                                        "overlap": {"type": "integer", "default": 200, "description": "Overlap between chunks"},
+                                        "source_column": {"type": "string", "description": "Field to read text from (e.g. text)"},
+                                        "chunk_column": {"type": "string", "description": "Field to write chunk text to (e.g. chunk_text)"},
+                                    },
+                                    "required": ["database", "source_collection", "destination_collection", "source_column", "chunk_column"],
+                                }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Records inserted and counts",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "database": {"type": "string"},
+                                            "source_collection": {"type": "string"},
+                                            "destination_collection": {"type": "string"},
+                                            "chunk_size": {"type": "integer"},
+                                            "overlap": {"type": "integer"},
+                                            "source_column": {"type": "string"},
+                                            "chunk_column": {"type": "string"},
+                                            "records_inserted": {"type": "integer"},
+                                            "source_rows_processed": {"type": "integer"},
+                                            "source_rows_skipped": {"type": "integer"},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                        "400": {"description": "Missing required parameters or invalid chunk_size/overlap"},
+                        "500": {"description": "Failed to read source collection"},
+                    },
                 }
             },
             "/embedding-models": {
@@ -1145,7 +1415,7 @@ def build_openapi_spec():
             "/create-vector-index": {
                 "post": {
                     "summary": "Create vector search index from embedding_model",
-                    "description": "Create an Atlas vector search index on a collection using the embedding_model document from web-gather (database_name). Body: database_name, collection_name, optional index_name (default vector_index). Requires Atlas.",
+                    "description": "Create an Atlas vector search index on a collection using the embedding_model document from web-gather (database_name). Drops the index first if it exists. Body: database_name, collection_name, optional index_name (default vector_index). Requires Atlas.",
                     "requestBody": {
                         "required": True,
                         "content": {
@@ -1156,9 +1426,25 @@ def build_openapi_spec():
                                         "database_name": {"type": "string"},
                                         "collection_name": {"type": "string"},
                                         "index_name": {"type": "string"},
+                                        "filter_fields": {
+                                            "type": "array",
+                                            "description": "Field paths to index for pre-filtering (e.g. document_id, jurisdiction). If omitted, uses embedding_model.filter_fields when present.",
+                                            "items": {
+                                                "oneOf": [
+                                                    {"type": "string"},
+                                                    {"type": "object", "required": ["path"], "properties": {"path": {"type": "string"}}}
+                                                ]
+                                            },
+                                        },
                                     },
                                     "required": ["database_name", "collection_name"],
-                                }
+                                },
+                                "example": {
+                                    "database_name": "compliance",
+                                    "collection_name": "statute_sub_embeddings",
+                                    "index_name": "vector_index",
+                                    "filter_fields": ["jurisdiction", "document_id"]
+                                },
                             }
                         },
                     },
@@ -1387,8 +1673,8 @@ def build_openapi_spec():
             },
             f"{COMPLIANCE_API_PREFIX}/gap-analysis": {
                 "post": {
-                    "summary": "Full gap analysis",
-                    "description": "Retrieve relevant statute chunks for the policy's jurisdictions, run gap checks against each, and return a full gap analysis with gaps, summary, and optional persistence.",
+                    "summary": "Full gap analysis (subchunk)",
+                    "description": "Retrieve relevant statute subchunks for the policy's jurisdictions, run gap checks against each, and return a full gap analysis with gaps, summary, and optional persistence. Uses statute_sub_embeddings and policy_sub_embeddings.",
                     "requestBody": {
                         "required": True,
                         "content": {
@@ -1397,6 +1683,7 @@ def build_openapi_spec():
                                 "example": {
                                     "policy_document_id": "doc-123",
                                     "applicable_jurisdictions": ["CA", "VA"],
+                                    "num_rows": 10,
                                 },
                             }
                         },
@@ -1411,6 +1698,71 @@ def build_openapi_spec():
                             },
                         },
                         "400": {"description": "Bad request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "404": {"description": "Policy not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "422": {"description": "Validation error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                    },
+                }
+            },
+            f"{COMPLIANCE_V2_API_PREFIX}/gap-analysis": {
+                "post": {
+                    "summary": "Gap analysis (chunk-level, v2)",
+                    "description": "Chunk-level gap analysis: compares statute_embeddings to policy_embeddings. Uses a YAML-configurable prompt (prompts/gap_analysis_chunk.yaml). Different from v1 which uses statute_sub_embeddings and policy_sub_embeddings.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/GapAnalysisRequest"},
+                                "example": {
+                                    "policy_document_id": "doc-123",
+                                    "applicable_jurisdictions": ["CA", "VA"],
+                                    "num_rows": 10,
+                                },
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Gap analysis with gaps and summary",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/GapAnalysisResponse"},
+                                }
+                            },
+                        },
+                        "400": {"description": "Bad request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "404": {"description": "Policy not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "422": {"description": "Validation error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                    },
+                }
+            },
+            f"{COMPLIANCE_V3_API_PREFIX}/gap-analysis": {
+                "post": {
+                    "summary": "Gap analysis (v3)",
+                    "description": "Gap analysis v3 per GapAnalysisProcessDesign.md: statute→policy vector search with top-k matches and score threshold, LLM analysis per pair, citation binding validation against full policy text. Uses statute_embeddings and policy_embeddings.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/GapAnalysisRequest"},
+                                "example": {
+                                    "policy_document_id": "doc-123",
+                                    "applicable_jurisdictions": ["CA", "VA"],
+                                    "num_rows": 10,
+                                    "save_results": True,
+                                },
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Gap analysis with gaps, summary, retrieval_metadata (statute_items_considered, statute_pairs_matched)",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/GapAnalysisResponse"},
+                                }
+                            },
+                        },
+                        "400": {"description": "Bad request (e.g. policy not indexed)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
                         "404": {"description": "Policy not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
                         "422": {"description": "Validation error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
                     },

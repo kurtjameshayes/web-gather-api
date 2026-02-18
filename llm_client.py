@@ -89,6 +89,37 @@ Output only valid JSON with this exact structure:
 }
 """
 
+SUBCHUNK_GAP_CHECK_PROMPT = """You are a privacy law analyst. Compare the following statute subchunk to the policy subchunk for compliance. Use the enclosing chunk text for context, but base your determination on the subchunk-to-subchunk comparison.
+
+Statute subchunk (focus here):
+<<<STATUTE_SUBCHUNK>>>
+
+Statute enclosing chunk (context):
+<<<STATUTE_CHUNK>>>
+
+Policy subchunk (focus here):
+<<<POLICY_SUBCHUNK>>>
+
+Policy enclosing chunk (context):
+<<<POLICY_CHUNK>>>
+
+Answer:
+(a) Is the required disclosure/obligation in the statute subchunk addressed in the policy subchunk? (yes/no)
+(b) If yes, quote the exact policy phrase that addresses it in policy_quote. If no, use null.
+(c) Is there any statement in the policy subchunk that conflicts with the statute subchunk? (yes/no)
+(d) If conflict, briefly describe it in conflict_description. If the policy contains a phrase that conflicts, also quote that exact phrase in policy_quote.
+(e) policy_quote must be a verbatim substring of the policy subchunk or policy enclosing chunk (for addressed or conflict cases).
+
+Output only valid JSON with this exact structure:
+{
+  "addressed": true or false,
+  "policy_quote": "exact phrase from policy or null",
+  "missing": true or false,
+  "conflict": true or false,
+  "conflict_description": "brief description or null"
+}
+"""
+
 REQUIREMENT_EXTRACTION_PROMPT = """You are a privacy law analyst. From the following statute chunk, list each discrete privacy/consumer right or obligation. One per item: short label and one-sentence description.
 
 Statute chunk:
@@ -194,6 +225,7 @@ def build_prompt(section_text: str, candidates: List[StatuteCandidate]) -> str:
 class AnthropicLLMClient:
     def __init__(self, api_key: str, config: ComplianceConfig) -> None:
         self._client = anthropic.Anthropic(api_key=api_key)
+        self._config = config
         self._model = config.llm_model_name
         self._max_tokens = config.llm_max_tokens
 
@@ -280,6 +312,120 @@ class AnthropicLLMClient:
         prompt = (
             GAP_CHECK_PROMPT.replace("<<<STATUTE_CHUNK>>>", statute_chunk_text[:3000])
             .replace("<<<POLICY_TEXT>>>", (policy_text or "")[:6000])
+        )
+        out = await self._call_json(prompt)
+        if not out:
+            return {
+                "addressed": False,
+                "policy_quote": None,
+                "missing": True,
+                "conflict": False,
+                "conflict_description": None,
+            }
+        return {
+            "addressed": bool(out.get("addressed")),
+            "policy_quote": out.get("policy_quote") if out.get("policy_quote") else None,
+            "missing": bool(out.get("missing", True)),
+            "conflict": bool(out.get("conflict")),
+            "conflict_description": out.get("conflict_description") if out.get("conflict_description") else None,
+        }
+
+    async def gap_check_v3(
+        self,
+        statute_chunk_text: str,
+        policy_chunk_text: str,
+        prompt_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """V3 gap analysis: Returns status, policy_quote, statute_quote, requirement_summary, conflict_description, confidence.
+
+        Used for gap analysis v3 with citation binding validation against full policy text.
+        """
+        path = prompt_path or getattr(
+            self._config, "gap_analysis_v3_prompt_path", "prompts/gap_analysis_v3.yaml"
+        )
+        from prompt_loader import load_prompt_yaml, render_prompt
+
+        cfg = load_prompt_yaml(path)
+        prompt = render_prompt(
+            cfg["prompt"],
+            STATUTE_CHUNK=statute_chunk_text or "",
+            POLICY_CHUNK=policy_chunk_text or "",
+        )
+        out = await self._call_json(prompt)
+        if not out:
+            return {
+                "status": "missing",
+                "policy_quote": None,
+                "statute_quote": None,
+                "requirement_summary": "Requirement",
+                "conflict_description": None,
+                "confidence": "low",
+                "_analysis_failed": True,
+            }
+        status = (out.get("status") or "missing").lower()
+        if status not in ("addressed", "missing", "conflict"):
+            status = "missing"
+        return {
+            "status": status,
+            "policy_quote": out.get("policy_quote") if out.get("policy_quote") else None,
+            "statute_quote": out.get("statute_quote") or "",
+            "requirement_summary": (out.get("requirement_summary") or "Requirement").strip(),
+            "conflict_description": out.get("conflict_description") if out.get("conflict_description") else None,
+            "confidence": (out.get("confidence") or "low").lower()
+            if out.get("confidence") in ("high", "medium", "low")
+            else "low",
+            "_analysis_failed": False,
+        }
+
+    async def gap_check_chunks(
+        self,
+        statute_chunk_text: str,
+        policy_chunk_text: str,
+        prompt_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Compare statute chunk to policy chunk for compliance. Uses YAML-configurable prompt.
+
+        Same output schema as gap_check: addressed, policy_quote, missing, conflict, conflict_description.
+        """
+        from prompt_loader import load_prompt_yaml, render_prompt
+
+        path = prompt_path or getattr(self._config, "gap_analysis_chunk_prompt_path", "prompts/gap_analysis_chunk.yaml")
+        cfg = load_prompt_yaml(path)
+        prompt = render_prompt(
+            cfg["prompt"],
+            STATUTE_CHUNK=statute_chunk_text or "",
+            POLICY_CHUNK=policy_chunk_text or "",
+        )
+        out = await self._call_json(prompt)
+        if not out:
+            return {
+                "addressed": False,
+                "policy_quote": None,
+                "missing": True,
+                "conflict": False,
+                "conflict_description": None,
+            }
+        return {
+            "addressed": bool(out.get("addressed")),
+            "policy_quote": out.get("policy_quote") if out.get("policy_quote") else None,
+            "missing": bool(out.get("missing", True)),
+            "conflict": bool(out.get("conflict")),
+            "conflict_description": out.get("conflict_description") if out.get("conflict_description") else None,
+        }
+
+    async def gap_check_subchunks(
+        self,
+        statute_subchunk_text: str,
+        statute_chunk_text: str,
+        policy_subchunk_text: str,
+        policy_chunk_text: str,
+    ) -> Dict[str, Any]:
+        """Compare subchunks for compliance with enclosing chunk context. Same schema as gap_check."""
+        prompt = (
+            SUBCHUNK_GAP_CHECK_PROMPT.replace("<<<STATUTE_SUBCHUNK>>>", (statute_subchunk_text or "")[:3000])
+            .replace("<<<STATUTE_CHUNK>>>", (statute_chunk_text or "")[:3000])
+            .replace("<<<POLICY_SUBCHUNK>>>", (policy_subchunk_text or "")[:3000])
+            .replace("<<<POLICY_CHUNK>>>", (policy_chunk_text or "")[:3000])
         )
         out = await self._call_json(prompt)
         if not out:

@@ -11,3 +11,4 @@ pyppeteer
 cryptography
 pydantic
 pytest
+pyyaml
