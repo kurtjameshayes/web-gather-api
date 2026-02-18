@@ -72,20 +72,22 @@ class RetrievePolicyChunksResult:
 
 @dataclass
 class PolicyMatch:
-    """A single policy chunk match from vector search (v3)."""
+    """A single policy subchunk match from vector search (v3 v1 design)."""
 
     text: str
     score: float
     section_id: Optional[str] = None
+    parent_context: Optional[str] = None  # Enclosing chunk from policy_embeddings
 
 
 @dataclass
 class StatutePolicyPairV3:
-    """Statute item and its top-k policy matches (v3 design)."""
+    """Statute subchunk and its top-k policy subchunk matches (v3 v1 design)."""
 
     statute_doc: Dict[str, Any]
     policy_matches: List[PolicyMatch]
     above_threshold_count: int  # Matches with score >= threshold
+    statute_parent_context: Optional[str] = None  # Enclosing chunk from statute_embeddings
 
 
 class VectorRetriever:
@@ -559,19 +561,26 @@ class VectorRetriever:
         score_threshold: float = 0.70,
         num_rows: Optional[int] = None,
     ) -> List[StatutePolicyPairV3]:
-        """V3 design: Fetch statute items, vector-search policy for each, return (statute, [policy_matches]) with score threshold.
+        """V3 v1 design: Fetch statute subchunks, vector-search policy subchunks, return pairs with parent context.
 
-        Uses statute_embeddings and policy_embeddings. Filters matches below score_threshold.
+        Uses statute_sub_embeddings and policy_sub_embeddings. Fetches parent chunks for context.
+        Filters matches below score_threshold.
         """
-        statute_coll = self._mongo_client[database][self._config.statute_embeddings_collection]
-        policy_coll = self._mongo_client[database][self._config.policy_embeddings_collection]
+        statute_coll = self._mongo_client[database][self._config.statute_sub_embeddings_collection]
+        policy_coll = self._mongo_client[database][self._config.policy_sub_embeddings_collection]
+        statute_parent_coll = self._mongo_client[database][self._config.statute_embeddings_collection]
+        policy_parent_coll = self._mongo_client[database][self._config.policy_embeddings_collection]
         vec_path = self._config.embedding_vector_field
-        idx_name = getattr(
-            self._config, "policy_embeddings_vector_index", None
-        ) or self._config.vector_index_name
+        # Use vector_index_name (same as retrieve_policy_subchunks_for_statute_subchunks)
+        # so policy_sub_embeddings $vectorSearch works
+        idx_name = self._config.vector_index_name
         jur_field = self._config.statute_jurisdiction_field
         doc_id_field = self._config.policy_document_id_field
-        text_field = self._config.policy_chunk_text_field or "chunk_text"
+        stat_sub_text = self._config.statute_subchunk_text_field or "subchunk_text"
+        pol_sub_text = self._config.policy_subchunk_text_field or "subchunk_text"
+        pol_chunk_text = self._config.policy_chunk_text_field or "chunk_text"
+        stat_chunk_text = self._config.statute_chunk_text_field or "chunk_text"
+        emb_text = self._config.embedding_text_field
 
         all_jur_values: List[str] = []
         for j in applicable_jurisdictions or []:
@@ -586,18 +595,26 @@ class VectorRetriever:
         if statute_document_id:
             statute_filter["document_id"] = statute_document_id
 
-        emb_text = self._config.embedding_text_field
-        def fetch_statute_items() -> List[Dict[str, Any]]:
+        def fetch_statute_subchunks() -> List[Dict[str, Any]]:
             cursor = statute_coll.find(
                 statute_filter,
-                {vec_path: 1, emb_text: 1, "text": 1, "statute_reference": 1, jur_field: 1, "_id": 1},
+                {
+                    vec_path: 1,
+                    emb_text: 1,
+                    stat_sub_text: 1,
+                    "text": 1,
+                    "statute_reference": 1,
+                    jur_field: 1,
+                    "_id": 1,
+                    "parent_chunk_id": 1,
+                },
             )
             items = list(cursor)
             if num_rows is not None:
                 items = items[:num_rows]
             return items
 
-        statute_docs = await _run_in_thread(fetch_statute_items)
+        statute_docs = await _run_in_thread(fetch_statute_subchunks)
         if not statute_docs:
             return []
 
@@ -614,9 +631,9 @@ class VectorRetriever:
                 continue
 
             _limit = max(500, top_k * 500)
-            _num_cand = max(num_candidates, _limit)  # MongoDB requires limit <= numCandidates
+            _num_cand = max(num_candidates, _limit)
             _vs_base = {"index": idx_name, "path": vec_path, "queryVector": qv, "numCandidates": _num_cand, "limit": _limit}
-            _proj = {"$project": {"text": 1, "score": 1, "section_id": 1, "chunk_index": 1}}
+            _proj = {"$project": {"text": 1, "score": 1, "section_id": 1, "chunk_index": 1, pol_sub_text: 1, "parent_chunk_id": 1}}
             pipeline_with_filter = [
                 {"$vectorSearch": {**_vs_base, "filter": policy_filter}},
                 {"$addFields": {"score": {"$meta": "vectorSearchScore"}}},
@@ -641,19 +658,68 @@ class VectorRetriever:
 
             matches: List[PolicyMatch] = []
             above_threshold = 0
+            policy_parent_ids: List[Any] = []
             for r in policy_results:
                 score = float(r.get("score", 0.0))
-                txt = (r.get("text") or r.get(text_field) or "").strip()
+                txt = (r.get(pol_sub_text) or r.get("text") or r.get(pol_chunk_text) or "").strip()
                 section_id = str(r.get("section_id") or r.get("chunk_index") or "")
+                parent_id = r.get("parent_chunk_id")
+                if parent_id is not None:
+                    policy_parent_ids.append(parent_id)
                 if score >= score_threshold:
                     above_threshold += 1
-                matches.append(PolicyMatch(text=txt, score=score, section_id=section_id or None))
+                matches.append(
+                    PolicyMatch(
+                        text=txt,
+                        score=score,
+                        section_id=section_id or None,
+                        parent_context=None,
+                    )
+                )
+
+            # Fetch policy parent chunks
+            policy_parent_map: Dict[str, str] = {}
+            if policy_parent_ids:
+                def fetch_policy_parents() -> Dict[str, str]:
+                    parent_docs = list(
+                        policy_parent_coll.find(
+                            {"_id": {"$in": policy_parent_ids}},
+                            {"_id": 1, pol_chunk_text: 1, "text": 1},
+                        )
+                    )
+                    out: Dict[str, str] = {}
+                    for d in parent_docs:
+                        pid = d.get("_id")
+                        if pid is not None:
+                            txt = (d.get(pol_chunk_text) or d.get("text") or "").strip()
+                            out[str(pid)] = txt
+                    return out
+                policy_parent_map = await _run_in_thread(fetch_policy_parents)
+                for i, m in enumerate(matches):
+                    pid = policy_results[i].get("parent_chunk_id") if i < len(policy_results) else None
+                    if pid is not None:
+                        m.parent_context = policy_parent_map.get(str(pid), "")
+
+            # Fetch statute parent chunk
+            statute_parent_context = ""
+            stat_parent_id = stat_doc.get("parent_chunk_id")
+            if stat_parent_id is not None:
+                def fetch_statute_parent() -> str:
+                    doc = statute_parent_coll.find_one(
+                        {"_id": stat_parent_id},
+                        {stat_chunk_text: 1, "text": 1, emb_text: 1},
+                    )
+                    if not doc:
+                        return ""
+                    return (doc.get(stat_chunk_text) or doc.get(emb_text) or doc.get("text") or "").strip()
+                statute_parent_context = await _run_in_thread(fetch_statute_parent)
 
             pairs.append(
                 StatutePolicyPairV3(
                     statute_doc=stat_doc,
                     policy_matches=matches,
                     above_threshold_count=above_threshold,
+                    statute_parent_context=statute_parent_context or None,
                 )
             )
 

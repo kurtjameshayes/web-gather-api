@@ -47,7 +47,7 @@ class GapItem(BaseModel):
     citation_binding_failed: Optional[bool] = None  # v3: True when policy_quote not in policy text
     # Subchunk gap analysis context
     policy_subchunk_text: Optional[str] = None
-    policy_chunk_text: Optional[str] = None
+    policy_combined_sections: Optional[str] = None  # Combined policy text compared (v3: top-k matches with context)
     statute_subchunk_text: Optional[str] = None
     statute_chunk_text: Optional[str] = None
 
@@ -78,6 +78,7 @@ class GapAnalysisRequest(BaseModel):
     policy_collection: Optional[str] = None
     save_results: bool = True  # If False, do not persist (e.g. for report run_now)
     num_rows: Optional[int] = Field(None, gt=0)  # If set, limit to this many statute subchunks (partial run)
+    run_async: bool = True  # If True (default), start background job and return job_id immediately
 
 
 class GapAnalysisResponse(BaseModel):

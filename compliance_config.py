@@ -91,6 +91,7 @@ class ComplianceConfig:
     compliance_results_collection: str
     compliance_alerts_collection: str
     compliance_run_log_collection: str
+    compliance_jobs_collection: str
     statute_index_version_field: str
     max_statute_quote_chars: int
     default_jurisdictions: List[str]
@@ -113,6 +114,7 @@ class ComplianceConfig:
     gap_analysis_v3_num_candidates: int
     gap_analysis_v3_score_threshold: float
     policy_embeddings_vector_index: str  # Vector index name for policy_embeddings
+    policy_sub_embeddings_vector_index: str  # Vector index for policy_sub_embeddings (v1)
     gap_analysis_v3_prompt_path: str
 
 
@@ -168,6 +170,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "compliance_results_collection": "compliance_results",
     "compliance_alerts_collection": "compliance_alerts",
     "compliance_run_log_collection": "compliance_run_log",
+    "compliance_jobs_collection": "compliance_jobs",
     "statute_index_version_field": "indexed_at",
     "max_statute_quote_chars": 300,
     "default_jurisdictions": ["CA", "VA", "CO", "CT"],
@@ -201,6 +204,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "gap_analysis_v3_num_candidates": 50,
     "gap_analysis_v3_score_threshold": 0.70,
     "policy_embeddings_vector_index": "policy_embeddings_vector_index",
+    "policy_sub_embeddings_vector_index": "policy_sub_embeddings_vector_index",
     "gap_analysis_v3_prompt_path": "prompts/gap_analysis_v3.yaml",
 }
 
@@ -325,6 +329,7 @@ def load_config() -> ComplianceConfig:
         compliance_results_collection=data.get("compliance_results_collection", DEFAULT_CONFIG["compliance_results_collection"]),
         compliance_alerts_collection=data.get("compliance_alerts_collection", DEFAULT_CONFIG["compliance_alerts_collection"]),
         compliance_run_log_collection=data.get("compliance_run_log_collection", DEFAULT_CONFIG["compliance_run_log_collection"]),
+        compliance_jobs_collection=data.get("compliance_jobs_collection", DEFAULT_CONFIG["compliance_jobs_collection"]),
         statute_index_version_field=data.get("statute_index_version_field", DEFAULT_CONFIG["statute_index_version_field"]),
         max_statute_quote_chars=_to_int(
             os.getenv("COMPLIANCE_MAX_STATUTE_QUOTE_CHARS"),
@@ -349,5 +354,6 @@ def load_config() -> ComplianceConfig:
         gap_analysis_v3_num_candidates=_to_int(os.getenv("GAP_ANALYSIS_V3_NUM_CANDIDATES"), data.get("gap_analysis_v3_num_candidates", DEFAULT_CONFIG["gap_analysis_v3_num_candidates"])),
         gap_analysis_v3_score_threshold=_to_float(os.getenv("GAP_ANALYSIS_V3_SCORE_THRESHOLD"), data.get("gap_analysis_v3_score_threshold", DEFAULT_CONFIG["gap_analysis_v3_score_threshold"])),
         policy_embeddings_vector_index=data.get("policy_embeddings_vector_index", DEFAULT_CONFIG["policy_embeddings_vector_index"]),
+        policy_sub_embeddings_vector_index=data.get("policy_sub_embeddings_vector_index", DEFAULT_CONFIG["policy_sub_embeddings_vector_index"]),
         gap_analysis_v3_prompt_path=data.get("gap_analysis_v3_prompt_path", DEFAULT_CONFIG["gap_analysis_v3_prompt_path"]),
     )

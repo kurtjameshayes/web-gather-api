@@ -27,6 +27,7 @@ from compliance_suite_schemas import (
     RunSummaryItem,
     RunsListResponse,
 )
+from compliance_job_service import ComplianceJobStorage, start_gap_analysis_job
 from compliance_suite_service import ComplianceSuiteService, ComplianceSuiteServiceError
 from gap_analysis_service_v3 import GapAnalysisServiceV3, GapAnalysisServiceV3Error
 from db import get_embedding_model_name, set_application_embedding_model
@@ -46,11 +47,12 @@ compliance_bp = Blueprint("compliance", __name__)
 _service: ComplianceService | None = None
 _suite_service: ComplianceSuiteService | None = None
 _gap_analysis_v3_service: GapAnalysisServiceV3 | None = None
+_job_storage: ComplianceJobStorage | None = None
 _config: ComplianceConfig | None = None
 
 
 def init_compliance(mongo_client) -> None:
-    global _service, _suite_service, _gap_analysis_v3_service, _config
+    global _service, _suite_service, _gap_analysis_v3_service, _job_storage, _config
     _config = load_config()
 
     # Resolve embedding model from web-gather for privacy-compliance; set app default for all vector queries.
@@ -112,6 +114,7 @@ def init_compliance(mongo_client) -> None:
         storage=storage,
         rate_limiter=rate_limiter,
     )
+    _job_storage = ComplianceJobStorage(mongo_client, _config)
 
 
 def set_compliance_service(service: ComplianceService | None, config: ComplianceConfig | None = None) -> None:
@@ -178,6 +181,12 @@ def _get_gap_analysis_v3_service() -> GapAnalysisServiceV3:
     return _gap_analysis_v3_service
 
 
+def _get_job_storage() -> ComplianceJobStorage:
+    if _job_storage is None:
+        raise RuntimeError("Compliance job storage not initialized.")
+    return _job_storage
+
+
 @compliance_bp.post("/applicability")
 async def applicability():
     logger.info("POST /applicability - Jurisdiction inference")
@@ -218,6 +227,19 @@ async def gap_analysis():
     except RuntimeError as exc:
         return jsonify({"error": str(exc)}), 500
     try:
+        if request_model.run_async:
+            # Start background job and return immediately once job has started
+            request_dict = request_model.model_dump(exclude={"run_async"})
+            job_id = start_gap_analysis_job(
+                request_dict=request_dict,
+                job_storage=_get_job_storage(),
+                run_gap_analysis_fn=_get_suite_service().gap_analysis,
+            )
+            return jsonify({
+                "job_id": job_id,
+                "status": "pending",
+                "message": "Gap analysis job started. Use GET /api/compliance/jobs/{job_id} to check status.",
+            }), 202
         result = await _get_suite_service().gap_analysis(request_model)
         return jsonify(result.model_dump())
     except ComplianceSuiteServiceError as exc:
@@ -225,6 +247,22 @@ async def gap_analysis():
     except Exception as e:
         logger.exception("Unhandled error in gap_analysis")
         return jsonify({"error": "Internal server error"}), 500
+
+
+@compliance_bp.get("/jobs/<job_id>")
+async def get_job(job_id: str):
+    """Get compliance job status and result (when completed)."""
+    logger.info("GET /jobs/%s - Get job status", job_id)
+    try:
+        authorize_request(_get_config(), request)
+    except AuthorizationError as exc:
+        return jsonify({"error": exc.message}), exc.status_code
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 500
+    job = _get_job_storage().get_job(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    return jsonify(job)
 
 
 @compliance_bp.post("/multi-jurisdictional")
