@@ -11,7 +11,7 @@ from pathlib import Path
 
 import anthropic
 from dotenv import load_dotenv
-from flask import Flask, request
+from flask import Flask, jsonify, redirect, request
 from pymongo import MongoClient
 from firecrawl import FirecrawlApp
 
@@ -74,6 +74,20 @@ app.register_blueprint(compliance_v2_bp, url_prefix="/api/v2/compliance")
 app.register_blueprint(compliance_v3_bp, url_prefix="/api/v3/compliance")
 # Also mount at root so POST /policy-statute-compliance works (Swagger/docs and legacy clients).
 app.register_blueprint(compliance_bp, url_prefix="", name="compliance_root")
+
+
+@app.get("/")
+def index():
+    """Redirect root to docs."""
+    return redirect("/docs", code=302)
+
+
+@app.errorhandler(404)
+def redirect_404_to_docs(_exc):
+    """Redirect browser GET requests for non-API paths to docs."""
+    if request.method == "GET" and not request.path.startswith("/api"):
+        return redirect("/docs", code=302)
+    return jsonify({"error": "Not found"}), 404
 
 
 @app.before_request

@@ -1,7 +1,7 @@
 """Endpoint routes and OpenAPI specification for the Web Gather API."""
 from __future__ import annotations
 
-from flask import Blueprint, Response, jsonify
+from flask import Blueprint, Response, redirect, jsonify
 
 routes_bp = Blueprint("routes", __name__)
 
@@ -2204,6 +2204,12 @@ def build_openapi_spec():
 def openapi():
     """Return the OpenAPI specification."""
     return jsonify(build_openapi_spec())
+
+
+@routes_bp.get("/docs/")
+def docs_trailing():
+    """Redirect /docs/ to /docs."""
+    return redirect("/docs", code=302)
 
 
 @routes_bp.get("/docs")
