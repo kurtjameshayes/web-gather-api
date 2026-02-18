@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from pathlib import Path
 
 import anthropic
 from dotenv import load_dotenv
@@ -21,7 +22,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("web-gather-api")
 
-load_dotenv()
+# Load .env from project root (works when cwd differs, e.g. PythonAnywhere WSGI)
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY")
 MONGODB_URI = os.getenv("MONGODB_URI")
