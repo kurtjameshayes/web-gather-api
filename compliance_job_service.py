@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional, TypedDict
 
 from compliance_config import ComplianceConfig
-from compliance_suite_schemas import GapAnalysisRequest
+from compliance_suite_schemas import GapAnalysisRequest, HealthScoreRequest
 from compliance_utils import utc_now
 
 logger = logging.getLogger("policy-compliance")
@@ -188,6 +188,100 @@ def start_gap_analysis_job(
             loop.run_until_complete(graph.ainvoke(initial_state))
         except Exception as e:
             logger.exception("Background gap analysis job %s failed", job_id)
+            job_storage.update_job_status(job_id, JOB_STATUS_FAILED, error=str(e))
+        finally:
+            loop.close()
+
+    thread = threading.Thread(target=run_in_thread, daemon=True)
+    thread.start()
+    return job_id
+
+
+def build_health_score_graph(
+    run_health_score_fn,
+    job_storage: ComplianceJobStorage,
+) -> Any:
+    """Build LangGraph StateGraph for health score job. Falls back to compliance_graph if langgraph not installed (Python 3.8)."""
+    try:
+        from langgraph.graph import END, START, StateGraph
+    except ImportError:
+        from compliance_graph import END, START, StateGraph
+
+    def validate_and_start(state: ComplianceJobState) -> ComplianceJobState:
+        """Validate request and mark job as running."""
+        job_id = state["job_id"]
+        job_storage.update_job_status(job_id, JOB_STATUS_RUNNING)
+        return {
+            "status": JOB_STATUS_RUNNING,
+            "started_at": _iso(),
+        }
+
+    async def run_health_score_node(state: ComplianceJobState) -> ComplianceJobState:
+        """Execute health score and store result."""
+        job_id = state["job_id"]
+        request_dict = state.get("request") or {}
+        try:
+            req = HealthScoreRequest.model_validate(request_dict)
+            result = await run_health_score_fn(req)
+            result_dict = result.model_dump() if hasattr(result, "model_dump") else result
+            job_storage.update_job_status(
+                job_id,
+                JOB_STATUS_COMPLETED,
+                result=result_dict,
+            )
+            return {
+                "status": JOB_STATUS_COMPLETED,
+                "result": result_dict,
+                "completed_at": _iso(),
+            }
+        except Exception as e:
+            logger.exception("Health score job %s failed", job_id)
+            error_msg = str(e)
+            job_storage.update_job_status(
+                job_id,
+                JOB_STATUS_FAILED,
+                error=error_msg,
+            )
+            return {
+                "status": JOB_STATUS_FAILED,
+                "error": error_msg,
+                "completed_at": _iso(),
+            }
+
+    builder = StateGraph(ComplianceJobState)
+    builder.add_node("validate_and_start", validate_and_start)
+    builder.add_node("run_health_score", run_health_score_node)
+    builder.add_edge(START, "validate_and_start")
+    builder.add_edge("validate_and_start", "run_health_score")
+    builder.add_edge("run_health_score", END)
+    return builder.compile()
+
+
+def start_health_score_job(
+    request_dict: Dict[str, Any],
+    job_storage: ComplianceJobStorage,
+    run_health_score_fn,
+) -> str:
+    """
+    Create job, start it in background, return job_id.
+    The job runs in a separate thread with its own event loop.
+    """
+    job_id = job_storage.create_job(JOB_TYPE_HEALTH_SCORE, request_dict)
+    graph = build_health_score_graph(run_health_score_fn, job_storage)
+
+    def run_in_thread():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            initial_state: ComplianceJobState = {
+                "job_id": job_id,
+                "job_type": JOB_TYPE_HEALTH_SCORE,
+                "status": JOB_STATUS_PENDING,
+                "request": request_dict,
+            }
+            loop.run_until_complete(graph.ainvoke(initial_state))
+        except Exception as e:
+            logger.exception("Background health score job %s failed", job_id)
             job_storage.update_job_status(job_id, JOB_STATUS_FAILED, error=str(e))
         finally:
             loop.close()

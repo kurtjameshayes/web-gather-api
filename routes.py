@@ -273,6 +273,7 @@ def build_openapi_spec():
                         "database": {"type": "string"},
                         "policy_collection": {"type": "string"},
                         "save_results": {"type": "boolean", "default": True},
+                        "run_async": {"type": "boolean", "default": True, "description": "If true (default), start background job and return job_id immediately (202). Use GET /jobs/{job_id} to poll. Set false for synchronous response."},
                     },
                     "required": ["policy_document_id"],
                 },
@@ -1867,10 +1868,25 @@ def build_openapi_spec():
                     },
                     "responses": {
                         "200": {
-                            "description": "Health score and breakdown",
+                            "description": "Health score and breakdown (synchronous when run_async=false)",
                             "content": {
                                 "application/json": {
                                     "schema": {"$ref": "#/components/schemas/HealthScoreResponse"},
+                                }
+                            },
+                        },
+                        "202": {
+                            "description": "Job started (when run_async=true). Returns job_id; poll GET /api/compliance/jobs/{job_id} for result.",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "job_id": {"type": "string"},
+                                            "status": {"type": "string", "example": "pending"},
+                                            "message": {"type": "string"},
+                                        },
+                                    }
                                 }
                             },
                         },

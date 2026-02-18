@@ -138,6 +138,7 @@ class HealthScoreRequest(BaseModel):
     database: Optional[str] = None
     policy_collection: Optional[str] = None
     save_results: bool = True  # If False, do not persist (e.g. for report run_now)
+    run_async: bool = True  # If True (default), start background job and return job_id immediately
 
 
 class HealthScoreResponse(BaseModel):

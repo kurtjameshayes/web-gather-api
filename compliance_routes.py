@@ -27,7 +27,7 @@ from compliance_suite_schemas import (
     RunSummaryItem,
     RunsListResponse,
 )
-from compliance_job_service import ComplianceJobStorage, start_gap_analysis_job
+from compliance_job_service import ComplianceJobStorage, start_gap_analysis_job, start_health_score_job
 from compliance_suite_service import ComplianceSuiteService, ComplianceSuiteServiceError
 from gap_analysis_service_v3 import GapAnalysisServiceV3, GapAnalysisServiceV3Error
 from db import get_embedding_model_name, set_application_embedding_model
@@ -304,6 +304,19 @@ async def health_score():
     except RuntimeError as exc:
         return jsonify({"error": str(exc)}), 500
     try:
+        if request_model.run_async:
+            # Start background job and return immediately once job has started
+            request_dict = request_model.model_dump(exclude={"run_async"})
+            job_id = start_health_score_job(
+                request_dict=request_dict,
+                job_storage=_get_job_storage(),
+                run_health_score_fn=_get_suite_service().health_score,
+            )
+            return jsonify({
+                "job_id": job_id,
+                "status": "pending",
+                "message": "Health score job started. Use GET /api/compliance/jobs/{job_id} to check status.",
+            }), 202
         result = await _get_suite_service().health_score(request_model)
         return jsonify(result.model_dump())
     except ComplianceSuiteServiceError as exc:
