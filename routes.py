@@ -199,7 +199,7 @@ def build_openapi_spec():
                         "conflict_description": {"type": "string", "nullable": True},
                         "analysis_failed": {"type": "boolean"},
                         "policy_subchunk_text": {"type": "string", "nullable": True, "description": "Policy subchunk text (subchunk gap analysis)"},
-                        "policy_chunk_text": {"type": "string", "nullable": True, "description": "Policy enclosing chunk (subchunk gap analysis)"},
+                        "policy_combined_sections": {"type": "string", "nullable": True, "description": "Combined policy text compared (v3: top-k matches with context; v1/v2: single chunk)"},
                         "statute_subchunk_text": {"type": "string", "nullable": True, "description": "Statute subchunk text (subchunk gap analysis)"},
                         "statute_chunk_text": {"type": "string", "nullable": True, "description": "Statute enclosing chunk (subchunk gap analysis)"},
                     },
@@ -224,8 +224,24 @@ def build_openapi_spec():
                         "policy_collection": {"type": "string"},
                         "save_results": {"type": "boolean", "default": True},
                         "num_rows": {"type": "integer", "minimum": 1, "description": "If set, limit to this many statute subchunks (partial run)"},
+                        "run_async": {"type": "boolean", "default": True, "description": "If true (default), start background job and return job_id immediately (202). Use GET /jobs/{job_id} to poll. Set false for synchronous response."},
                     },
                     "required": ["policy_document_id"],
+                },
+                "ComplianceJobResponse": {
+                    "type": "object",
+                    "description": "Compliance background job status and result.",
+                    "properties": {
+                        "job_id": {"type": "string"},
+                        "job_type": {"type": "string", "enum": ["gap_analysis", "health_score", "drift_check"]},
+                        "status": {"type": "string", "enum": ["pending", "running", "completed", "failed"]},
+                        "request": {"type": "object", "description": "Original request payload"},
+                        "result": {"type": "object", "description": "Result when status=completed (e.g. GapAnalysisResponse)"},
+                        "error": {"type": "string", "nullable": True, "description": "Error message when status=failed"},
+                        "created_at": {"type": "string", "format": "date-time"},
+                        "started_at": {"type": "string", "format": "date-time", "nullable": True},
+                        "completed_at": {"type": "string", "format": "date-time", "nullable": True},
+                    },
                 },
                 "RetrievalMetadata": {
                     "type": "object",
@@ -1690,16 +1706,45 @@ def build_openapi_spec():
                     },
                     "responses": {
                         "200": {
-                            "description": "Gap analysis with gaps and summary",
+                            "description": "Gap analysis with gaps and summary (synchronous when run_async=false)",
                             "content": {
                                 "application/json": {
                                     "schema": {"$ref": "#/components/schemas/GapAnalysisResponse"},
                                 }
                             },
                         },
+                        "202": {
+                            "description": "Job started (when run_async=true). Returns job_id; poll GET /jobs/{job_id} for result.",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "job_id": {"type": "string"},
+                                            "status": {"type": "string", "example": "pending"},
+                                            "message": {"type": "string"},
+                                        },
+                                    }
+                                }
+                            },
+                        },
                         "400": {"description": "Bad request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
                         "404": {"description": "Policy not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
                         "422": {"description": "Validation error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                    },
+                }
+            },
+            f"{COMPLIANCE_API_PREFIX}/jobs/{{job_id}}": {
+                "get": {
+                    "summary": "Get compliance job status",
+                    "description": "Return status and result of a background compliance job (gap analysis, health score, etc.). Poll this endpoint after starting a job with run_async=true.",
+                    "parameters": [{"name": "job_id", "in": "path", "required": True, "schema": {"type": "string"}}],
+                    "responses": {
+                        "200": {
+                            "description": "Job status and result (when completed)",
+                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ComplianceJobResponse"}}},
+                        },
+                        "404": {"description": "Job not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
                     },
                 }
             },
@@ -1738,7 +1783,7 @@ def build_openapi_spec():
             f"{COMPLIANCE_V3_API_PREFIX}/gap-analysis": {
                 "post": {
                     "summary": "Gap analysis (v3)",
-                    "description": "Gap analysis v3 per GapAnalysisProcessDesign.md: statute→policy vector search with top-k matches and score threshold, LLM analysis per pair, citation binding validation against full policy text. Uses statute_embeddings and policy_embeddings.",
+                    "description": "Gap analysis v3 per GapAnalysisProcessDesign.md (v1 design): Uses statute_sub_embeddings and policy_sub_embeddings. Subchunks include parent context; no full policy text in prompt. Statute→policy vector search with top-k matches and score threshold, LLM analysis per pair, citation binding validation against full policy text.",
                     "requestBody": {
                         "required": True,
                         "content": {
@@ -1759,6 +1804,21 @@ def build_openapi_spec():
                             "content": {
                                 "application/json": {
                                     "schema": {"$ref": "#/components/schemas/GapAnalysisResponse"},
+                                }
+                            },
+                        },
+                        "202": {
+                            "description": "Job started (when run_async=true). Returns job_id; poll GET /api/compliance/jobs/{job_id} for result.",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "job_id": {"type": "string"},
+                                            "status": {"type": "string", "example": "pending"},
+                                            "message": {"type": "string"},
+                                        },
+                                    }
                                 }
                             },
                         },

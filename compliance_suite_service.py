@@ -288,6 +288,9 @@ class ComplianceSuiteService:
                 truncate_at_sentence(statute_subchunk, self._config.max_statute_quote_chars).strip()
                 or None
             )
+            conflict_desc = result.get("conflict_description") if result else None
+            if status == "missing" and not (conflict_desc or "").strip():
+                conflict_desc = "The policy does not contain provisions that address this statutory requirement."
             gaps.append(
                 GapItem(
                     jurisdiction=jurisdiction,
@@ -299,10 +302,10 @@ class ComplianceSuiteService:
                     status=status,
                     policy_quote=policy_quote,
                     statute_quote=statute_quote,
-                    conflict_description=result.get("conflict_description") if result else None,
+                    conflict_description=conflict_desc,
                     analysis_failed=analysis_failed,
                     policy_subchunk_text=policy_subchunk or None,
-                    policy_chunk_text=policy_chunk or None,
+                    policy_combined_sections=policy_chunk or None,
                     statute_subchunk_text=statute_subchunk or None,
                     statute_chunk_text=statute_chunk or None,
                 )
@@ -460,7 +463,9 @@ class ComplianceSuiteService:
                 truncate_at_sentence(statute_chunk_text, self._config.max_statute_quote_chars).strip()
                 or None
             )
-
+            conflict_desc = result.get("conflict_description") if result else None
+            if status == "missing" and not (conflict_desc or "").strip():
+                conflict_desc = "The policy does not contain provisions that address this statutory requirement."
             gaps.append(
                 GapItem(
                     jurisdiction=jurisdiction,
@@ -472,9 +477,9 @@ class ComplianceSuiteService:
                     status=status,
                     policy_quote=policy_quote,
                     statute_quote=statute_quote,
-                    conflict_description=result.get("conflict_description") if result else None,
+                    conflict_description=conflict_desc,
                     analysis_failed=analysis_failed,
-                    policy_chunk_text=policy_chunk_text or None,
+                    policy_combined_sections=policy_chunk_text or None,
                     statute_chunk_text=statute_chunk_text or None,
                 )
             )

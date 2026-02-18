@@ -6,7 +6,8 @@ import logging
 from flask import Blueprint, jsonify, request
 from pydantic import ValidationError
 
-from compliance_routes import _get_config, _get_gap_analysis_v3_service
+from compliance_job_service import start_gap_analysis_job
+from compliance_routes import _get_config, _get_gap_analysis_v3_service, _get_job_storage
 from compliance_suite_schemas import GapAnalysisRequest
 from gap_analysis_service_v3 import GapAnalysisServiceV3Error
 from security import AuthorizationError, authorize_request
@@ -16,6 +17,13 @@ logger = logging.getLogger("policy-compliance")
 compliance_v3_bp = Blueprint("compliance_v3", __name__)
 
 COMPLIANCE_V3_API_PREFIX = "/api/v3/compliance"
+
+
+def _start_v3_gap_analysis_job(request_dict: dict) -> str:
+    """Start v3 gap analysis in background."""
+    async def run_v3(req):
+        return await _get_gap_analysis_v3_service().run(req)
+    return start_gap_analysis_job(request_dict, _get_job_storage(), run_v3)
 
 
 @compliance_v3_bp.post("/gap-analysis")
@@ -34,6 +42,14 @@ async def gap_analysis_v3():
     except RuntimeError as exc:
         return jsonify({"error": str(exc)}), 500
     try:
+        if request_model.run_async:
+            request_dict = request_model.model_dump(exclude={"run_async"})
+            job_id = _start_v3_gap_analysis_job(request_dict)
+            return jsonify({
+                "job_id": job_id,
+                "status": "pending",
+                "message": "Gap analysis v3 job started. Use GET /api/compliance/jobs/{job_id} to check status.",
+            }), 202
         result = await _get_gap_analysis_v3_service().run(request_model)
         return jsonify(result.model_dump())
     except GapAnalysisServiceV3Error as exc:

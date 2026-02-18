@@ -2,8 +2,9 @@ flask
 python-dotenv
 pymongo
 firecrawl-py
-sentence-transformers
-numpy
+# sentence-transformers 4.x works with PyTorch 2.2; 5.x requires PyTorch 2.4+ (not on macOS x86)
+sentence-transformers>=4.1.0,<5.0.0
+numpy>=1.26.0
 anthropic
 pypdf
 requests
@@ -12,3 +13,6 @@ cryptography
 pydantic
 pytest
 pyyaml
+# langgraph requires Python 3.10+; use conda python3.10 env. Falls back to compliance_graph.py if not installed.
+langgraph>=0.2.0
+langchain-core>=0.3.0
