@@ -193,7 +193,7 @@ def build_openapi_spec():
                         "statute_chunk_id": {"type": "string", "nullable": True},
                         "section": {"type": "string", "nullable": True},
                         "requirement_summary": {"type": "string"},
-                        "status": {"type": "string", "enum": ["missing", "addressed", "conflict"]},
+                        "status": {"type": "string", "enum": ["missing", "addressed", "conflict", "partial", "ambiguous"]},
                         "policy_quote": {"type": "string", "nullable": True},
                         "statute_quote": {"type": "string", "nullable": True},
                         "conflict_description": {"type": "string", "nullable": True},
@@ -211,6 +211,8 @@ def build_openapi_spec():
                         "missing": {"type": "integer"},
                         "addressed": {"type": "integer"},
                         "conflicts": {"type": "integer"},
+                        "partial": {"type": "integer"},
+                        "ambiguous": {"type": "integer"},
                     },
                 },
                 "GapAnalysisRequest": {

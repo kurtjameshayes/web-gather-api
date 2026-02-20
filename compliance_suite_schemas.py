@@ -38,7 +38,7 @@ class GapItem(BaseModel):
     statute_chunk_id: Optional[str] = None
     section: Optional[str] = None
     requirement_summary: str
-    status: str = Field(..., pattern="^(missing|addressed|conflict)$")
+    status: str = Field(..., pattern="^(missing|addressed|conflict|partial|ambiguous)$")
     policy_quote: Optional[str] = None
     statute_quote: Optional[str] = None
     conflict_description: Optional[str] = None
@@ -57,6 +57,8 @@ class GapSummary(BaseModel):
     missing: int = 0
     addressed: int = 0
     conflicts: int = 0
+    partial: int = 0
+    ambiguous: int = 0
     analysis_failures: int = 0  # v3: count of items where analysis_failed
 
 

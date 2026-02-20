@@ -217,7 +217,7 @@ class GapAnalysisServiceV3:
 
             # Citation binding
             binding_text = policy_text or policy_block
-            if not analysis_failed and status in ("addressed", "conflict") and policy_quote and binding_text:
+            if not analysis_failed and status in ("addressed", "conflict", "partial", "ambiguous") and policy_quote and binding_text:
                 if not _citation_binding(policy_quote, binding_text):
                     citation_binding_failed = True
                     if status == "addressed":
@@ -261,6 +261,8 @@ class GapAnalysisServiceV3:
             missing=sum(1 for g in gaps if g.status == "missing" and not g.analysis_failed),
             addressed=sum(1 for g in gaps if g.status == "addressed" and not g.analysis_failed),
             conflicts=sum(1 for g in gaps if g.status == "conflict" and not g.analysis_failed),
+            partial=sum(1 for g in gaps if g.status == "partial" and not g.analysis_failed),
+            ambiguous=sum(1 for g in gaps if g.status == "ambiguous" and not g.analysis_failed),
             analysis_failures=sum(1 for g in gaps if g.analysis_failed),
         )
         analyzed_at = utc_now().isoformat()

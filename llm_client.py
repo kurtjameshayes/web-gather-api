@@ -363,14 +363,14 @@ class AnthropicLLMClient:
                 "_analysis_failed": True,
             }
         status = (out.get("status") or "missing").lower()
-        if status not in ("addressed", "missing", "conflict"):
+        if status not in ("addressed", "missing", "conflict", "partial", "ambiguous"):
             status = "missing"
         return {
             "status": status,
             "policy_quote": out.get("policy_quote") if out.get("policy_quote") else None,
             "statute_quote": out.get("statute_quote") or "",
             "requirement_summary": (out.get("requirement_summary") or "Requirement").strip(),
-            "conflict_description": out.get("conflict_description") if out.get("conflict_description") else None,
+            "conflict_description": out.get("gap_description") or out.get("conflict_description") or None,
             "confidence": (out.get("confidence") or "low").lower()
             if out.get("confidence") in ("high", "medium", "low")
             else "low",
