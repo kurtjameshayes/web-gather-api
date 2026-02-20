@@ -155,7 +155,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "allowed_roles": ["admin", "compliance"],
     "default_role_header": "x-role",
     "embedding_model_name": "all-MiniLM-L6-v2",
-    "llm_model_name": "claude-3-5-sonnet-20241022",
+    "llm_model_name": "claude-sonnet-4-6",
     "statute_collection_tag": "statutes",
     "statute_database": "",
     # Compliance suite

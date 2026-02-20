@@ -1858,7 +1858,7 @@ Return only valid JSON with the subsections array."""
 
         try:
             response = anthropic_client.messages.create(
-                model="claude-3-5-haiku-20241022",
+                model="claude-sonnet-4-6",
                 max_tokens=8192,
                 messages=[{"role": "user", "content": user_message}],
             )
@@ -2074,7 +2074,7 @@ Return only valid JSON with the subsections array."""
 
         try:
             response = anthropic_client.messages.create(
-                model="claude-3-5-haiku-20241022",
+                model="claude-sonnet-4-6",
                 max_tokens=8192,
                 messages=[{"role": "user", "content": user_message}],
             )
@@ -2449,9 +2449,9 @@ Use the identify_sections tool to report the sections you identified."""
     ]
 
     try:
-        logger.info("POST /parse-llm - Calling Anthropic API with tool use (model: claude-3-5-haiku-20241022)")
+        logger.info("POST /parse-llm - Calling Anthropic API with tool use (model: claude-sonnet-4-6)")
         with anthropic_client.messages.stream(
-            model="claude-3-5-haiku-20241022",
+            model="claude-sonnet-4-6",
             max_tokens=4096,
             messages=[
                 {"role": "user", "content": user_message}
@@ -2660,7 +2660,7 @@ def gap_check():
 
     try:
         response = anthropic_client.messages.create(
-            model="claude-3-5-haiku-20241022",
+            model="claude-sonnet-4-6",
             max_tokens=500,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -2675,7 +2675,7 @@ def gap_check():
             # Retry with stricter prompt
             retry_prompt = prompt + "\n\nIMPORTANT: Respond with ONLY a valid JSON object, no other text. Use the exact keys: addressed, policy_quote, missing, conflict, conflict_description."
             retry_response = anthropic_client.messages.create(
-                model="claude-3-5-haiku-20241022",
+                model="claude-sonnet-4-6",
                 max_tokens=500,
                 messages=[{"role": "user", "content": retry_prompt}],
             )

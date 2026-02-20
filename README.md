@@ -43,7 +43,7 @@ COMPLIANCE_CONFIG_PATH=/workspace/policy_compliance_config.json
 COMPLIANCE_AUTH_REQUIRED=true
 COMPLIANCE_ALLOWED_ROLES=admin,compliance
 EMBEDDING_MODEL_NAME=all-MiniLM-L6-v2
-LLM_MODEL_NAME=claude-3-5-haiku-20241022
+LLM_MODEL_NAME=claude-sonnet-4-6
 AUDIT_LOG_KEY=base64_fernet_key
 ```
 
