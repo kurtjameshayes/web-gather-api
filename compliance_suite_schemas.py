@@ -73,6 +73,7 @@ class RetrievalMetadata(BaseModel):
 
 class GapAnalysisRequest(BaseModel):
     policy_document_id: Optional[str] = None
+    policy_document_ids: Optional[List[str]] = None  # v3: list of policy IDs, treated as single combined document for vector search
     company_name: Optional[str] = None
     applicable_jurisdictions: Optional[List[str]] = None
     statute_document_id: Optional[str] = None  # Optional filter for statute subchunks
@@ -82,15 +83,29 @@ class GapAnalysisRequest(BaseModel):
     num_rows: Optional[int] = Field(None, gt=0)  # If set, limit to this many statute subchunks (partial run)
     run_async: bool = True  # If True (default), start background job and return job_id immediately
 
+    @model_validator(mode="after")
+    def validate_policy_source(self) -> "GapAnalysisRequest":
+        has_single = bool(self.policy_document_id and self.policy_document_id.strip())
+        has_list = bool(self.policy_document_ids and len(self.policy_document_ids) > 0)
+        if not has_single and not has_list:
+            raise ValueError("Either policy_document_id or policy_document_ids (non-empty) must be provided.")
+        return self
+
 
 class GapAnalysisResponse(BaseModel):
     policy_document_id: str
+    policy_document_ids: Optional[List[str]] = None  # Populated when request used policy_document_ids
     company_name: Optional[str] = None
     applicable_jurisdictions: List[str] = Field(default_factory=list)
     analyzed_at: str  # ISO8601
     gaps: List[GapItem] = Field(default_factory=list)
     summary: GapSummary = Field(default_factory=GapSummary)
     retrieval_metadata: Optional[RetrievalMetadata] = None
+    # For job path: used when writing compliance_results/run_log after action completes
+    statute_chunk_ids_used: Optional[List[str]] = None
+    run_types: Optional[List[str]] = None  # e.g. ["gap"], ["gap_v2"], ["gap_v3"]
+    run_type: Optional[str] = None  # v3: "gap_analysis_v3"
+    version: Optional[str] = None  # v3: "v3"
 
 
 # ----- Multi-Jurisdictional (3.x) -----

@@ -19,13 +19,13 @@ This document is derived from the current codebase behavior and structure.
   - Files: `core.py`
 - FR-1.3 Web Crawling (`POST /crawl`)
   - Crawl URLs with configurable depth and breadth.
-  - Prefer Puppeteer and fall back to Firecrawl on failure.
+  - Prefer Playwright, then Puppeteer, then Selenium, then Firecrawl on failure.
   - Return combined text from all crawled pages.
   - Files: `core.py`
 
 ### 2) Document Indexing & Vector Search
 
-- FR-2.1 Document Indexing (`POST /vector-index`)
+- FR-2.1 Document Indexing (`POST /create-embeddings`)
   - Generate vector embeddings from ingested documents.
   - Support chunking strategies: character, sentence, paragraph, semantic.
   - Configurable `chunk_size` and `chunk_overlap`.

@@ -44,6 +44,38 @@ def init_db(client):
     mongo_client = client
 
 
+def ensure_privacy_compliance_indexes(client, database_name: str = PRIVACY_COMPLIANCE_DB) -> None:
+    """Create unique indexes on privacy-compliance collections if they do not exist.
+
+    Idempotent: safe to call on every startup. Uses create_index which is a no-op
+    when the index already exists.
+    """
+    db = client[database_name]
+    index_specs: list[tuple[str, list[tuple[str, int]], bool]] = [
+        ("statutes", [("document_id", 1)], True),
+        ("policies", [("document_id", 1)], True),
+        ("statute_chunks", [("document_id", 1), ("chunk_index", 1)], True),
+        ("policy_chunks", [("document_id", 1), ("chunk_index", 1)], True),
+        ("policy_sub_chunks", [("document_id", 1), ("subchunk_id", 1)], True),
+        ("statute_sub_chunks", [("document_id", 1), ("subchunk_id", 1)], True),
+        ("policy_sub_embeddings", [("document_id", 1), ("subchunk_id", 1)], True),
+        ("statute_sub_embeddings", [("document_id", 1), ("subchunk_id", 1)], True),
+    ]
+    for coll_name, keys, unique in index_specs:
+        try:
+            coll = db[coll_name]
+            coll.create_index(keys, unique=unique)
+            logger.info("Ensured unique index on %s.%s: %s", database_name, coll_name, keys)
+        except Exception as e:
+            logger.warning(
+                "Could not ensure index on %s.%s (%s): %s",
+                database_name,
+                coll_name,
+                keys,
+                e,
+            )
+
+
 def utc_now():
     """Return current UTC time."""
     return datetime.now(timezone.utc)

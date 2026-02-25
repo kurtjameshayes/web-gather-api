@@ -134,15 +134,31 @@ def test_ingest_invalid_mode(client, mock_clients) -> None:
     assert "mode" in payload["error"]
 
 
-def test_crawl_puppeteer_success(client, mock_clients) -> None:
+def test_crawl_playwright_success(client, mock_clients) -> None:
+    """Playwright is tried first; when it succeeds, that method is used."""
     with patch(
-        "core.puppeteer_crawl",
+        "core.playwright_crawl",
         return_value=[{"url": "https://example.com", "title": "T", "markdown": "Body"}],
     ):
         response = client.post("/crawl", json={"url": "https://example.com"})
     assert response.status_code == 200
     payload = response.get_json()
-    assert payload["crawl_method"] == "puppeteer"
+    assert payload["crawl_method"] == "playwright"
+    assert payload["pages_crawled"] == 1
+
+
+def test_crawl_fallback_chain(client, mock_clients) -> None:
+    """When playwright and puppeteer fail, selenium succeeds."""
+    with patch("core.playwright_crawl", side_effect=RuntimeError("playwright failed")), patch(
+        "core.puppeteer_crawl", return_value=[]
+    ), patch(
+        "core.selenium_crawl",
+        return_value=[{"url": "https://example.com", "title": "T", "markdown": "Body"}],
+    ):
+        response = client.post("/crawl", json={"url": "https://example.com"})
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["crawl_method"] == "selenium"
     assert payload["pages_crawled"] == 1
 
 
@@ -150,7 +166,9 @@ def test_crawl_fallback_to_firecrawl(client, mock_clients) -> None:
     mock_clients["firecrawl"].crawl.return_value = [
         {"url": "https://example.com", "title": "T", "markdown": "Body"}
     ]
-    with patch("core.puppeteer_crawl", return_value=[]):
+    with patch("core.playwright_crawl", return_value=[]), patch(
+        "core.puppeteer_crawl", return_value=[]
+    ), patch("core.selenium_crawl", return_value=[]):
         response = client.post("/crawl", json={"url": "https://example.com"})
     assert response.status_code == 200
     payload = response.get_json()

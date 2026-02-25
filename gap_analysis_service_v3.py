@@ -56,35 +56,47 @@ class GapAnalysisServiceV3:
         self.rate_limiter = rate_limiter
         self.db = (config.statute_database or "").strip() or config.compliance_database
 
+    def _load_policy_doc(self, policies_coll: Any, policy_id: str) -> Optional[Dict[str, Any]]:
+        doc_id_f = self.cfg.policy_document_id_field
+        doc = policies_coll.find_one({doc_id_f: policy_id})
+        if not doc:
+            try:
+                from bson import ObjectId
+                doc = policies_coll.find_one({"_id": ObjectId(policy_id)})
+            except Exception:
+                doc = policies_coll.find_one({"_id": policy_id})
+        return doc
+
     async def run(self, req: GapAnalysisRequest) -> GapAnalysisResponse:
-        policy_doc_id = req.policy_document_id
-        if not policy_doc_id:
-            raise GapAnalysisServiceV3Error("policy_document_id is required.", status_code=400)
+        policy_ids = req.policy_document_ids if req.policy_document_ids else ([req.policy_document_id] if req.policy_document_id else [])
+        if not policy_ids:
+            raise GapAnalysisServiceV3Error("Either policy_document_id or policy_document_ids (non-empty) is required.", status_code=400)
 
         if not await self.rate_limiter.allow():
             raise GapAnalysisServiceV3Error("Rate limit exceeded", status_code=429)
 
-        # --- STEP 0: Load policy and check indexed ---
+        # --- STEP 0: Load policy docs and check indexed ---
         db_for_policy = (req.database or "").strip() or self.cfg.compliance_database
         policies_coll = self.mongo[db_for_policy][self.cfg.policies_collection]
-        policy_doc = policies_coll.find_one({self.cfg.policy_document_id_field: policy_doc_id})
-        if not policy_doc:
-            try:
-                from bson import ObjectId
-                policy_doc = policies_coll.find_one({"_id": ObjectId(policy_doc_id)})
-            except Exception:
-                policy_doc = policies_coll.find_one({"_id": policy_doc_id})
-        if not policy_doc:
-            raise GapAnalysisServiceV3Error("Policy not found", status_code=404)
-
-        policy_text = (policy_doc.get("text") or "").strip()
-        if not policy_text and policy_doc.get("policy_chunks"):
-            parts = [c.get("chunk_text", "").strip() for c in policy_doc["policy_chunks"] if isinstance(c, dict)]
-            policy_text = "\n\n".join(parts).strip()
-        company_name = policy_doc.get("company_name") if isinstance(policy_doc.get("company_name"), str) else None
+        policy_text_parts: List[str] = []
+        company_name: Optional[str] = None
+        for pid in policy_ids:
+            policy_doc = self._load_policy_doc(policies_coll, pid)
+            if not policy_doc:
+                raise GapAnalysisServiceV3Error(f"Policy not found: {pid}", status_code=404)
+            txt = (policy_doc.get("text") or "").strip()
+            if not txt and policy_doc.get("policy_chunks"):
+                parts = [c.get("chunk_text", "").strip() for c in policy_doc["policy_chunks"] if isinstance(c, dict)]
+                txt = "\n\n".join(parts).strip()
+            if txt:
+                policy_text_parts.append(txt)
+            if company_name is None and isinstance(policy_doc.get("company_name"), str):
+                company_name = policy_doc.get("company_name")
+        policy_text = "\n\n---\n\n".join(policy_text_parts).strip()
 
         policy_sub_coll = self.mongo[self.db][self.cfg.policy_sub_embeddings_collection]
-        n_indexed = policy_sub_coll.count_documents({self.cfg.policy_document_id_field: policy_doc_id})
+        doc_id_f = self.cfg.policy_document_id_field
+        n_indexed = policy_sub_coll.count_documents({doc_id_f: {"$in": policy_ids}})
         if n_indexed == 0:
             raise GapAnalysisServiceV3Error(
                 f"Policy not indexed. Index into {self.cfg.policy_sub_embeddings_collection} first.",
@@ -114,7 +126,6 @@ class GapAnalysisServiceV3:
         pol_chunk_f = self.cfg.policy_chunk_text_field or "chunk_text"
         stat_chunk_f = self.cfg.statute_chunk_text_field or "chunk_text"
         emb_f = self.cfg.embedding_text_field
-        doc_id_f = self.cfg.policy_document_id_field
         jur_f = self.cfg.statute_jurisdiction_field
 
         statute_docs = list(statute_sub_coll.find(
@@ -126,7 +137,7 @@ class GapAnalysisServiceV3:
 
         top_k = getattr(self.cfg, "gap_analysis_v3_top_k", 5)
         score_thresh = getattr(self.cfg, "gap_analysis_v3_score_threshold", 0.70)
-        policy_filter = {doc_id_f: policy_doc_id}
+        policy_filter = {doc_id_f: {"$in": policy_ids}} if len(policy_ids) > 1 else {doc_id_f: policy_ids[0]}
 
         gaps: List[GapItem] = []
         seen: Set[str] = set()
@@ -271,14 +282,21 @@ class GapAnalysisServiceV3:
             statute_pairs_matched=len(gaps),
         )
 
+        policy_doc_id_display = policy_ids[0] if policy_ids else ""
+        used_list = req.policy_document_ids is not None and len(req.policy_document_ids) > 0
         response = GapAnalysisResponse(
-            policy_document_id=policy_doc_id,
+            policy_document_id=policy_doc_id_display,
+            policy_document_ids=policy_ids if used_list and len(policy_ids) > 1 else None,
             company_name=company_name,
             applicable_jurisdictions=jurisdictions,
             analyzed_at=analyzed_at,
             gaps=gaps,
             summary=summary,
             retrieval_metadata=retrieval_metadata,
+            statute_chunk_ids_used=statute_ids_used[:500] if statute_ids_used else None,
+            run_types=["gap_v3"],
+            run_type="gap_analysis_v3",
+            version="v3",
         )
 
         # --- STEP 5: Persist ---
@@ -287,9 +305,9 @@ class GapAnalysisServiceV3:
                 import uuid
                 res_coll = self.mongo[db_for_policy][self.cfg.compliance_results_collection]
                 log_coll = self.mongo[db_for_policy][self.cfg.compliance_run_log_collection]
-                res_coll.insert_one({
+                res_doc: Dict[str, Any] = {
                     "_id": str(uuid.uuid4()),
-                    "policy_document_id": policy_doc_id,
+                    "policy_document_id": policy_doc_id_display,
                     "company_name": company_name,
                     "applicable_jurisdictions": jurisdictions,
                     "analyzed_at": analyzed_at,
@@ -299,15 +317,21 @@ class GapAnalysisServiceV3:
                     "run_type": "gap_analysis_v3",
                     "version": "v3",
                     "run_types": ["gap_v3"],
-                })
-                log_coll.insert_one({
-                    "policy_document_id": policy_doc_id,
+                }
+                if used_list and len(policy_ids) > 1:
+                    res_doc["policy_document_ids"] = policy_ids
+                res_coll.insert_one(res_doc)
+                log_doc: Dict[str, Any] = {
+                    "policy_document_id": policy_doc_id_display,
                     "run_type": "gap_analysis_v3",
                     "statute_item_ids": statute_ids_used[:500],
                     "ran_at": analyzed_at,
                     "run_timestamp": analyzed_at,
                     "summary": summary.model_dump(),
-                })
+                }
+                if used_list and len(policy_ids) > 1:
+                    log_doc["policy_document_ids"] = policy_ids
+                log_coll.insert_one(log_doc)
             except Exception as e:
                 import logging
                 logging.getLogger("policy-compliance").warning("Failed to write v3 result: %s", e)

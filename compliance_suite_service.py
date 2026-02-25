@@ -332,6 +332,8 @@ class ComplianceSuiteService:
             gaps=gaps,
             summary=summary,
             retrieval_metadata=retrieval_metadata,
+            statute_chunk_ids_used=statute_chunk_ids_used[:500] if statute_chunk_ids_used else None,
+            run_types=["gap"],
         )
 
         if getattr(req, "save_results", True):
@@ -504,6 +506,8 @@ class ComplianceSuiteService:
             gaps=gaps,
             summary=summary,
             retrieval_metadata=retrieval_metadata,
+            statute_chunk_ids_used=statute_chunk_ids_used[:500] if statute_chunk_ids_used else None,
+            run_types=["gap_v2"],
         )
 
         if getattr(req, "save_results", True):

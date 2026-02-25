@@ -242,6 +242,133 @@ def detect_content_type(url: str) -> str:
         return ""
 
 
+# Shared JS for content extraction (used by Playwright, Puppeteer, Selenium)
+_EXTRACT_TEXT_JS = """() => {
+    const scripts = document.querySelectorAll('script, style, noscript');
+    scripts.forEach(el => el.remove());
+    const body = document.body;
+    if (!body) return '';
+    function getText(element) {
+        let text = '';
+        for (const node of element.childNodes) {
+            if (node.nodeType === Node.TEXT_NODE) {
+                text += node.textContent.trim() + ' ';
+            } else if (node.nodeType === Node.ELEMENT_NODE) {
+                const tagName = node.tagName.toLowerCase();
+                if (['h1', 'h2', 'h3', 'h4', 'h5', 'h6'].includes(tagName)) {
+                    text += '\\n\\n## ' + getText(node) + '\\n\\n';
+                } else if (['p', 'div', 'section', 'article'].includes(tagName)) {
+                    text += getText(node) + '\\n\\n';
+                } else if (tagName === 'li') {
+                    text += '- ' + getText(node) + '\\n';
+                } else if (tagName === 'br') {
+                    text += '\\n';
+                } else if (!['script', 'style', 'noscript'].includes(tagName)) {
+                    text += getText(node);
+                }
+            }
+        }
+        return text;
+    }
+    return getText(body).replace(/\\n{3,}/g, '\\n\\n').trim();
+}"""
+_EXTRACT_LINKS_JS = """() => {
+    const anchors = document.querySelectorAll('a[href]');
+    return Array.from(anchors)
+        .map(a => a.href)
+        .filter(href => href && href.startsWith('http'));
+}"""
+
+
+async def _playwright_crawl_async(start_url: str, depth: int, breadth: int) -> list[dict]:
+    """Crawl pages using Playwright (async implementation).
+
+    Args:
+        start_url: The URL to start crawling from
+        depth: How deep to follow links (1 = only start page)
+        breadth: Maximum number of pages to crawl
+
+    Returns:
+        List of page dicts with 'url', 'title', and 'markdown' keys
+    """
+    from playwright.async_api import async_playwright
+
+    logger.info("Playwright crawl starting: url=%s, depth=%d, breadth=%d", start_url, depth, breadth)
+
+    visited = set()
+    pages = []
+    to_visit = [(start_url, 0)]
+    base_parsed = urlparse(start_url)
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+        )
+        try:
+            context = await browser.new_context(
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            )
+            page = await context.new_page()
+
+            while to_visit and len(pages) < breadth:
+                current_url, current_depth = to_visit.pop(0)
+
+                parsed = urlparse(current_url)
+                normalized_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+                if normalized_url in visited:
+                    continue
+                visited.add(normalized_url)
+
+                logger.info("Playwright crawling: %s (depth=%d)", current_url, current_depth)
+
+                try:
+                    response = await page.goto(current_url, wait_until="networkidle", timeout=30000)
+
+                    if not response or response.status >= 400:
+                        logger.warning(
+                            "Playwright: Failed to load %s (status=%s)",
+                            current_url, response.status if response else "no response"
+                        )
+                        continue
+
+                    title = await page.title() or ""
+                    content = await page.evaluate(_EXTRACT_TEXT_JS)
+
+                    if content:
+                        pages.append({"url": current_url, "title": title, "markdown": content})
+                        logger.info("Playwright: Extracted %d chars from %s", len(content), current_url)
+
+                    if current_depth < depth - 1 and len(pages) < breadth:
+                        links = await page.evaluate(_EXTRACT_LINKS_JS)
+                        for link in links:
+                            link_parsed = urlparse(link)
+                            if link_parsed.netloc == base_parsed.netloc:
+                                normalized_link = f"{link_parsed.scheme}://{link_parsed.netloc}{link_parsed.path}"
+                                if normalized_link not in visited:
+                                    to_visit.append((link, current_depth + 1))
+
+                except Exception as page_exc:
+                    logger.warning("Playwright: Error crawling %s: %s", current_url, page_exc)
+                    continue
+
+            logger.info("Playwright crawl complete: %d pages extracted", len(pages))
+            return pages
+        finally:
+            await browser.close()
+
+
+def playwright_crawl(start_url: str, depth: int, breadth: int) -> list[dict]:
+    """Crawl pages using Playwright (sync wrapper)."""
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(_playwright_crawl_async(start_url, depth, breadth))
+    finally:
+        loop.close()
+
+
 async def _puppeteer_crawl_async(start_url: str, depth: int, breadth: int) -> list[dict]:
     """Crawl pages using Puppeteer (async implementation).
 
@@ -298,41 +425,7 @@ async def _puppeteer_crawl_async(start_url: str, depth: int, breadth: int) -> li
                 title = await page.title() or ""
 
                 # Extract text content from body
-                content = await page.evaluate('''() => {
-                    // Remove script and style elements
-                    const scripts = document.querySelectorAll('script, style, noscript');
-                    scripts.forEach(el => el.remove());
-
-                    // Get text content
-                    const body = document.body;
-                    if (!body) return '';
-
-                    // Get text with some structure preserved
-                    function getText(element) {
-                        let text = '';
-                        for (const node of element.childNodes) {
-                            if (node.nodeType === Node.TEXT_NODE) {
-                                text += node.textContent.trim() + ' ';
-                            } else if (node.nodeType === Node.ELEMENT_NODE) {
-                                const tagName = node.tagName.toLowerCase();
-                                if (['h1', 'h2', 'h3', 'h4', 'h5', 'h6'].includes(tagName)) {
-                                    text += '\\n\\n## ' + getText(node) + '\\n\\n';
-                                } else if (['p', 'div', 'section', 'article'].includes(tagName)) {
-                                    text += getText(node) + '\\n\\n';
-                                } else if (tagName === 'li') {
-                                    text += '- ' + getText(node) + '\\n';
-                                } else if (tagName === 'br') {
-                                    text += '\\n';
-                                } else if (!['script', 'style', 'noscript'].includes(tagName)) {
-                                    text += getText(node);
-                                }
-                            }
-                        }
-                        return text;
-                    }
-
-                    return getText(body).replace(/\\n{3,}/g, '\\n\\n').trim();
-                }''')
+                content = await page.evaluate(_EXTRACT_TEXT_JS)
 
                 if content:
                     pages.append({
@@ -344,12 +437,7 @@ async def _puppeteer_crawl_async(start_url: str, depth: int, breadth: int) -> li
 
                 # If we haven't reached max depth, extract links to follow
                 if current_depth < depth - 1 and len(pages) < breadth:
-                    links = await page.evaluate('''() => {
-                        const anchors = document.querySelectorAll('a[href]');
-                        return Array.from(anchors)
-                            .map(a => a.href)
-                            .filter(href => href && href.startsWith('http'));
-                    }''')
+                    links = await page.evaluate(_EXTRACT_LINKS_JS)
 
                     # Filter to same domain and add to queue
                     base_parsed = urlparse(start_url)
@@ -389,6 +477,91 @@ def puppeteer_crawl(start_url: str, depth: int, breadth: int) -> list[dict]:
         return loop.run_until_complete(_puppeteer_crawl_async(start_url, depth, breadth))
     finally:
         loop.close()
+
+
+def selenium_crawl(start_url: str, depth: int, breadth: int) -> list[dict]:
+    """Crawl pages using Selenium WebDriver.
+
+    Args:
+        start_url: The URL to start crawling from
+        depth: How deep to follow links (1 = only start page)
+        breadth: Maximum number of pages to crawl
+
+    Returns:
+        List of page dicts with 'url', 'title', and 'markdown' keys
+    """
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+
+    logger.info("Selenium crawl starting: url=%s, depth=%d, breadth=%d", start_url, depth, breadth)
+
+    visited = set()
+    pages = []
+    to_visit = [(start_url, 0)]
+    base_parsed = urlparse(start_url)
+
+    options = Options()
+    options.add_argument("--headless")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-setuid-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument(
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
+
+    driver = None
+    try:
+        driver = webdriver.Chrome(options=options)
+
+        while to_visit and len(pages) < breadth:
+            current_url, current_depth = to_visit.pop(0)
+
+            parsed = urlparse(current_url)
+            normalized_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+            if normalized_url in visited:
+                continue
+            visited.add(normalized_url)
+
+            logger.info("Selenium crawling: %s (depth=%d)", current_url, current_depth)
+
+            try:
+                driver.get(current_url)
+
+                # Check status via JavaScript (Selenium doesn't expose response status directly)
+                status = driver.execute_script(
+                    "return window.performance && window.performance.getEntriesByType('navigation')[0] "
+                    "? window.performance.getEntriesByType('navigation')[0].responseStatus : 200"
+                )
+                if status and status >= 400:
+                    logger.warning("Selenium: Failed to load %s (status=%s)", current_url, status)
+                    continue
+
+                title = driver.title or ""
+                content = driver.execute_script(f"return ({_EXTRACT_TEXT_JS})()")
+
+                if content:
+                    pages.append({"url": current_url, "title": title, "markdown": content})
+                    logger.info("Selenium: Extracted %d chars from %s", len(content), current_url)
+
+                if current_depth < depth - 1 and len(pages) < breadth:
+                    links = driver.execute_script(f"return ({_EXTRACT_LINKS_JS})()")
+                    for link in links:
+                        link_parsed = urlparse(link)
+                        if link_parsed.netloc == base_parsed.netloc:
+                            normalized_link = f"{link_parsed.scheme}://{link_parsed.netloc}{link_parsed.path}"
+                            if normalized_link not in visited:
+                                to_visit.append((link, current_depth + 1))
+
+            except Exception as page_exc:
+                logger.warning("Selenium: Error crawling %s: %s", current_url, page_exc)
+                continue
+
+        logger.info("Selenium crawl complete: %d pages extracted", len(pages))
+        return pages
+    finally:
+        if driver:
+            driver.quit()
 
 
 def download_pdf(url: str) -> bytes:
@@ -1127,7 +1300,7 @@ def ingest():
         "collection_name": collection_name,
         "mode": mode,
         "message": (
-            "Document loaded successfully. Use /vector-index endpoint to create "
+            "Document loaded successfully. Use /create-embeddings endpoint to create "
             "vector embeddings."
         ),
     }
@@ -1140,10 +1313,10 @@ def ingest():
     return jsonify(response_data)
 
 
-@core_bp.post("/vector-index")
+@core_bp.post("/create-embeddings")
 def index_document():
     """Index collection rows by embedding text from the specified column."""
-    logger.info("POST /vector-index - Starting document indexing")
+    logger.info("POST /create-embeddings - Starting document indexing")
     payload = request.get_json(silent=True) or {}
 
     # Get required parameters
@@ -1163,7 +1336,7 @@ def index_document():
                 source_query = json.loads(source_query_param)
             except json.JSONDecodeError as exc:
                 logger.warning(
-                    "POST /vector-index - Invalid JSON in source_query: %s",
+                    "POST /create-embeddings - Invalid JSON in source_query: %s",
                     str(exc),
                 )
                 return (
@@ -1171,15 +1344,15 @@ def index_document():
                     400,
                 )
         else:
-            logger.warning("POST /vector-index - source_query must be a JSON object")
+            logger.warning("POST /create-embeddings - source_query must be a JSON object")
             return jsonify({"error": "source_query must be a JSON object"}), 400
 
         if not isinstance(source_query, dict):
-            logger.warning("POST /vector-index - source_query must be a JSON object")
+            logger.warning("POST /create-embeddings - source_query must be a JSON object")
             return jsonify({"error": "source_query must be a JSON object"}), 400
 
     logger.info(
-        "POST /vector-index - Parameters: source_database_name=%s, "
+        "POST /create-embeddings - Parameters: source_database_name=%s, "
         "source_collection_name=%s, index_database_name=%s, "
         "index_collection_name=%s, text_column=%s",
         source_database_name,
@@ -1190,7 +1363,7 @@ def index_document():
     )
     if source_query:
         logger.info(
-            "POST /vector-index - source_query for %s.%s: %s",
+            "POST /create-embeddings - source_query for %s.%s: %s",
             source_database_name,
             source_collection_name,
             source_query,
@@ -1209,7 +1382,7 @@ def index_document():
 
     if missing_params:
         logger.warning(
-            "POST /vector-index - Missing required parameters: %s",
+            "POST /create-embeddings - Missing required parameters: %s",
             ", ".join(missing_params),
         )
         return jsonify({
@@ -1221,12 +1394,12 @@ def index_document():
     text_column = text_column.strip()
 
     logger.info(
-        "POST /vector-index - Source: %s.%s",
+        "POST /create-embeddings - Source: %s.%s",
         source_database_name,
         source_collection_name,
     )
     logger.info(
-        "POST /vector-index - Index target: %s.%s",
+        "POST /create-embeddings - Index target: %s.%s",
         index_database_name,
         index_collection_name,
     )
@@ -1238,7 +1411,7 @@ def index_document():
         model_name = get_embedding_model_name(index_database_name)
     if not model_name:
         logger.error(
-            "POST /vector-index - No embedding model configured for database: %s",
+            "POST /create-embeddings - No embedding model configured for database: %s",
             index_database_name,
         )
         return jsonify({
@@ -1250,7 +1423,7 @@ def index_document():
     source_docs = list(source_db[source_collection_name].find(source_query))
     if not source_docs:
         logger.warning(
-            "POST /vector-index - No documents found in %s.%s",
+            "POST /create-embeddings - No documents found in %s.%s",
             source_database_name,
             source_collection_name,
         )
@@ -1272,18 +1445,18 @@ def index_document():
 
     if not docs_to_index:
         logger.warning(
-            "POST /vector-index - No rows with %s found in %s.%s",
+            "POST /create-embeddings - No rows with %s found in %s.%s",
             text_column,
             source_database_name,
             source_collection_name,
         )
         return jsonify({"error": f"no rows with '{text_column}' to index"}), 400
 
-    logger.info("POST /vector-index - Loading embedding model: %s", model_name)
+    logger.info("POST /create-embeddings - Loading embedding model: %s", model_name)
     model = get_model(model_name)
 
     logger.info(
-        "POST /vector-index - Generating embeddings for %d rows",
+        "POST /create-embeddings - Generating embeddings for %d rows",
         len(chunk_texts),
     )
     embeddings = model.encode(
@@ -1314,7 +1487,7 @@ def index_document():
             )
     else:
         logger.info(
-            "POST /vector-index - Clearing existing index rows for %s.%s in %s.%s",
+            "POST /create-embeddings - Clearing existing index rows for %s.%s in %s.%s",
             source_database_name,
             source_collection_name,
             index_database_name,
@@ -1339,7 +1512,7 @@ def index_document():
                 }
             )
         logger.info(
-            "POST /vector-index - Inserting %d rows into %s.%s",
+            "POST /create-embeddings - Inserting %d rows into %s.%s",
             len(index_docs),
             index_database_name,
             index_collection_name,
@@ -1347,7 +1520,7 @@ def index_document():
         index_collection.insert_many(index_docs)
 
     logger.info(
-        "POST /vector-index - Successfully indexed %d rows",
+        "POST /create-embeddings - Successfully indexed %d rows",
         len(docs_to_index),
     )
     return jsonify(
@@ -1524,7 +1697,7 @@ def vector_search():
             return jsonify({"error": "filter must be a JSON object"}), 400
 
     if query_vector_param is None:
-        # Resolve embedding model and path from web-gather.embedding_model (same as /vector-index)
+        # Resolve embedding model and path from web-gather.embedding_model (same as /create-embeddings)
         if database == PRIVACY_COMPLIANCE_DB:
             model_name = get_application_embedding_model() or get_embedding_model_name(database)
         else:
@@ -2150,6 +2323,70 @@ Return only valid JSON with the subsections array."""
     })
 
 
+# Index job service (for background sub-vector-index workflow)
+_index_job_storage = None
+_flask_app = None
+
+
+def init_index_job(app, mongo):
+    """Initialize index job service with Flask app and MongoDB client."""
+    global _index_job_storage, _flask_app
+    from compliance_config import load_config
+    from index_job_service import IndexJobStorage
+
+    config = load_config()
+    _index_job_storage = IndexJobStorage(mongo, config)
+    _flask_app = app
+
+
+def _get_index_job_storage():
+    if _index_job_storage is None:
+        raise RuntimeError("Index job service not initialized; call init_index_job first")
+    return _index_job_storage
+
+
+@core_bp.post("/create-sub-vector-index")
+def create_sub_vector_index():
+    """Start a background job to create sub-vector indexes (subsections -> embeddings -> vector index).
+
+    Accepts document_type ('policy' or 'statute') and source_query. Returns job_id immediately.
+    Use GET /index-jobs/<job_id> to poll status.
+    """
+    logger.info("POST /create-sub-vector-index - Starting")
+    payload = request.get_json(silent=True) or {}
+    document_type = payload.get("document_type")
+    source_query = payload.get("source_query") or {}
+
+    if document_type not in ("policy", "statute"):
+        return jsonify({"error": "document_type must be 'policy' or 'statute'"}), 400
+
+    if not isinstance(source_query, dict):
+        return jsonify({"error": "source_query must be a JSON object"}), 400
+
+    try:
+        from index_job_service import start_sub_vector_index_job
+
+        job_storage = _get_index_job_storage()
+        job_id = start_sub_vector_index_job(
+            request_dict={"document_type": document_type, "source_query": source_query},
+            job_storage=job_storage,
+            flask_app=_flask_app,
+        )
+        return jsonify({"job_id": job_id, "status": "pending"}), 202
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@core_bp.get("/index-jobs/<job_id>")
+def get_index_job(job_id: str):
+    """Get index job status and result."""
+    job_storage = _get_index_job_storage()
+    job = job_storage.get_job(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    return jsonify(job)
+
+
 @core_bp.post("/create-chunks")
 def create_chunks():
     """Chunk source column with overlap and write to destination collection.
@@ -2743,24 +2980,29 @@ def crawl():
 
     pages = []
     crawl_method = None
-    puppeteer_error = None
+    browser_errors = []
 
-    # Try Puppeteer first
-    logger.info("POST /crawl - Attempting Puppeteer crawl first")
-    try:
-        puppeteer_pages = puppeteer_crawl(url, depth, breadth)
-        if puppeteer_pages:
-            pages = puppeteer_pages
-            crawl_method = "puppeteer"
-            logger.info("POST /crawl - Puppeteer crawl succeeded with %d pages", len(pages))
-        else:
-            logger.warning("POST /crawl - Puppeteer returned no pages, falling back to Firecrawl")
-            puppeteer_error = "no pages returned"
-    except Exception as exc:
-        logger.warning("POST /crawl - Puppeteer crawl failed: %s, falling back to Firecrawl", exc)
-        puppeteer_error = str(exc)
+    # Try Playwright, then Puppeteer, then Selenium
+    for method_name, crawl_fn in [
+        ("playwright", playwright_crawl),
+        ("puppeteer", puppeteer_crawl),
+        ("selenium", selenium_crawl),
+    ]:
+        logger.info("POST /crawl - Attempting %s crawl", method_name)
+        try:
+            candidate_pages = crawl_fn(url, depth, breadth)
+            if candidate_pages:
+                pages = candidate_pages
+                crawl_method = method_name
+                logger.info("POST /crawl - %s crawl succeeded with %d pages", method_name, len(pages))
+                break
+            logger.warning("POST /crawl - %s returned no pages", method_name)
+            browser_errors.append(f"{method_name}: no pages returned")
+        except Exception as exc:
+            logger.warning("POST /crawl - %s crawl failed: %s", method_name, exc)
+            browser_errors.append(f"{method_name}: {exc}")
 
-    # Fall back to Firecrawl if Puppeteer failed or returned no pages
+    # Fall back to Firecrawl if all browser methods failed or returned no pages
     if not pages:
         logger.info("POST /crawl - Attempting Firecrawl as fallback")
         try:
@@ -2786,7 +3028,7 @@ def crawl():
                 logger.info("POST /crawl - Firecrawl succeeded with %d pages", len(pages))
         except Exception as exc:
             logger.error("POST /crawl - Firecrawl also failed for URL %s: %s", url, exc)
-            error_msg = f"crawl failed - puppeteer: {puppeteer_error}, firecrawl: {exc}"
+            error_msg = f"crawl failed - {'; '.join(browser_errors)}; firecrawl: {exc}"
             return jsonify({"error": error_msg}), 500
 
     page_count = len(pages)
@@ -2808,8 +3050,8 @@ def crawl():
         if page_url:
             urls_crawled.append(page_url)
 
-    # Combine pages - handle both Puppeteer dicts and Firecrawl objects
-    if crawl_method == "puppeteer":
+    # Combine pages - handle browser dicts (playwright/puppeteer/selenium) vs Firecrawl objects
+    if crawl_method in ("playwright", "puppeteer", "selenium"):
         # Puppeteer returns dicts, combine directly
         combined_parts = []
         for p in pages:

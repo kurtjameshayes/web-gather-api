@@ -106,6 +106,7 @@ class ComplianceJobStorage:
 def build_gap_analysis_graph(
     run_gap_analysis_fn,
     job_storage: ComplianceJobStorage,
+    compliance_storage: Optional[Any] = None,
 ) -> Any:
     """Build LangGraph StateGraph for gap analysis job. Falls back to compliance_graph if langgraph not installed (Python 3.8)."""
     try:
@@ -123,13 +124,48 @@ def build_gap_analysis_graph(
         }
 
     async def run_gap_analysis_node(state: ComplianceJobState) -> ComplianceJobState:
-        """Execute gap analysis and store result."""
+        """Execute gap analysis; write compliance_results only when action completes successfully."""
         job_id = state["job_id"]
         request_dict = state.get("request") or {}
         try:
             req = GapAnalysisRequest.model_validate(request_dict)
             result = await run_gap_analysis_fn(req)
             result_dict = result.model_dump() if hasattr(result, "model_dump") else result
+
+            # Write compliance_results and run_log only after action completes successfully
+            if compliance_storage:
+                try:
+                    run_types = result_dict.get("run_types") or ["gap"]
+                    res_doc = {
+                        "policy_document_id": result_dict.get("policy_document_id"),
+                        "company_name": result_dict.get("company_name"),
+                        "applicable_jurisdictions": result_dict.get("applicable_jurisdictions", []),
+                        "gaps": result_dict.get("gaps", []),
+                        "summary": result_dict.get("summary", {}),
+                        "analyzed_at": result_dict.get("analyzed_at"),
+                        "run_types": run_types,
+                    }
+                    if result_dict.get("run_type"):
+                        res_doc["run_type"] = result_dict["run_type"]
+                    if result_dict.get("version"):
+                        res_doc["version"] = result_dict["version"]
+                    if result_dict.get("retrieval_metadata"):
+                        res_doc["retrieval_metadata"] = result_dict["retrieval_metadata"]
+                    await compliance_storage.write_compliance_result(res_doc)
+                    log_doc = {
+                        "policy_document_id": result_dict.get("policy_document_id"),
+                        "applicable_jurisdictions": result_dict.get("applicable_jurisdictions", []),
+                        "run_timestamp": result_dict.get("analyzed_at"),
+                        "statute_chunk_ids_used": result_dict.get("statute_chunk_ids_used") or [],
+                    }
+                    if result_dict.get("run_type"):
+                        log_doc["run_type"] = result_dict["run_type"]
+                    if result_dict.get("summary"):
+                        log_doc["summary"] = result_dict["summary"]
+                    await compliance_storage.write_compliance_run_log(log_doc)
+                except Exception as e:
+                    logger.warning("Failed to write compliance result/run_log for job %s: %s", job_id, e)
+
             job_storage.update_job_status(
                 job_id,
                 JOB_STATUS_COMPLETED,
@@ -167,13 +203,14 @@ def start_gap_analysis_job(
     request_dict: Dict[str, Any],
     job_storage: ComplianceJobStorage,
     run_gap_analysis_fn,
+    compliance_storage: Optional[Any] = None,
 ) -> str:
     """
     Create job, start it in background, return job_id.
     The job runs in a separate thread with its own event loop.
     """
     job_id = job_storage.create_job(JOB_TYPE_GAP_ANALYSIS, request_dict)
-    graph = build_gap_analysis_graph(run_gap_analysis_fn, job_storage)
+    graph = build_gap_analysis_graph(run_gap_analysis_fn, job_storage, compliance_storage)
 
     def run_in_thread():
         loop = asyncio.new_event_loop()
@@ -200,6 +237,7 @@ def start_gap_analysis_job(
 def build_health_score_graph(
     run_health_score_fn,
     job_storage: ComplianceJobStorage,
+    compliance_storage: Optional[Any] = None,
 ) -> Any:
     """Build LangGraph StateGraph for health score job. Falls back to compliance_graph if langgraph not installed (Python 3.8)."""
     try:
@@ -217,13 +255,31 @@ def build_health_score_graph(
         }
 
     async def run_health_score_node(state: ComplianceJobState) -> ComplianceJobState:
-        """Execute health score and store result."""
+        """Execute health score; write compliance_results only when action completes successfully."""
         job_id = state["job_id"]
         request_dict = state.get("request") or {}
         try:
             req = HealthScoreRequest.model_validate(request_dict)
             result = await run_health_score_fn(req)
             result_dict = result.model_dump() if hasattr(result, "model_dump") else result
+
+            # Write compliance_results only after action completes successfully
+            if compliance_storage:
+                try:
+                    res_doc = {
+                        "policy_document_id": result_dict.get("policy_document_id"),
+                        "company_name": result_dict.get("company_name"),
+                        "applicable_jurisdictions": result_dict.get("applicable_jurisdictions", []),
+                        "privacy_health_score": result_dict.get("privacy_health_score"),
+                        "score_breakdown": result_dict.get("score_breakdown", {}),
+                        "components": result_dict.get("components", {}),
+                        "analyzed_at": result_dict.get("analyzed_at"),
+                        "run_types": ["health_score"],
+                    }
+                    await compliance_storage.write_compliance_result(res_doc)
+                except Exception as e:
+                    logger.warning("Failed to write compliance result for job %s: %s", job_id, e)
+
             job_storage.update_job_status(
                 job_id,
                 JOB_STATUS_COMPLETED,
@@ -261,13 +317,14 @@ def start_health_score_job(
     request_dict: Dict[str, Any],
     job_storage: ComplianceJobStorage,
     run_health_score_fn,
+    compliance_storage: Optional[Any] = None,
 ) -> str:
     """
     Create job, start it in background, return job_id.
     The job runs in a separate thread with its own event loop.
     """
     job_id = job_storage.create_job(JOB_TYPE_HEALTH_SCORE, request_dict)
-    graph = build_health_score_graph(run_health_score_fn, job_storage)
+    graph = build_health_score_graph(run_health_score_fn, job_storage, compliance_storage)
 
     def run_in_thread():
         loop = asyncio.new_event_loop()

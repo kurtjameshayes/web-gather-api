@@ -7,7 +7,7 @@ from flask import Blueprint, jsonify, request
 from pydantic import ValidationError
 
 from compliance_job_service import start_gap_analysis_job
-from compliance_routes import _get_config, _get_gap_analysis_v3_service, _get_job_storage
+from compliance_routes import _get_config, _get_gap_analysis_v3_service, _get_job_storage, _get_suite_service
 from compliance_suite_schemas import GapAnalysisRequest
 from gap_analysis_service_v3 import GapAnalysisServiceV3Error
 from security import AuthorizationError, authorize_request
@@ -20,10 +20,17 @@ COMPLIANCE_V3_API_PREFIX = "/api/v3/compliance"
 
 
 def _start_v3_gap_analysis_job(request_dict: dict) -> str:
-    """Start v3 gap analysis in background."""
+    """Start v3 gap analysis in background. Job creates compliance_results only when action completes."""
     async def run_v3(req):
         return await _get_gap_analysis_v3_service().run(req)
-    return start_gap_analysis_job(request_dict, _get_job_storage(), run_v3)
+    request_dict = dict(request_dict)
+    request_dict["save_results"] = False
+    return start_gap_analysis_job(
+        request_dict,
+        _get_job_storage(),
+        run_v3,
+        compliance_storage=_get_suite_service()._storage,
+    )
 
 
 @compliance_v3_bp.post("/gap-analysis")

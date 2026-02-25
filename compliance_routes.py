@@ -30,7 +30,7 @@ from compliance_suite_schemas import (
 from compliance_job_service import ComplianceJobStorage, start_gap_analysis_job, start_health_score_job
 from compliance_suite_service import ComplianceSuiteService, ComplianceSuiteServiceError
 from gap_analysis_service_v3 import GapAnalysisServiceV3, GapAnalysisServiceV3Error
-from db import get_embedding_model_name, set_application_embedding_model
+from db import ensure_privacy_compliance_indexes, get_embedding_model_name, set_application_embedding_model
 from embedder import Embedder
 from llm_client import AnthropicLLMClient
 from rate_limiter import RateLimiter
@@ -54,6 +54,9 @@ _config: ComplianceConfig | None = None
 def init_compliance(mongo_client) -> None:
     global _service, _suite_service, _gap_analysis_v3_service, _job_storage, _config
     _config = load_config()
+
+    # Ensure MongoDB indexes on privacy-compliance collections (idempotent).
+    ensure_privacy_compliance_indexes(mongo_client, _config.compliance_database)
 
     # Resolve embedding model from web-gather for privacy-compliance; set app default for all vector queries.
     model_name = get_embedding_model_name(_config.compliance_database)
@@ -228,12 +231,15 @@ async def gap_analysis():
         return jsonify({"error": str(exc)}), 500
     try:
         if request_model.run_async:
-            # Start background job and return immediately once job has started
+            # Start background job and return immediately once job has started.
+            # Job creates compliance_results only when action completes (save_results=False).
             request_dict = request_model.model_dump(exclude={"run_async"})
+            request_dict["save_results"] = False
             job_id = start_gap_analysis_job(
                 request_dict=request_dict,
                 job_storage=_get_job_storage(),
                 run_gap_analysis_fn=_get_suite_service().gap_analysis,
+                compliance_storage=_get_suite_service()._storage,
             )
             return jsonify({
                 "job_id": job_id,
@@ -305,12 +311,15 @@ async def health_score():
         return jsonify({"error": str(exc)}), 500
     try:
         if request_model.run_async:
-            # Start background job and return immediately once job has started
+            # Start background job and return immediately once job has started.
+            # Job creates compliance_results only when action completes (save_results=False).
             request_dict = request_model.model_dump(exclude={"run_async"})
+            request_dict["save_results"] = False
             job_id = start_health_score_job(
                 request_dict=request_dict,
                 job_storage=_get_job_storage(),
                 run_health_score_fn=_get_suite_service().health_score,
+                compliance_storage=_get_suite_service()._storage,
             )
             return jsonify({
                 "job_id": job_id,

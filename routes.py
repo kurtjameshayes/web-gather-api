@@ -20,7 +20,7 @@ def build_openapi_spec():
             "version": "1.0.0",
             "description": (
                 "Gather, load, index, and search web documents. The /ingest "
-                "endpoint loads documents only - use /vector-index separately "
+                "endpoint loads documents only - use /create-embeddings separately "
                 "to create vector embeddings."
             ),
         },
@@ -217,8 +217,10 @@ def build_openapi_spec():
                 },
                 "GapAnalysisRequest": {
                     "type": "object",
+                    "description": "Provide policy_document_id (single) or policy_document_ids (list). At least one required. v3: policy_document_ids treated as single combined document for vector search.",
                     "properties": {
-                        "policy_document_id": {"type": "string"},
+                        "policy_document_id": {"type": "string", "description": "Single policy document ID."},
+                        "policy_document_ids": {"type": "array", "items": {"type": "string"}, "description": "v3: List of policy document IDs, treated as single combined document for vector search."},
                         "company_name": {"type": "string", "nullable": True},
                         "applicable_jurisdictions": {"type": "array", "items": {"type": "string"}},
                         "statute_document_id": {"type": "string", "description": "Optional filter for statute subchunks"},
@@ -228,7 +230,6 @@ def build_openapi_spec():
                         "num_rows": {"type": "integer", "minimum": 1, "description": "If set, limit to this many statute subchunks (partial run)"},
                         "run_async": {"type": "boolean", "default": True, "description": "If true (default), start background job and return job_id immediately (202). Use GET /jobs/{job_id} to poll. Set false for synchronous response."},
                     },
-                    "required": ["policy_document_id"],
                 },
                 "ComplianceJobResponse": {
                     "type": "object",
@@ -258,12 +259,17 @@ def build_openapi_spec():
                     "type": "object",
                     "properties": {
                         "policy_document_id": {"type": "string"},
+                        "policy_document_ids": {"type": "array", "items": {"type": "string"}, "nullable": True, "description": "Populated when request used policy_document_ids (v3)."},
                         "company_name": {"type": "string", "nullable": True},
                         "applicable_jurisdictions": {"type": "array", "items": {"type": "string"}},
                         "analyzed_at": {"type": "string"},
                         "gaps": {"type": "array", "items": {"$ref": "#/components/schemas/GapItem"}},
                         "summary": {"$ref": "#/components/schemas/GapSummary"},
                         "retrieval_metadata": {"$ref": "#/components/schemas/RetrievalMetadata"},
+                        "statute_chunk_ids_used": {"type": "array", "items": {"type": "string"}, "nullable": True, "description": "For job path: statute IDs used in run_log."},
+                        "run_types": {"type": "array", "items": {"type": "string"}, "nullable": True, "description": "e.g. [\"gap\"], [\"gap_v2\"], [\"gap_v3\"]."},
+                        "run_type": {"type": "string", "nullable": True, "description": "v3: gap_analysis_v3."},
+                        "version": {"type": "string", "nullable": True, "description": "v3: v3."},
                     },
                 },
                 "HealthScoreRequest": {
@@ -611,7 +617,7 @@ def build_openapi_spec():
                         "Supports both web pages (crawled via Firecrawl) and PDF "
                         "files (downloaded and parsed). PDF files are "
                         "automatically detected by URL extension or Content-Type "
-                        "header. Use /vector-index endpoint separately to "
+                        "header. Use /create-embeddings endpoint separately to "
                         "create vector embeddings."
                     ),
                     "requestBody": {
@@ -1043,7 +1049,7 @@ def build_openapi_spec():
                     },
                 }
             },
-            "/vector-index": {
+            "/create-embeddings": {
                 "post": {
                     "summary": "Index collection rows by embedding text column",
                     "description": "Index all rows in a source collection by embedding the text from the specified column and writing the results to an index collection. The embedding model is determined by the index_database_name.",
@@ -1417,7 +1423,7 @@ def build_openapi_spec():
                                                     "type": {"type": "string", "enum": ["vector"]},
                                                     "path": {"type": "string"},
                                                     "numDimensions": {"type": "number"},
-                                                    "similarity": {"type": "string", "enum": ["euclidean", "cosine", "dotProduct"]},
+                                                    "similarity": {"type": "string", "enum": ["cosine"], "description": "Must be cosine (euclidean/dotProduct not supported)."},
                                                 },
                                                 "required": ["type", "path", "numDimensions", "similarity"],
                                             },
@@ -1471,6 +1477,91 @@ def build_openapi_spec():
                         "200": {"description": "Index creation started"},
                         "400": {"description": "Missing embedding_model or invalid body"},
                         "500": {"description": "createSearchIndexes failed"},
+                    },
+                },
+            },
+            "/create-sub-vector-index": {
+                "post": {
+                    "summary": "Start background job to create sub-vector indexes",
+                    "description": "Creates subsections, embeddings, and vector index for statute or policy chunks. Runs as a background LangChain workflow. Returns job_id immediately. Use GET /index-jobs/{job_id} to poll status.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "document_type": {
+                                            "type": "string",
+                                            "enum": ["policy", "statute"],
+                                            "description": "Type of document to process",
+                                        },
+                                        "source_query": {
+                                            "type": "object",
+                                            "description": "Optional MongoDB query to filter source records",
+                                        },
+                                    },
+                                    "required": ["document_type"],
+                                }
+                            }
+                        },
+                    },
+                    "responses": {
+                        "202": {
+                            "description": "Job started",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "job_id": {"type": "string"},
+                                            "status": {"type": "string", "example": "pending"},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                        "400": {"description": "Invalid document_type or source_query"},
+                        "500": {"description": "Index job service not initialized"},
+                    },
+                },
+            },
+            "/index-jobs/{job_id}": {
+                "get": {
+                    "summary": "Get index job status",
+                    "description": "Returns job status, result (when completed), or error (when failed).",
+                    "parameters": [
+                        {
+                            "name": "job_id",
+                            "in": "path",
+                            "required": True,
+                            "schema": {"type": "string"},
+                            "description": "Job ID returned from POST /create-sub-vector-index",
+                        },
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Job status and result",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "job_id": {"type": "string"},
+                                            "job_type": {"type": "string"},
+                                            "status": {"type": "string", "enum": ["pending", "running", "completed", "failed"]},
+                                            "request": {"type": "object"},
+                                            "result": {"type": "object"},
+                                            "error": {"type": "string"},
+                                            "created_at": {"type": "string"},
+                                            "started_at": {"type": "string"},
+                                            "completed_at": {"type": "string"},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                        "404": {"description": "Job not found"},
                     },
                 },
             },
@@ -1792,11 +1883,25 @@ def build_openapi_spec():
                         "content": {
                             "application/json": {
                                 "schema": {"$ref": "#/components/schemas/GapAnalysisRequest"},
-                                "example": {
-                                    "policy_document_id": "doc-123",
-                                    "applicable_jurisdictions": ["CA", "VA"],
-                                    "num_rows": 10,
-                                    "save_results": True,
+                                "examples": {
+                                    "single": {
+                                        "summary": "Single policy document",
+                                        "value": {
+                                            "policy_document_id": "doc-123",
+                                            "applicable_jurisdictions": ["CA", "VA"],
+                                            "num_rows": 10,
+                                            "save_results": True,
+                                        },
+                                    },
+                                    "multiple": {
+                                        "summary": "Multiple policy documents (v3)",
+                                        "value": {
+                                            "policy_document_ids": ["doc-123", "doc-456"],
+                                            "applicable_jurisdictions": ["CA", "VA"],
+                                            "num_rows": 10,
+                                            "save_results": True,
+                                        },
+                                    },
                                 },
                             }
                         },
@@ -2097,7 +2202,7 @@ def build_openapi_spec():
             "/crawl": {
                 "post": {
                     "summary": "Crawl a URL with specified depth and breadth",
-                    "description": "Crawl a URL and return combined text from all pages visited. Use depth to control how many levels of links to follow, and breadth to limit the maximum number of pages crawled.",
+                    "description": "Crawl a URL and return combined text from all pages visited. Tries Playwright first, then Puppeteer, then Selenium, then Firecrawl on failure. Use depth to control how many levels of links to follow, and breadth to limit the maximum number of pages crawled.",
                     "requestBody": {
                         "required": True,
                         "content": {
@@ -2163,6 +2268,11 @@ def build_openapi_spec():
                                             "text_length": {
                                                 "type": "integer",
                                                 "description": "Length of the combined text in characters",
+                                            },
+                                            "crawl_method": {
+                                                "type": "string",
+                                                "description": "Method used: playwright, puppeteer, selenium, or firecrawl",
+                                                "enum": ["playwright", "puppeteer", "selenium", "firecrawl"],
                                             },
                                         },
                                     }

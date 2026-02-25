@@ -92,6 +92,7 @@ class ComplianceConfig:
     compliance_alerts_collection: str
     compliance_run_log_collection: str
     compliance_jobs_collection: str
+    index_jobs_collection: str
     statute_index_version_field: str
     max_statute_quote_chars: int
     default_jurisdictions: List[str]
@@ -171,6 +172,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "compliance_alerts_collection": "compliance_alerts",
     "compliance_run_log_collection": "compliance_run_log",
     "compliance_jobs_collection": "compliance_jobs",
+    "index_jobs_collection": "index-job",
     "statute_index_version_field": "indexed_at",
     "max_statute_quote_chars": 300,
     "default_jurisdictions": ["CA", "VA", "CO", "CT"],
@@ -330,6 +332,7 @@ def load_config() -> ComplianceConfig:
         compliance_alerts_collection=data.get("compliance_alerts_collection", DEFAULT_CONFIG["compliance_alerts_collection"]),
         compliance_run_log_collection=data.get("compliance_run_log_collection", DEFAULT_CONFIG["compliance_run_log_collection"]),
         compliance_jobs_collection=data.get("compliance_jobs_collection", DEFAULT_CONFIG["compliance_jobs_collection"]),
+        index_jobs_collection=data.get("index_jobs_collection", DEFAULT_CONFIG["index_jobs_collection"]),
         statute_index_version_field=data.get("statute_index_version_field", DEFAULT_CONFIG["statute_index_version_field"]),
         max_statute_quote_chars=_to_int(
             os.getenv("COMPLIANCE_MAX_STATUTE_QUOTE_CHARS"),

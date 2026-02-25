@@ -18,7 +18,8 @@ from db import (
 
 logger = logging.getLogger("web-gather-api")
 
-VALID_SIMILARITY = frozenset(("euclidean", "cosine", "dotproduct"))
+# All vector indexes use cosine; euclidean/dotProduct are not supported.
+VECTOR_INDEX_SIMILARITY = "cosine"
 
 # Will be initialized by app.py
 mongo_client = None
@@ -58,9 +59,9 @@ def _validate_embedding_model_document(payload: Any) -> tuple[dict | None, str |
             return None, f"fields[{i}].numDimensions must be a number"
         sim = f.get("similarity")
         if not sim or not isinstance(sim, str):
-            return None, f"fields[{i}].similarity is required and must be euclidean, cosine, or dotProduct"
-        if sim.lower() not in VALID_SIMILARITY:
-            return None, f"fields[{i}].similarity must be one of: euclidean, cosine, dotProduct"
+            return None, f"fields[{i}].similarity is required and must be cosine"
+        if sim.lower() != "cosine":
+            return None, f"fields[{i}].similarity must be cosine (euclidean and dotProduct are not supported)"
     return payload, None
 
 
@@ -142,6 +143,15 @@ def create_vector_index():
         return jsonify({
             "error": f"embedding_model for '{database_name}' has no valid 'fields' array for vector index."
         }), 400
+
+    # Force cosine similarity for all vector fields (euclidean/dotProduct not supported)
+    vector_fields: list[dict] = []
+    for f in fields:
+        if isinstance(f, dict) and f.get("type") == "vector":
+            vector_fields.append({**f, "similarity": VECTOR_INDEX_SIMILARITY})
+        else:
+            vector_fields.append(dict(f) if isinstance(f, dict) else f)
+    fields = vector_fields
 
     # Resolve filter fields: request body overrides embedding_model
     filter_field_defs: list[dict] = []

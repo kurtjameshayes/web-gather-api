@@ -50,7 +50,7 @@ anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 # Import and initialize modules
 from db import db_bp, init_db
-from core import core_bp, init_core
+from core import core_bp, init_core, init_index_job
 from util import util_bp, init_util
 from routes import routes_bp
 from compliance_routes import compliance_bp, init_compliance
@@ -74,6 +74,9 @@ app.register_blueprint(compliance_v2_bp, url_prefix="/api/v2/compliance")
 app.register_blueprint(compliance_v3_bp, url_prefix="/api/v3/compliance")
 # Also mount at root so POST /policy-statute-compliance works (Swagger/docs and legacy clients).
 app.register_blueprint(compliance_bp, url_prefix="", name="compliance_root")
+
+# Initialize index job service (requires app for test client in background workflow)
+init_index_job(app, mongo_client)
 
 
 @app.get("/")

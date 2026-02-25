@@ -9,6 +9,8 @@ anthropic
 pypdf
 requests
 pyppeteer
+playwright
+selenium
 cryptography
 pydantic
 pytest
