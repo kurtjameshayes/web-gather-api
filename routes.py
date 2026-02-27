@@ -1497,12 +1497,19 @@ def build_openapi_spec():
                                             "description": "Type of document to process",
                                         },
                                         "source_query": {
-                                            "type": "object",
+                                            "oneOf": [
+                                                {"type": "object", "description": "MongoDB query object"},
+                                                {"type": "string", "description": "JSON string of MongoDB query"},
+                                            ],
                                             "description": "Optional MongoDB query to filter source records",
                                         },
                                     },
                                     "required": ["document_type"],
-                                }
+                                },
+                                "example": {
+                                    "document_type": "statute",
+                                    "source_query": {},
+                                },
                             }
                         },
                     },

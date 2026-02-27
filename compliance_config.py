@@ -172,7 +172,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "compliance_alerts_collection": "compliance_alerts",
     "compliance_run_log_collection": "compliance_run_log",
     "compliance_jobs_collection": "compliance_jobs",
-    "index_jobs_collection": "index-job",
+    "index_jobs_collection": "index_job",
     "statute_index_version_field": "indexed_at",
     "max_statute_quote_chars": 300,
     "default_jurisdictions": ["CA", "VA", "CO", "CT"],

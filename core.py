@@ -1486,17 +1486,20 @@ def index_document():
                 },
             )
     else:
-        logger.info(
-            "POST /create-embeddings - Clearing existing index rows for %s.%s in %s.%s",
-            source_database_name,
-            source_collection_name,
-            index_database_name,
-            index_collection_name,
-        )
-        index_collection.delete_many({
+        delete_filter = {
             "source_database_name": source_database_name,
             "source_collection_name": source_collection_name,
-        })
+        }
+        if source_query:
+            delete_filter.update(source_query)
+        deleted = index_collection.delete_many(delete_filter)
+        if deleted.deleted_count:
+            logger.info(
+                "POST /create-embeddings - Removed %d existing index rows matching source_query in %s.%s",
+                deleted.deleted_count,
+                index_database_name,
+                index_collection_name,
+            )
         index_docs = []
         for doc, embedding, chunk_text in zip(docs_to_index, embeddings, chunk_texts):
             base_doc = {key: value for key, value in doc.items() if key != "_id"}
@@ -1872,6 +1875,7 @@ def create_subsections():
             base["source_id"] = str(doc["_id"])
 
         for subchunk_text in subchunks:
+            subchunk_text = " ".join(subchunk_text.split())
             record = {
                 **base,
                 subsection_column: subchunk_text,
@@ -1999,6 +2003,13 @@ def create_statute_subsections():
         source_coll = db[source_collection]
         dest_coll = db[destination_collection]
         docs = list(source_coll.find(source_query))
+        del_filter = source_query if source_query else {}
+        deleted = dest_coll.delete_many(del_filter)
+        if deleted.deleted_count:
+            logger.info(
+                "POST /create-statute-subsections - Removed %d existing subsections matching source_query",
+                deleted.deleted_count,
+            )
     except Exception as e:
         logger.exception("POST /create-statute-subsections - Failed to read source collection")
         return jsonify({"error": f"Failed to read source collection: {e!s}"}), 500
@@ -2215,6 +2226,13 @@ def create_policy_subsections():
         source_coll = db[source_collection]
         dest_coll = db[destination_collection]
         docs = list(source_coll.find(source_query))
+        del_filter = source_query if source_query else {}
+        deleted = dest_coll.delete_many(del_filter)
+        if deleted.deleted_count:
+            logger.info(
+                "POST /create-policy-subsections - Removed %d existing subsections matching source_query",
+                deleted.deleted_count,
+            )
     except Exception as e:
         logger.exception("POST /create-policy-subsections - Failed to read source collection")
         return jsonify({"error": f"Failed to read source collection: {e!s}"}), 500
@@ -2291,6 +2309,7 @@ Return only valid JSON with the subsections array."""
             sub_id = sub.get("identifier", "")
             if not sub_text and not sub_id:
                 continue
+            sub_text = " ".join(sub_text.split())
             record = {
                 **base,
                 subsection_column: sub_text,
@@ -2353,15 +2372,53 @@ def create_sub_vector_index():
     Use GET /index-jobs/<job_id> to poll status.
     """
     logger.info("POST /create-sub-vector-index - Starting")
-    payload = request.get_json(silent=True) or {}
-    document_type = payload.get("document_type")
+    raw = request.get_data(as_text=True) or ""
+    payload = request.get_json(silent=True, force=True) or {}
+    if not payload and raw.strip():
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            payload = None
+            try:
+                import json5
+                payload = json5.loads(raw)
+            except Exception:
+                pass
+            if not payload:
+                # Fallback: fix single-quoted keys/values (common in Swagger/copied JSON)
+                import re
+                fixed = re.sub(r"'([^']*)'\s*:\s*'([^']*)'", r'"\1": "\2"', raw)
+                fixed = re.sub(r"'\s*:\s*'", r'": "', fixed)
+                try:
+                    payload = json.loads(fixed)
+                except json.JSONDecodeError:
+                    payload = None
+            if not payload:
+                # #region agent log
+                try:
+                    import time as _t
+                    with open("/Users/kurthayes/Dev/AI/web-gather-api/.cursor/debug-1778b7.log", "a") as _f:
+                        _f.write(json.dumps({"sessionId": "1778b7", "location": "create_sub_vector_index", "message": "parse_failed", "data": {"raw_preview": raw[:600], "raw_repr": repr(raw[:200]), "json5_err": _j5err}, "timestamp": int(_t.time() * 1000)}) + "\n")
+                except Exception:
+                    pass
+                # #endregion
+                return jsonify({"error": "Invalid JSON in request body"}), 400
+    document_type_raw = payload.get("document_type")
     source_query = payload.get("source_query") or {}
 
+    if document_type_raw is None or not isinstance(document_type_raw, str):
+        return jsonify({"error": "document_type is required and must be 'policy' or 'statute'"}), 400
+    document_type = document_type_raw.strip().lower()
     if document_type not in ("policy", "statute"):
         return jsonify({"error": "document_type must be 'policy' or 'statute'"}), 400
 
+    if isinstance(source_query, str) and source_query.strip():
+        try:
+            source_query = json.loads(source_query)
+        except json.JSONDecodeError:
+            return jsonify({"error": "source_query must be valid JSON when provided as string"}), 400
     if not isinstance(source_query, dict):
-        return jsonify({"error": "source_query must be a JSON object"}), 400
+        source_query = {}
 
     try:
         from index_job_service import start_sub_vector_index_job
@@ -2732,13 +2789,13 @@ Use the identify_sections tool to report the sections you identified."""
             start_idx = max(0, start_line - 1)
             end_idx = min(total_lines, end_line)
             section_lines = lines[start_idx:end_idx]
-            parsed_text = "\n".join(section_lines).strip()
+            parsed_text = " ".join(" ".join(section_lines).split()).strip()
 
             parsed_doc.append({
                 "section": section.get("section"),
                 "code_name": section.get("code_name"),
                 "jurisdiction": section.get("jurisdiction"),
-                "parsed_header_text": section.get("parsed_header_text", ""),
+                "parsed_header_text": " ".join((section.get("parsed_header_text") or "").split()),
                 "parsed_text": parsed_text
             })
 
