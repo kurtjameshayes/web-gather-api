@@ -117,6 +117,11 @@ class ComplianceConfig:
     policy_embeddings_vector_index: str  # Vector index name for policy_embeddings
     policy_sub_embeddings_vector_index: str  # Vector index for policy_sub_embeddings (v1)
     gap_analysis_v3_prompt_path: str
+    # Gap analysis v4 (category-mapping-driven: statute_sub_topic_embeddings, policy_legal_embeddings)
+    statute_sub_topic_embeddings_collection: str
+    policy_legal_embeddings_collection: str
+    category_mapping_collection: str
+    gap_analysis_v4_prompt_path: str
 
 
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -198,8 +203,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # Subchunk gap analysis
     "statute_sub_embeddings_collection": "statute_sub_embeddings",
     "policy_sub_embeddings_collection": "policy_sub_embeddings",
-    "statute_subchunk_text_field": "subchunk_text",
-    "policy_subchunk_text_field": "subchunk_text",
+    "statute_subchunk_text_field": "sub_chunk_text",
+    "policy_subchunk_text_field": "sub_chunk_text",
     "statute_chunk_text_field": "chunk_text",
     # Gap analysis v3
     "gap_analysis_v3_top_k": 5,
@@ -208,6 +213,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "policy_embeddings_vector_index": "policy_embeddings_vector_index",
     "policy_sub_embeddings_vector_index": "policy_sub_embeddings_vector_index",
     "gap_analysis_v3_prompt_path": "prompts/gap_analysis_v3.yaml",
+    # Gap analysis v4
+    "statute_sub_topic_embeddings_collection": "statute_sub_topic_embeddings",
+    "policy_legal_embeddings_collection": "policy_legal_embeddings",
+    "category_mapping_collection": "category_mapping",
+    "gap_analysis_v4_prompt_path": "prompts/gap_analysis_v4.yaml",
 }
 
 
@@ -359,4 +369,8 @@ def load_config() -> ComplianceConfig:
         policy_embeddings_vector_index=data.get("policy_embeddings_vector_index", DEFAULT_CONFIG["policy_embeddings_vector_index"]),
         policy_sub_embeddings_vector_index=data.get("policy_sub_embeddings_vector_index", DEFAULT_CONFIG["policy_sub_embeddings_vector_index"]),
         gap_analysis_v3_prompt_path=data.get("gap_analysis_v3_prompt_path", DEFAULT_CONFIG["gap_analysis_v3_prompt_path"]),
+        statute_sub_topic_embeddings_collection=data.get("statute_sub_topic_embeddings_collection", DEFAULT_CONFIG["statute_sub_topic_embeddings_collection"]),
+        policy_legal_embeddings_collection=data.get("policy_legal_embeddings_collection", DEFAULT_CONFIG["policy_legal_embeddings_collection"]),
+        category_mapping_collection=data.get("category_mapping_collection", DEFAULT_CONFIG["category_mapping_collection"]),
+        gap_analysis_v4_prompt_path=data.get("gap_analysis_v4_prompt_path", DEFAULT_CONFIG["gap_analysis_v4_prompt_path"]),
     )

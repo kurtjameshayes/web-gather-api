@@ -160,7 +160,7 @@ class GapAnalysisServiceV3:
                 {"$vectorSearch": {**vs, "filter": policy_filter}},
                 {"$addFields": {"score": {"$meta": "vectorSearchScore"}}},
                 {"$limit": top_k},
-                {"$project": {"score": 1, pol_sub_f: 1, "text": 1, "parent_chunk_id": 1}},
+                {"$project": {"score": 1, pol_sub_f: 1, "sub_chunk_text": 1, "text": 1, "parent_chunk_id": 1}},
             ]
             try:
                 policy_results = list(policy_sub_coll.aggregate(pipe))
@@ -170,7 +170,7 @@ class GapAnalysisServiceV3:
                     {"$addFields": {"score": {"$meta": "vectorSearchScore"}}},
                     {"$match": policy_filter},
                     {"$limit": top_k},
-                    {"$project": {"score": 1, pol_sub_f: 1, "text": 1, "parent_chunk_id": 1}},
+                    {"$project": {"score": 1, pol_sub_f: 1, "sub_chunk_text": 1, "text": 1, "parent_chunk_id": 1}},
                 ]
                 policy_results = list(policy_sub_coll.aggregate(pipe_fb))
 
@@ -184,7 +184,7 @@ class GapAnalysisServiceV3:
                     if pid is not None:
                         parent_map[str(pid)] = (d.get(pol_chunk_f) or d.get("text") or "").strip()
             for r in policy_results:
-                sub_txt = (r.get(pol_sub_f) or r.get("text") or "").strip()
+                sub_txt = (r.get(pol_sub_f) or r.get("sub_chunk_text") or r.get("text") or "").strip()
                 parent_txt = parent_map.get(str(r.get("parent_chunk_id") or ""), "")
                 policy_matches.append((sub_txt, parent_txt))
 

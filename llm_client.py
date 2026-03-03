@@ -377,6 +377,56 @@ class AnthropicLLMClient:
             "_analysis_failed": False,
         }
 
+    async def gap_check_v4(
+        self,
+        reference_context: str,
+        statutory_requirement: str,
+        policy_text: str,
+        prompt_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """V4 gap analysis: Returns status, policy_quote, statute_quote, requirement_summary, conflict_description, confidence.
+
+        Uses REFERENCE_CONTEXT (definitions, applicability) + STATUTORY_REQUIREMENT + POLICY_TEXT.
+        Same output schema as gap_check_v3.
+        """
+        path = prompt_path or getattr(
+            self._config, "gap_analysis_v4_prompt_path", "prompts/gap_analysis_v4.yaml"
+        )
+        from prompt_loader import load_prompt_yaml, render_prompt
+
+        cfg = load_prompt_yaml(path)
+        prompt = render_prompt(
+            cfg["prompt"],
+            REFERENCE_CONTEXT=reference_context or "",
+            STATUTORY_REQUIREMENT=statutory_requirement or "",
+            POLICY_TEXT=policy_text or "",
+        )
+        out = await self._call_json(prompt)
+        if not out:
+            return {
+                "status": "missing",
+                "policy_quote": None,
+                "statute_quote": None,
+                "requirement_summary": "Requirement",
+                "conflict_description": None,
+                "confidence": "low",
+                "_analysis_failed": True,
+            }
+        status = (out.get("status") or "missing").lower()
+        if status not in ("addressed", "missing", "conflict", "partial", "ambiguous"):
+            status = "missing"
+        return {
+            "status": status,
+            "policy_quote": out.get("policy_quote") if out.get("policy_quote") else None,
+            "statute_quote": out.get("statute_quote") or "",
+            "requirement_summary": (out.get("requirement_summary") or "Requirement").strip(),
+            "conflict_description": out.get("gap_description") or out.get("conflict_description") or None,
+            "confidence": (out.get("confidence") or "low").lower()
+            if out.get("confidence") in ("high", "medium", "low")
+            else "low",
+            "_analysis_failed": False,
+        }
+
     async def gap_check_chunks(
         self,
         statute_chunk_text: str,

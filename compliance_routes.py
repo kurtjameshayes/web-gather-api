@@ -30,6 +30,7 @@ from compliance_suite_schemas import (
 from compliance_job_service import ComplianceJobStorage, start_gap_analysis_job, start_health_score_job
 from compliance_suite_service import ComplianceSuiteService, ComplianceSuiteServiceError
 from gap_analysis_service_v3 import GapAnalysisServiceV3, GapAnalysisServiceV3Error
+from gap_analysis_service_v4 import GapAnalysisServiceV4, GapAnalysisServiceV4Error
 from db import ensure_privacy_compliance_indexes, get_embedding_model_name, set_application_embedding_model
 from embedder import Embedder
 from llm_client import AnthropicLLMClient
@@ -47,6 +48,7 @@ compliance_bp = Blueprint("compliance", __name__)
 _service: ComplianceService | None = None
 _suite_service: ComplianceSuiteService | None = None
 _gap_analysis_v3_service: GapAnalysisServiceV3 | None = None
+_gap_analysis_v4_service: GapAnalysisServiceV4 | None = None
 _job_storage: ComplianceJobStorage | None = None
 _config: ComplianceConfig | None = None
 
@@ -117,6 +119,12 @@ def init_compliance(mongo_client) -> None:
         storage=storage,
         rate_limiter=rate_limiter,
     )
+    _gap_analysis_v4_service = GapAnalysisServiceV4(
+        mongo_client=mongo_client,
+        config=_config,
+        llm_client=llm_client,
+        rate_limiter=rate_limiter,
+    )
     _job_storage = ComplianceJobStorage(mongo_client, _config)
 
 
@@ -182,6 +190,12 @@ def _get_gap_analysis_v3_service() -> GapAnalysisServiceV3:
     if _gap_analysis_v3_service is None:
         raise RuntimeError("Gap analysis v3 service not initialized.")
     return _gap_analysis_v3_service
+
+
+def _get_gap_analysis_v4_service() -> GapAnalysisServiceV4:
+    if _gap_analysis_v4_service is None:
+        raise RuntimeError("Gap analysis v4 service not initialized.")
+    return _gap_analysis_v4_service
 
 
 def _get_job_storage() -> ComplianceJobStorage:

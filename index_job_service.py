@@ -163,7 +163,22 @@ def build_sub_vector_index_graph(
                             "subsection_column": "sub_chunk_text",
                         },
                     )
-                    # 2. create-embeddings
+                    # 2. create-statute-subtopics
+                    _run_pipeline_step(
+                        client,
+                        "create-statute-subtopics",
+                        "/create-statute-subtopics",
+                        {
+                            "column": "sub_chunk_text",
+                            "database": db,
+                            "destination_collection": "statute_subtopics",
+                            "parse_prompt": "",
+                            "source_collection": "statute_sub_chunks",
+                            "source_query": source_query,
+                            "subsection_column": "sub_chunk_text",
+                        },
+                    )
+                    # 3. create-embeddings
                     _run_pipeline_step(
                         client,
                         "create-embeddings",
@@ -177,7 +192,7 @@ def build_sub_vector_index_graph(
                             "text_column": "sub_chunk_text",
                         },
                     )
-                    # 3. create-vector-index
+                    # 4. create-vector-index
                     _run_pipeline_step(
                         client,
                         "create-vector-index",

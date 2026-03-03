@@ -56,6 +56,7 @@ from routes import routes_bp
 from compliance_routes import compliance_bp, init_compliance
 from compliance_routes_v2 import compliance_v2_bp
 from compliance_routes_v3 import compliance_v3_bp
+from compliance_routes_v4 import compliance_v4_bp
 
 # Initialize modules with required clients
 init_db(mongo_client)
@@ -72,6 +73,7 @@ app.register_blueprint(routes_bp)
 app.register_blueprint(compliance_bp, url_prefix="/api/compliance")
 app.register_blueprint(compliance_v2_bp, url_prefix="/api/v2/compliance")
 app.register_blueprint(compliance_v3_bp, url_prefix="/api/v3/compliance")
+app.register_blueprint(compliance_v4_bp, url_prefix="/api/v4/compliance")
 # Also mount at root so POST /policy-statute-compliance works (Swagger/docs and legacy clients).
 app.register_blueprint(compliance_bp, url_prefix="", name="compliance_root")
 

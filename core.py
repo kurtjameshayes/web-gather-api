@@ -1,6 +1,6 @@
 """Core endpoints for the Web Gather API.
 
-Includes endpoints: gather, ingest, parse-llm, gap-check, search, vector-search, create-paragraph-sections, create-statute-subsections, create-policy-subsections, create-chunks, index, and crawl.
+Includes endpoints: gather, ingest, parse-llm, gap-check, search, vector-search, create-paragraph-sections, create-statute-subsections, create-statute-subtopics, create-policy-subsections, create-chunks, index, and crawl.
 """
 from __future__ import annotations
 
@@ -38,6 +38,38 @@ logger = logging.getLogger("web-gather-api")
 mongo_client = None
 firecrawl_client = None
 anthropic_client = None
+
+
+def _warn_if_database_or_collection_not_found(
+    database: str,
+    source_collection: str,
+    log_prefix: str,
+) -> None:
+    """Log warnings if database or source collection are not found."""
+    if mongo_client is None:
+        return
+    try:
+        db_names = mongo_client.list_database_names()
+        if database not in db_names:
+            logger.warning(
+                "%s - Database %r not found. Available databases: %s",
+                log_prefix,
+                database,
+                sorted(db_names),
+            )
+            return
+        db = mongo_client[database]
+        coll_names = db.list_collection_names()
+        if source_collection not in coll_names:
+            logger.warning(
+                "%s - Source collection %r not found in database %r. Available collections: %s",
+                log_prefix,
+                source_collection,
+                database,
+                sorted(coll_names),
+            )
+    except Exception as e:
+        logger.warning("%s - Could not verify database/collections: %s", log_prefix, e)
 
 
 def _get_json_payload_or_error():
@@ -1472,18 +1504,19 @@ def index_document():
 
     if same_target:
         for doc, embedding, chunk_text in zip(docs_to_index, embeddings, chunk_texts):
+            set_fields = {
+                "embedding": embedding.tolist(),
+                text_column: chunk_text,  # Embedded text goes to text_column (e.g. subchunk_text)
+                "indexed_at": utc_now(),
+                "source_id": str(doc.get("_id")),
+                "source_database_name": source_database_name,
+                "source_collection_name": source_collection_name,
+            }
+            if doc.get("category") is not None:
+                set_fields["category"] = doc["category"]
             index_collection.update_one(
                 {"_id": doc["_id"]},
-                {
-                    "$set": {
-                        "embedding": embedding.tolist(),
-                        text_column: chunk_text,  # Embedded text goes to text_column (e.g. subchunk_text)
-                        "indexed_at": utc_now(),
-                        "source_id": str(doc.get("_id")),
-                        "source_database_name": source_database_name,
-                        "source_collection_name": source_collection_name,
-                    }
-                },
+                {"$set": set_fields},
             )
     else:
         delete_filter = {
@@ -1503,17 +1536,18 @@ def index_document():
         index_docs = []
         for doc, embedding, chunk_text in zip(docs_to_index, embeddings, chunk_texts):
             base_doc = {key: value for key, value in doc.items() if key != "_id"}
-            index_docs.append(
-                {
-                    **base_doc,
-                    "source_id": str(doc.get("_id")),
-                    text_column: chunk_text,  # Embedded text to text_column; chunk_text preserved from base_doc
-                    "embedding": embedding.tolist(),
-                    "indexed_at": utc_now(),
-                    "source_database_name": source_database_name,
-                    "source_collection_name": source_collection_name,
-                }
-            )
+            index_doc = {
+                **base_doc,
+                "source_id": str(doc.get("_id")),
+                text_column: chunk_text,  # Embedded text to text_column; chunk_text preserved from base_doc
+                "embedding": embedding.tolist(),
+                "indexed_at": utc_now(),
+                "source_database_name": source_database_name,
+                "source_collection_name": source_collection_name,
+            }
+            if doc.get("category") is not None:
+                index_doc["category"] = doc["category"]
+            index_docs.append(index_doc)
         logger.info(
             "POST /create-embeddings - Inserting %d rows into %s.%s",
             len(index_docs),
@@ -1841,6 +1875,10 @@ def create_subsections():
         logger.warning("POST /create-paragraph-sections - Missing required parameters: %s", missing)
         return jsonify({"error": f"Missing required parameters: {', '.join(missing)}"}), 400
 
+    _warn_if_database_or_collection_not_found(
+        database, source_collection, "POST /create-paragraph-sections",
+    )
+
     logger.info(
         "POST /create-paragraph-sections - %s.%s -> %s.%s column=%s subsection_column=%s source_query=%s",
         database, source_collection, database, destination_collection,
@@ -1905,16 +1943,10 @@ def create_subsections():
         "source_rows_skipped": source_rows_skipped,
     })
 
-
-# Default prompt for statute subsection extraction when parse_prompt is blank.
-# Sections are defined by alphabetic (a), (b), (c), (d) only. Numeric (1), (2), (8) are nested.
-STATUTE_SUBSECTION_DEFAULT_PROMPT = """You are a legal text parser specializing in statutory interpretation.
-
-Task:
-Parse the provided statute section into its subsections. Statute SECTIONS are defined ONLY by lowercase letters in parentheses: (a), (b), (c), (d), etc. Do NOT split on numeric markers like (1), (2), (3), (8)—those are nested subsections within a parent section and must be kept together.
+old = """
+Statute SECTIONS are defined ONLY by lowercase letters in parentheses: (a), (b), (c), (d), etc. Do NOT split on numeric markers like (1), (2), (3), (8)—those are nested subsections within a parent section and must be kept together.
 
 Example: Section (d) may contain (1) through (8) as nested items. Output ONE subsection for (d) that includes all of (1) through (8) as part of its text.
-
 Instructions:
 - Preserve the original statutory language verbatim. Do NOT summarize, paraphrase, or interpret.
 - Split ONLY at alphabetic section markers: (a), (b), (c), (d), (e), etc.
@@ -1923,20 +1955,162 @@ Instructions:
 - Maintain the original order of sections.
 - If the text has no clear alphabetic section markers, return a single subsection with the full text and identifier "(0)" or "()".
 
+"""
+
+# Default prompt for statute subsection extraction when parse_prompt is blank.
+# Sections are defined by alphabetic (a), (b), (c), (d) only. Numeric (1), (2), (8) are nested.
+STATUTE_SUBSECTION_DEFAULT_PROMPT = """You are a legal document classifier specializing in statutory interpretation.
+
+Task:
+Parse the provided statute section into its sections and categorize each section.
+Parse the document based on legal context. 
+
+Possible categories:
+Given a section of a state privacy statute,
+classify it into exactly one of the following categories.
+
+CATEGORIES:
+
+- "definitions": Sections that define terms used throughout the statute. These
+  establish the meaning of key concepts (e.g., "consumer," "personal data,"
+  "sensitive data") but impose no obligations or rights.
+
+- "applicability": Sections that define who the statute applies to, including
+  threshold requirements (e.g., number of consumers, revenue thresholds),
+  geographic scope, and entity exemptions. These determine whether an
+  organization falls under the statute but impose no specific duties.
+
+- "consumer_rights": Sections that establish rights consumers may exercise
+  against controllers, such as the right to access, delete, correct, or port
+  personal data, or the right to opt out of sale, targeted advertising, or
+  profiling.
+
+- "controller_duties": Sections that impose affirmative obligations on
+  controllers, such as providing privacy notices, limiting data collection,
+  conducting data protection assessments, establishing opt-out mechanisms,
+  or obtaining consent for sensitive data processing.
+
+- "processor_duties": Sections that impose obligations on processors, such as
+  contractual requirements, duty to assist controllers, confidentiality
+  obligations, or sub-processor management.
+
+- "enforcement": Sections that establish enforcement mechanisms, including
+  attorney general authority, civil penalties, cure periods, private right
+  of action (or lack thereof), and consumer complaint procedures.
+
+- "other": Sections that do not fit the above categories, such as severability
+  clauses, effective dates, or legislative findings.
+
+
+
+Instructions:
+- The document has line numbers at the start of each line (e.g., "1: ...", "2: ..."). Use these to identify section boundaries.
+- For each subsection, report start_line and end_line (1-indexed, inclusive) instead of copying the full text.
+- Preserve the original statutory language by referencing line ranges; do NOT summarize or paraphrase.
+- Maintain the original order of sections.
+- If the text has no clear alphabetic section markers, return a single subsection with start_line=1 and end_line=<last line>.
+
 Output Format:
-Return ONLY valid JSON with this exact structure (no surrounding text):
+Return ONLY valid JSON with this exact structure (no surrounding text). Use start_line and end_line to reference the text; do NOT include a "text" field:
 {
   "subsections": [
     {
-      "identifier": "(a)",
-      "text": "# 1798.105. Consumers' Right to Delete Personal Information (a) Full text of subsection (a)..."
+      "header_text": "Consumer Rights – Right to invoke consumer rights",
+      "identifier": "(1)",
+      "category": "consumer_rights",
+      "category_reasoning": "This section establishes the right to submit requests.",
+      "start_line": 1,
+      "end_line": 12
     },
     {
-      "identifier": "(b)",
-      "text": "# 1798.105. Consumers' Right to Delete Personal Information (b) Full text of subsection (b)..."
+      "header_text": "Controller obligations to comply with requests",
+      "identifier": "(2)",
+      "category": "controller_duties",
+      "category_reasoning": "This section imposes duties on controllers.",
+      "start_line": 13,
+      "end_line": 28
     }
   ]
 }"""
+
+# Default prompt for statute sub-topic extraction when parse_prompt is blank.
+# Identifies distinct compliance requirements (sub_topics) from statute sections.
+STATUTE_SUBTOPIC_DEFAULT_PROMPT = """You are a legal document analyst. Given a statute section that has already
+been classified into a primary category, identify the specific sub_topic
+that captures the distinct regulatory requirement.
+
+INSTRUCTIONS:
+
+1. Each sub_topic should represent a single, testable compliance requirement.
+   If a statute section contains multiple distinct requirements, return
+   multiple sub_topics.
+
+2. Sub_topic names should be:
+   - Lowercase with underscores (snake_case)
+   - Descriptive enough to distinguish from other sub_topics in the same
+     category
+   - Consistent across state statutes that impose similar requirements
+     (e.g., Virginia's and Kentucky's right to delete should both produce
+     "right_to_delete", not state-specific naming)
+
+3. For each sub_topic, provide a requirement_summary that captures what a
+   company must specifically do or provide to comply. This summary should
+   be concrete enough to evaluate against a privacy policy.
+
+4. Assign the policy_categories most likely to contain relevant language
+   for this sub_topic.
+
+Respond with valid JSON matching this schema:
+{
+  "sub_topics": [
+    {
+      "sub_topic": "<snake_case identifier>",
+      "requirement_summary": "<one sentence: what must the company do>",
+      "policy_categories": ["<primary>", "<secondary if applicable>"],
+      "requires_consent": <true if the requirement involves obtaining consent>,
+      "consumer_facing": <true if the requirement involves a disclosure or
+                          mechanism visible to consumers>
+    }
+  ]
+}
+
+COMMON SUB_TOPICS BY CATEGORY (use these when applicable, create new ones
+only when the requirement does not fit an existing sub_topic):
+
+consumer_rights:
+  - right_to_access: Consumer can request what personal data is held
+  - right_to_delete: Consumer can request deletion of personal data
+  - right_to_correct: Consumer can request correction of inaccurate data
+  - right_to_portability: Consumer can obtain their data in a portable format
+  - right_to_opt_out_sale: Consumer can opt out of sale of personal data
+  - right_to_opt_out_targeted_ads: Consumer can opt out of targeted advertising
+  - right_to_opt_out_profiling: Consumer can opt out of automated profiling
+  - right_to_appeal: Consumer can appeal a denied rights request
+  - right_to_nondiscrimination: Consumer cannot be penalized for exercising rights
+  - rights_request_process: How consumers submit and controller responds to requests
+
+controller_duties:
+  - privacy_notice: Must provide a clear and accessible privacy notice
+  - purpose_limitation: Must limit processing to disclosed purposes
+  - data_minimization: Must limit collection to what is adequate and necessary
+  - sensitive_data_consent: Must obtain opt-in consent for sensitive data
+  - child_data_consent: Must obtain parental consent for known children
+  - data_security: Must implement reasonable security practices
+  - data_protection_assessment: Must conduct assessments for high-risk processing
+  - opt_out_mechanism: Must provide universal opt-out recognition or mechanism
+  - response_timeline: Must respond to consumer requests within statutory period
+  - third_party_disclosure: Must disclose categories of third parties receiving data
+  - retention_disclosure: Must disclose retention periods or criteria
+
+processor_duties:
+  - contractual_requirements: Must have binding contract with controller
+  - duty_to_assist: Must assist controller in fulfilling consumer requests
+  - confidentiality: Must ensure personnel are bound by confidentiality
+  - sub_processor_management: Must obtain controller approval for sub-processors
+  - data_return_delete: Must return or delete data at end of relationship
+
+For categories "definitions" or "applicability" that do not impose testable compliance
+requirements, return an empty sub_topics array: {"sub_topics": []}."""
 
 
 @core_bp.post("/create-statute-subsections")
@@ -1992,6 +2166,10 @@ def create_statute_subsections():
         logger.warning("POST /create-statute-subsections - Missing required parameters: %s", missing)
         return jsonify({"error": f"Missing required parameters: {', '.join(missing)}"}), 400
 
+    _warn_if_database_or_collection_not_found(
+        database, source_collection, "POST /create-statute-subsections",
+    )
+
     logger.info(
         "POST /create-statute-subsections - %s.%s -> %s.%s column=%s subsection_column=%s",
         database, source_collection, database, destination_collection,
@@ -2030,15 +2208,21 @@ def create_statute_subsections():
             source_rows_skipped += 1
             continue
 
+        # Add line numbers for LLM to reference (1-indexed). Use same truncated text for extraction.
+        statute_truncated = text[:50000]
+        statute_lines = statute_truncated.split("\n")
+        numbered_lines = [f"{i + 1}: {line}" for i, line in enumerate(statute_lines)]
+        numbered_text = "\n".join(numbered_lines)
+
         user_message = f"""{base_instructions}
 
-Statute section to parse:
+Statute section to parse (each line is numbered for reference):
 
 <statute_section>
-{text[:50000]}
+{numbered_text}
 </statute_section>
 
-Return only valid JSON with the subsections array."""
+Return only valid JSON with the subsections array. Use start_line and end_line for each subsection."""
 
         try:
             response = anthropic_client.messages.create(
@@ -2066,11 +2250,15 @@ Return only valid JSON with the subsections array."""
 
         try:
             parsed = json.loads(raw_json)
-        except json.JSONDecodeError as e:
-            logger.warning("POST /create-statute-subsections - Invalid JSON from LLM: %s", e)
-            llm_errors += 1
-            source_rows_skipped += 1
-            continue
+        except json.JSONDecodeError:
+            try:
+                import json5
+                parsed = json5.loads(raw_json)
+            except Exception as e:
+                logger.warning("POST /create-statute-subsections - Invalid JSON from LLM: %s", e)
+                llm_errors += 1
+                source_rows_skipped += 1
+                continue
 
         subsections = parsed.get("subsections")
         if not isinstance(subsections, list) or not subsections:
@@ -2087,16 +2275,34 @@ Return only valid JSON with the subsections array."""
         if first_line.startswith("#"):
             chunk_header = first_line
 
+        # Original lines (unnumbered) for text extraction - must match what we sent to LLM
+        orig_lines = statute_lines
+        n_lines = len(orig_lines)
+
         for sub in subsections:
-            sub_text = sub.get("text", "")
             sub_id = sub.get("identifier", "")
+            sub_text = sub.get("text", "")
+
+            # Extract text from line range if start_line/end_line present
+            start_line = sub.get("start_line")
+            end_line = sub.get("end_line")
+            if start_line is not None and end_line is not None:
+                try:
+                    start_idx = max(0, int(start_line) - 1)
+                    end_idx = min(n_lines, int(end_line))
+                    if start_idx < end_idx:
+                        sub_text = " ".join(line.strip() for line in orig_lines[start_idx:end_idx] if line.strip())
+                except (TypeError, ValueError):
+                    pass
+
             if not sub_text and not sub_id:
                 continue
-            # Remove all linefeeds from subsection text (normalize to spaces)
+            # Normalize linefeeds to spaces
             sub_text = " ".join(sub_text.split())
             # Prepend chunk header if present and subsection does not already start with it
-            if chunk_header and not sub_text.strip().startswith("#"):
+            if chunk_header and sub_text and not sub_text.strip().startswith("#"):
                 sub_text = f"{chunk_header} {sub_text}".strip()
+
             record = {
                 **base,
                 subsection_column: sub_text,
@@ -2104,6 +2310,13 @@ Return only valid JSON with the subsections array."""
                 "subchunk_id": str(uuid.uuid4()),
                 column: text,
             }
+            # Optional metadata from LLM
+            if sub.get("header_text"):
+                record["header_text"] = str(sub["header_text"]).strip()
+            if sub.get("category"):
+                record["category"] = str(sub["category"]).strip()
+            if sub.get("category_reasoning"):
+                record["category_reasoning"] = str(sub["category_reasoning"]).strip()
             try:
                 dest_coll.insert_one(record)
                 records_inserted += 1
@@ -2129,15 +2342,343 @@ Return only valid JSON with the subsections array."""
     })
 
 
+@core_bp.post("/create-statute-subtopics")
+def create_statute_subtopics():
+    """Identify compliance sub_topics from statute sections using LLM and write to destination collection.
+
+    For each record in source_collection, reads the value from `column`, uses an LLM
+    to identify distinct regulatory sub_topics (testable compliance requirements).
+    Creates one record per sub_topic in destination_collection. Each destination
+    record includes all source columns except the split column, plus subsection_column
+    (the statute text for context), sub_topic, requirement_summary, policy_categories,
+    requires_consent, consumer_facing, and subchunk_id.
+
+    Optional parse_prompt: when provided, appended as additional parsing instructions.
+    When blank, uses the default prompt for statute sub-topic extraction.
+    """
+    logger.info("POST /create-statute-subtopics - Starting")
+    payload = request.get_json(silent=True) or {}
+    database = payload.get("database")
+    source_collection = payload.get("source_collection")
+    destination_collection = payload.get("destination_collection")
+    column = payload.get("column")
+    subsection_column = payload.get("subsection_column")
+    parse_prompt = payload.get("parse_prompt") or ""
+    source_query_param = payload.get("source_query")
+    source_query = {}
+    if source_query_param is not None:
+        if isinstance(source_query_param, dict):
+            source_query = source_query_param
+        elif isinstance(source_query_param, str) and source_query_param.strip():
+            try:
+                source_query = json.loads(source_query_param)
+            except json.JSONDecodeError as exc:
+                logger.warning("POST /create-statute-subtopics - Invalid JSON in source_query: %s", exc)
+                return jsonify({"error": f"Invalid JSON in source_query: {str(exc)}"}), 400
+        if not isinstance(source_query, dict):
+            source_query = {}
+
+    missing = []
+    if not database:
+        missing.append("database")
+    if not source_collection:
+        missing.append("source_collection")
+    if not destination_collection:
+        missing.append("destination_collection")
+    if not column:
+        missing.append("column")
+    if not subsection_column:
+        missing.append("subsection_column")
+
+    if missing:
+        logger.warning("POST /create-statute-subtopics - Missing required parameters: %s", missing)
+        return jsonify({"error": f"Missing required parameters: {', '.join(missing)}"}), 400
+
+    _warn_if_database_or_collection_not_found(
+        database, source_collection, "POST /create-statute-subtopics",
+    )
+
+    logger.info(
+        "POST /create-statute-subtopics - %s.%s -> %s.%s column=%s subsection_column=%s",
+        database, source_collection, database, destination_collection,
+        column, subsection_column,
+    )
+
+    try:
+        db = mongo_client[database]
+        source_coll = db[source_collection]
+        dest_coll = db[destination_collection]
+        docs = list(source_coll.find(source_query))
+        del_filter = source_query if source_query else {}
+        deleted = dest_coll.delete_many(del_filter)
+        if deleted.deleted_count:
+            logger.info(
+                "POST /create-statute-subtopics - Removed %d existing subtopics matching source_query",
+                deleted.deleted_count,
+            )
+    except Exception as e:
+        logger.exception("POST /create-statute-subtopics - Failed to read source collection")
+        return jsonify({"error": f"Failed to read source collection: {e!s}"}), 500
+
+    base_instructions = STATUTE_SUBTOPIC_DEFAULT_PROMPT
+    if parse_prompt.strip():
+        base_instructions = base_instructions.rstrip() + "\n\nAdditional parsing instructions:\n" + parse_prompt.strip()
+
+    records_inserted = 0
+    source_rows_processed = 0
+    source_rows_skipped = 0
+    llm_errors = 0
+    skip_empty_text = 0
+    skip_empty_subtopics = 0
+
+    logger.info("POST /create-statute-subtopics - Found %d source docs, column=%r", len(docs), column)
+
+    # Common text column names for statute collections (for fallback when column is wrong)
+    _text_col_candidates = ("sub_chunk_text", "chunk_text", "subchunk_text", "text")
+
+    for doc in docs:
+        raw = doc.get(column)
+        if (raw is None or (isinstance(raw, str) and not raw.strip())) and doc:
+            # Try fallback columns when requested column is empty
+            for cand in _text_col_candidates:
+                if cand != column:
+                    alt = doc.get(cand)
+                    if alt and (isinstance(alt, str) and alt.strip()):
+                        logger.info(
+                            "POST /create-statute-subtopics - Column %r empty, using fallback %r (doc has keys: %s)",
+                            column, cand, list(doc.keys())[:12],
+                        )
+                        raw = alt
+                        break
+        text = str(raw) if raw is not None else ""
+        if not text or not text.strip():
+            skip_empty_text += 1
+            source_rows_skipped += 1
+            if skip_empty_text <= 3:
+                logger.warning(
+                    "POST /create-statute-subtopics - Skipping doc (empty %r): doc has keys %s",
+                    column,
+                    list(doc.keys())[:15],
+                )
+            continue
+
+        category = doc.get("category")
+        category_context = ""
+        if category:
+            category_context = f"\n\nThe statute section has been pre-classified into category: {category}."
+
+        statute_truncated = text[:50000]
+        statute_lines = statute_truncated.split("\n")
+        numbered_lines = [f"{i + 1}: {line}" for i, line in enumerate(statute_lines)]
+        numbered_text = "\n".join(numbered_lines)
+
+        user_message = f"""{base_instructions}{category_context}
+
+Statute section to analyze (each line is numbered for reference):
+
+<statute_section>
+{numbered_text}
+</statute_section>
+
+Return only valid JSON with the sub_topics array."""
+
+        try:
+            response = anthropic_client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=8192,
+                messages=[{"role": "user", "content": user_message}],
+            )
+            content = []
+            for block in response.content:
+                if block.type == "text":
+                    content.append(block.text)
+            response_text = "".join(content)
+        except Exception as e:
+            logger.warning("POST /create-statute-subtopics - LLM call failed for doc: %s", e)
+            llm_errors += 1
+            source_rows_skipped += 1
+            continue
+
+        raw_json = extract_json_block(response_text)
+        if not raw_json:
+            logger.warning(
+                "POST /create-statute-subtopics - No JSON block in LLM response (len=%d). First 200 chars: %r",
+                len(response_text),
+                (response_text[:200] + "..." if len(response_text) > 200 else response_text),
+            )
+            llm_errors += 1
+            source_rows_skipped += 1
+            continue
+
+        try:
+            parsed = json.loads(raw_json)
+        except json.JSONDecodeError:
+            try:
+                import json5
+                parsed = json5.loads(raw_json)
+            except Exception as e:
+                logger.warning(
+                    "POST /create-statute-subtopics - Invalid JSON from LLM: %s. Snippet: %r",
+                    e,
+                    raw_json[:300] if raw_json else None,
+                )
+                llm_errors += 1
+                source_rows_skipped += 1
+                continue
+
+        sub_topics = parsed.get("sub_topics")
+        if sub_topics is None:
+            sub_topics = parsed.get("subtopics")
+        if not isinstance(sub_topics, list) or not sub_topics:
+            skip_empty_subtopics += 1
+            source_rows_skipped += 1
+            if skip_empty_subtopics <= 3:
+                logger.warning(
+                    "POST /create-statute-subtopics - Empty sub_topics for doc category=%r. Parsed keys: %s, sub_topics type=%s",
+                    doc.get("category"),
+                    list(parsed.keys()) if isinstance(parsed, dict) else "not-dict",
+                    type(sub_topics).__name__ if sub_topics is not None else "None",
+                )
+            continue
+
+        base = {k: v for k, v in doc.items() if k != column and k != "_id"}
+        if "_id" in doc:
+            base["source_id"] = str(doc["_id"])
+
+        statute_text = " ".join(text.split())
+
+        for st in sub_topics:
+            sub_topic = st.get("sub_topic")
+            if not sub_topic:
+                continue
+            record = {
+                **base,
+                subsection_column: statute_text,
+                "sub_topic": str(sub_topic).strip(),
+                "subchunk_id": str(uuid.uuid4()),
+            }
+            if doc.get("category") is not None:
+                record["category"] = str(doc["category"]).strip()
+            if st.get("requirement_summary") is not None:
+                record["requirement_summary"] = str(st["requirement_summary"]).strip()
+            if st.get("policy_categories") is not None:
+                cats = st["policy_categories"]
+                record["policy_categories"] = [str(c).strip() for c in cats] if isinstance(cats, list) else []
+            if "requires_consent" in st:
+                record["requires_consent"] = bool(st["requires_consent"])
+            if "consumer_facing" in st:
+                record["consumer_facing"] = bool(st["consumer_facing"])
+            try:
+                dest_coll.insert_one(record)
+                records_inserted += 1
+            except Exception as e:
+                logger.warning("POST /create-statute-subtopics - Failed to insert: %s", e)
+                break
+        source_rows_processed += 1
+
+    logger.info(
+        "POST /create-statute-subtopics - Inserted %d records, processed %d source rows, skipped %d, llm_errors=%d (skip_empty_text=%d, skip_empty_subtopics=%d)",
+        records_inserted, source_rows_processed, source_rows_skipped, llm_errors,
+        skip_empty_text, skip_empty_subtopics,
+    )
+    return jsonify({
+        "database": database,
+        "source_collection": source_collection,
+        "destination_collection": destination_collection,
+        "column": column,
+        "subsection_column": subsection_column,
+        "records_inserted": records_inserted,
+        "source_rows_processed": source_rows_processed,
+        "source_rows_skipped": source_rows_skipped,
+        "llm_errors": llm_errors,
+    })
+
+
 # Default prompt for policy subsection extraction when parse_prompt is blank.
 # Splits policy sections into logical chunks, excluding headers and irrelevant text.
-POLICY_SUBSECTION_DEFAULT_PROMPT = """You are a privacy policy parser specializing in compliance-relevant content.
+POLICY_SUBSECTION_DEFAULT_PROMPT = """
+You are a privacy policy parser. Given the full text of a company's privacy
+policy, segment it into distinct thematic sections and classify each one.
+
+INSTRUCTIONS:
+
+1. Read the entire policy text carefully before segmenting.
+
+2. Identify natural section boundaries using these signals:
+   - Explicit headings or subheadings in the text
+   - Shifts in topic even when no heading is present
+   - Numbered or lettered subsections that form a logical unit
+
+3. When the policy has clear headings, respect them as boundaries. When it
+   does not, infer boundaries based on topic shifts. Do not split a single
+   coherent topic across multiple sections.
+
+4. A single policy section may map to multiple categories. If so, assign the
+   PRIMARY category based on the dominant topic, and list secondary categories
+   in the "secondary_categories" field.
+
+5. The document has line numbers at the start of each line (e.g., "1: ...", "2: ...").
+   For each section, report start_line and end_line (1-indexed, inclusive) instead of
+   copying the full text. Do not include a "text" field.
+
+6. If a section does not fit any defined category, classify it as "other".
+
+Respond with valid JSON matching this schema (use start_line and end_line; no "text" field):
+{
+  "company_name": "<inferred company name or 'Unknown'>",
+  "sections": [
+    {
+      "section_index": 0,
+      "heading": "<original heading if present, otherwise a short generated label>",
+      "generated_heading": true,
+      "category": "<primary category>",
+      "secondary_categories": [],
+      "start_line": 1,
+      "end_line": 15
+    }
+  ]
+}
+
+CATEGORIES:
+- "data_collection": What personal data is collected, sources of collection,
+  categories of data gathered.
+
+- "data_use": Purposes for processing personal data, legal bases for
+  processing.
+
+- "data_sharing": Third parties data is shared with, categories of recipients,
+  sale of data, affiliate sharing.
+
+- "consumer_rights": How consumers can exercise rights (access, deletion,
+  correction, opt-out), verification procedures, response timelines.
+
+- "data_retention": How long data is kept, retention criteria, deletion
+  practices.
+
+- "data_security": Security measures, safeguards, breach notification
+  procedures.
+
+- "children": COPPA compliance, age verification, parental consent.
+
+- "cookies_tracking": Cookie usage, tracking technologies, advertising
+  practices, opt-out mechanisms.
+
+- "state_specific": State-by-state rights disclosures (California, Virginia,
+  Kentucky, etc.)
+
+- "contact": How to reach the company, DPO information, complaint procedures.
+
+- "updates": Policy change notification practices, effective dates.
+"""
+
+
+
+POLICY_SUBSECTION_DEFAULT_PROMPT_OLD = """You are a privacy policy parser specializing in compliance-relevant content.
 
 Task:
 Parse the provided policy section into logical subsections (chunks). Each chunk should be a coherent paragraph or block of text that is relevant to privacy policies and compliance.
 
 Instructions:
-- Do NOT include section headers (e.g. lines starting with #, such as "# What Information We Collect").
 - Do NOT include text that is irrelevant to privacy policies and compliance.
 - Split the body content into logical chunks by paragraph or semantic boundaries.
 - Preserve the original language verbatim. Do NOT summarize or paraphrase.
@@ -2215,6 +2756,10 @@ def create_policy_subsections():
         logger.warning("POST /create-policy-subsections - Missing required parameters: %s", missing)
         return jsonify({"error": f"Missing required parameters: {', '.join(missing)}"}), 400
 
+    _warn_if_database_or_collection_not_found(
+        database, source_collection, "POST /create-policy-subsections",
+    )
+
     logger.info(
         "POST /create-policy-subsections - %s.%s -> %s.%s column=%s subsection_column=%s",
         database, source_collection, database, destination_collection,
@@ -2253,15 +2798,21 @@ def create_policy_subsections():
             source_rows_skipped += 1
             continue
 
+        # Add line numbers for LLM to reference (1-indexed). Use same truncated text for extraction.
+        policy_truncated = text[:50000]
+        policy_lines = policy_truncated.split("\n")
+        numbered_lines = [f"{i + 1}: {line}" for i, line in enumerate(policy_lines)]
+        numbered_text = "\n".join(numbered_lines)
+
         user_message = f"""{base_instructions}
 
-Policy section to parse:
+Policy section to parse (each line is numbered for reference):
 
 <policy_section>
-{text[:50000]}
+{numbered_text}
 </policy_section>
 
-Return only valid JSON with the subsections array."""
+Return only valid JSON with the sections array. Use start_line and end_line for each section; do not include a "text" field."""
 
         try:
             response = anthropic_client.messages.create(
@@ -2289,13 +2840,18 @@ Return only valid JSON with the subsections array."""
 
         try:
             parsed = json.loads(raw_json)
-        except json.JSONDecodeError as e:
-            logger.warning("POST /create-policy-subsections - Invalid JSON from LLM: %s", e)
-            llm_errors += 1
-            source_rows_skipped += 1
-            continue
+        except json.JSONDecodeError:
+            try:
+                import json5
+                parsed = json5.loads(raw_json)
+            except Exception as e:
+                logger.warning("POST /create-policy-subsections - Invalid JSON from LLM: %s", e)
+                llm_errors += 1
+                source_rows_skipped += 1
+                continue
 
-        subsections = parsed.get("subsections")
+        # Support both "sections" (new prompt) and "subsections" (legacy)
+        subsections = parsed.get("sections") or parsed.get("subsections")
         if not isinstance(subsections, list) or not subsections:
             source_rows_skipped += 1
             continue
@@ -2304,9 +2860,25 @@ Return only valid JSON with the subsections array."""
         if "_id" in doc:
             base["source_id"] = str(doc["_id"])
 
+        orig_lines = policy_lines
+        n_lines = len(orig_lines)
+
         for sub in subsections:
+            sub_id = str(sub.get("identifier", "") or sub.get("section_index", "") or sub.get("heading", "")).strip()
             sub_text = sub.get("text", "")
-            sub_id = sub.get("identifier", "")
+
+            # Extract text from line range if start_line/end_line present
+            start_line = sub.get("start_line")
+            end_line = sub.get("end_line")
+            if start_line is not None and end_line is not None:
+                try:
+                    start_idx = max(0, int(start_line) - 1)
+                    end_idx = min(n_lines, int(end_line))
+                    if start_idx < end_idx:
+                        sub_text = " ".join(line.strip() for line in orig_lines[start_idx:end_idx] if line.strip())
+                except (TypeError, ValueError):
+                    pass
+
             if not sub_text and not sub_id:
                 continue
             sub_text = " ".join(sub_text.split())
@@ -2317,6 +2889,13 @@ Return only valid JSON with the subsections array."""
                 "subchunk_id": str(uuid.uuid4()),
                 column: text,
             }
+            if sub.get("heading"):
+                record["heading"] = str(sub["heading"]).strip()
+            # Category: prefer LLM's category when present, otherwise use source's category
+            if sub.get("category"):
+                record["category"] = str(sub["category"]).strip()
+            elif doc.get("category") is not None:
+                record["category"] = str(doc["category"]).strip()
             try:
                 dest_coll.insert_one(record)
                 records_inserted += 1
@@ -2394,14 +2973,6 @@ def create_sub_vector_index():
                 except json.JSONDecodeError:
                     payload = None
             if not payload:
-                # #region agent log
-                try:
-                    import time as _t
-                    with open("/Users/kurthayes/Dev/AI/web-gather-api/.cursor/debug-1778b7.log", "a") as _f:
-                        _f.write(json.dumps({"sessionId": "1778b7", "location": "create_sub_vector_index", "message": "parse_failed", "data": {"raw_preview": raw[:600], "raw_repr": repr(raw[:200]), "json5_err": _j5err}, "timestamp": int(_t.time() * 1000)}) + "\n")
-                except Exception:
-                    pass
-                # #endregion
                 return jsonify({"error": "Invalid JSON in request body"}), 400
     document_type_raw = payload.get("document_type")
     source_query = payload.get("source_query") or {}
@@ -2482,6 +3053,10 @@ def create_chunks():
     if missing:
         logger.warning("POST /create-chunks - Missing required parameters: %s", missing)
         return jsonify({"error": f"Missing required parameters: {', '.join(missing)}"}), 400
+
+    _warn_if_database_or_collection_not_found(
+        database, source_collection, "POST /create-chunks",
+    )
 
     try:
         chunk_size = int(chunk_size)

@@ -1,6 +1,6 @@
 """Database-related functions and endpoints.
 
-Includes functionality for endpoints: all-collections, all-databases, collections, count-documents, databases, documents, and write_to_collection.
+Includes functionality for endpoints: all-collections, all-databases, collections, count-documents, databases, documents, write_to_collection, and category-mapping.
 """
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ WEB_GATHER_DB = "web-gather"
 DOCUMENTS_COLLECTION = "documents"
 EMBEDDING_MODEL_COLLECTION = "embedding_model"
 PRIVACY_COMPLIANCE_DB = "privacy-compliance"
+CATEGORY_MAPPING_COLLECTION = "category_mapping"
 
 # Application default embedding model (set at startup from web-gather for privacy-compliance).
 application_embedding_model_name: str | None = None
@@ -366,3 +367,117 @@ def write_to_collection():
             "modified_count": result.modified_count,
             "message": "Document replaced successfully",
         })
+
+
+def _get_category_mapping_coll():
+    """Return the category_mapping collection in privacy-compliance database."""
+    return mongo_client[PRIVACY_COMPLIANCE_DB][CATEGORY_MAPPING_COLLECTION]
+
+
+def _serialize_doc(doc):
+    """Convert _id to string for JSON serialization. Mutates doc in place."""
+    if "_id" in doc:
+        doc["_id"] = str(doc["_id"])
+
+
+@db_bp.get("/category-mapping")
+def get_category_mapping():
+    """List category mappings. Optionally filter by statute_category or sub_topic."""
+    logger.info("GET /category-mapping - Listing category mappings")
+    statute_category = request.args.get("statute_category")
+    sub_topic = request.args.get("sub_topic")
+    query_param = request.args.get("query")
+
+    mongo_query = {}
+    if statute_category:
+        mongo_query["statute_category"] = statute_category
+    if sub_topic:
+        mongo_query["sub_topic"] = sub_topic
+    if query_param:
+        try:
+            mongo_query = json.loads(query_param)
+            if not isinstance(mongo_query, dict):
+                return jsonify({"error": "query must be a JSON object"}), 400
+        except json.JSONDecodeError as e:
+            return jsonify({"error": f"Invalid JSON in query: {str(e)}"}), 400
+
+    coll = _get_category_mapping_coll()
+    docs = list(coll.find(mongo_query))
+    for doc in docs:
+        _serialize_doc(doc)
+    logger.info("GET /category-mapping - Found %d documents", len(docs))
+    return jsonify({"category_mappings": docs})
+
+
+@db_bp.post("/category-mapping")
+def post_category_mapping():
+    """Create a new category mapping. Requires statute_category and policy_categories."""
+    logger.info("POST /category-mapping - Creating category mapping")
+    payload = request.get_json(silent=True) or {}
+    statute_category = payload.get("statute_category")
+    policy_categories = payload.get("policy_categories")
+    sub_topic = payload.get("sub_topic")
+    description = payload.get("description")
+
+    if not statute_category:
+        return jsonify({"error": "statute_category is required"}), 400
+    if not policy_categories:
+        return jsonify({"error": "policy_categories is required"}), 400
+    if not isinstance(policy_categories, list):
+        return jsonify({"error": "policy_categories must be an array"}), 400
+
+    doc = {
+        "statute_category": str(statute_category).strip(),
+        "policy_categories": [str(c).strip() for c in policy_categories],
+    }
+    if sub_topic is not None:
+        doc["sub_topic"] = str(sub_topic).strip()
+    if description is not None:
+        doc["description"] = str(description).strip()
+
+    coll = _get_category_mapping_coll()
+    result = coll.insert_one(doc)
+    logger.info("POST /category-mapping - Inserted document with _id: %s", result.inserted_id)
+    return jsonify({
+        "database": PRIVACY_COMPLIANCE_DB,
+        "collection": CATEGORY_MAPPING_COLLECTION,
+        "inserted_id": str(result.inserted_id),
+        "message": "Category mapping created successfully",
+    }), 201
+
+
+@db_bp.delete("/category-mapping")
+def delete_category_mapping():
+    """Delete category mappings. Use _id for single delete, or query for bulk delete."""
+    logger.info("DELETE /category-mapping - Deleting category mappings")
+    _id_param = request.args.get("_id")
+    query_param = request.args.get("query")
+
+    if _id_param and query_param:
+        return jsonify({"error": "Provide either _id or query, not both"}), 400
+    if not _id_param and not query_param:
+        return jsonify({"error": "Provide _id or query to specify which documents to delete"}), 400
+
+    mongo_query = {}
+    if _id_param:
+        try:
+            mongo_query["_id"] = ObjectId(_id_param)
+        except InvalidId:
+            return jsonify({"error": f"Invalid _id: {_id_param}"}), 400
+    else:
+        try:
+            mongo_query = json.loads(query_param)
+            if not isinstance(mongo_query, dict):
+                return jsonify({"error": "query must be a JSON object"}), 400
+        except json.JSONDecodeError as e:
+            return jsonify({"error": f"Invalid JSON in query: {str(e)}"}), 400
+
+    coll = _get_category_mapping_coll()
+    result = coll.delete_many(mongo_query)
+    logger.info("DELETE /category-mapping - Deleted %d documents", result.deleted_count)
+    return jsonify({
+        "database": PRIVACY_COMPLIANCE_DB,
+        "collection": CATEGORY_MAPPING_COLLECTION,
+        "deleted_count": result.deleted_count,
+        "message": "Category mapping(s) deleted successfully",
+    })

@@ -9,6 +9,7 @@ routes_bp = Blueprint("routes", __name__)
 COMPLIANCE_API_PREFIX = "/api/compliance"
 COMPLIANCE_V2_API_PREFIX = "/api/v2/compliance"
 COMPLIANCE_V3_API_PREFIX = "/api/v3/compliance"
+COMPLIANCE_V4_API_PREFIX = "/api/v4/compliance"
 
 
 def build_openapi_spec():
@@ -1049,6 +1050,142 @@ def build_openapi_spec():
                     },
                 }
             },
+            "/category-mapping": {
+                "get": {
+                    "summary": "List category mappings",
+                    "description": "Retrieve category mappings from privacy-compliance.category_mapping. Optionally filter by statute_category, sub_topic, or a full MongoDB query.",
+                    "parameters": [
+                        {
+                            "name": "statute_category",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "string"},
+                            "description": "Filter by statute_category (e.g. consumer_rights, controller_duties)",
+                        },
+                        {
+                            "name": "sub_topic",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "string"},
+                            "description": "Filter by sub_topic (e.g. data_minimization, privacy_notice)",
+                        },
+                        {
+                            "name": "query",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "string"},
+                            "description": "MongoDB query as JSON string to filter documents",
+                        },
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Category mappings list",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "category_mappings": {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "_id": {"type": "string"},
+                                                        "statute_category": {"type": "string"},
+                                                        "policy_categories": {"type": "array", "items": {"type": "string"}},
+                                                        "sub_topic": {"type": "string"},
+                                                        "description": {"type": "string"},
+                                                    },
+                                                },
+                                            }
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                        "400": {"description": "Invalid query JSON"},
+                    },
+                },
+                "post": {
+                    "summary": "Create a category mapping",
+                    "description": "Create a new category mapping in privacy-compliance.category_mapping. Maps statute categories and sub_topics to policy categories.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "statute_category": {"type": "string", "description": "Statute category (e.g. consumer_rights, controller_duties)"},
+                                        "policy_categories": {"type": "array", "items": {"type": "string"}, "description": "Policy categories this mapping applies to"},
+                                        "sub_topic": {"type": "string", "description": "Optional sub_topic for finer-grained mapping"},
+                                        "description": {"type": "string", "description": "Optional description"},
+                                    },
+                                    "required": ["statute_category", "policy_categories"],
+                                }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "201": {
+                            "description": "Category mapping created",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "database": {"type": "string"},
+                                            "collection": {"type": "string"},
+                                            "inserted_id": {"type": "string"},
+                                            "message": {"type": "string"},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                        "400": {"description": "Missing required parameters or invalid policy_categories"},
+                    },
+                },
+                "delete": {
+                    "summary": "Delete category mappings",
+                    "description": "Delete category mappings. Use _id to delete a single document, or query to delete multiple documents.",
+                    "parameters": [
+                        {
+                            "name": "_id",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "string"},
+                            "description": "MongoDB ObjectId of the document to delete",
+                        },
+                        {
+                            "name": "query",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "string"},
+                            "description": "MongoDB query as JSON string to delete multiple documents",
+                        },
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Deletion result",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "database": {"type": "string"},
+                                            "collection": {"type": "string"},
+                                            "deleted_count": {"type": "integer"},
+                                            "message": {"type": "string"},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                        "400": {"description": "Missing _id or query, or invalid parameters"},
+                    },
+                },
+            },
             "/create-embeddings": {
                 "post": {
                     "summary": "Index collection rows by embedding text column",
@@ -1238,7 +1375,7 @@ def build_openapi_spec():
             "/create-statute-subsections": {
                 "post": {
                     "summary": "Split statute section column into subsections using LLM",
-                    "description": "For each record in source_collection (optionally filtered by source_query), reads the column value and uses an LLM to identify statute sections by alphabetic markers (a), (b), (c), (d) only. Numeric markers (1), (2), (8) are nested and kept together. Each subsection includes the chunk header and has linefeeds removed. Creates one record per section in destination_collection. Optional source_query, parse_prompt.",
+                    "description": "For each record in source_collection (optionally filtered by source_query), reads the column value and uses an LLM to identify statute sections by alphabetic markers (a), (b), (c), (d) only. Numeric markers (1), (2), (8) are nested and kept together. The LLM returns line ranges (start_line, end_line) plus metadata (header_text, category, category_reasoning); the backend extracts subsection text from the original document by line numbers and writes one record per section to destination_collection. Optional source_query, parse_prompt.",
                     "requestBody": {
                         "required": True,
                         "content": {
@@ -1286,10 +1423,61 @@ def build_openapi_spec():
                     },
                 }
             },
+            "/create-statute-subtopics": {
+                "post": {
+                    "summary": "Identify compliance sub_topics from statute sections using LLM",
+                    "description": "For each record in source_collection (optionally filtered by source_query), reads the column value and uses an LLM to identify distinct regulatory sub_topics (testable compliance requirements). Creates one record per sub_topic in destination_collection. Each destination record includes sub_topic, requirement_summary, policy_categories, requires_consent, consumer_facing, and the statute text in subsection_column. Optional parse_prompt: when provided, appended as additional instructions; when blank, uses the default prompt.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "database": {"type": "string"},
+                                        "source_collection": {"type": "string", "description": "Source collection to read from"},
+                                        "destination_collection": {"type": "string", "description": "Collection to write sub_topics to"},
+                                        "column": {"type": "string", "description": "Source field containing statute text (e.g. chunk_text or sub_chunk_text)"},
+                                        "subsection_column": {"type": "string", "description": "Field name for statute text in destination (provides context per record)"},
+                                        "source_query": {"type": "object", "description": "Optional MongoDB query to filter source records."},
+                                        "parse_prompt": {"type": "string", "description": "Optional. Additional parsing instructions. When blank, uses default prompt."},
+                                    },
+                                    "required": ["database", "source_collection", "destination_collection", "column", "subsection_column"],
+                                }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Records inserted and counts",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "database": {"type": "string"},
+                                            "source_collection": {"type": "string"},
+                                            "destination_collection": {"type": "string"},
+                                            "column": {"type": "string"},
+                                            "subsection_column": {"type": "string"},
+                                            "records_inserted": {"type": "integer"},
+                                            "source_rows_processed": {"type": "integer"},
+                                            "source_rows_skipped": {"type": "integer"},
+                                            "llm_errors": {"type": "integer"},
+                                        },
+                                    }
+                                }
+                            }
+                        },
+                        "400": {"description": "Missing required parameters or invalid source_query JSON"},
+                        "500": {"description": "Failed to read source collection"},
+                    },
+                }
+            },
             "/create-policy-subsections": {
                 "post": {
                     "summary": "Split policy section column into subsections using LLM",
-                    "description": "For each record in source_collection (optionally filtered by source_query), reads the column value and uses an LLM to identify policy subsections (logical chunks). Excludes section headers (e.g. # What Information We Collect) and text irrelevant to privacy policies. Creates one record per subsection in destination_collection. Optional parse_prompt: when provided, appended as additional instructions; when blank, uses the default prompt.",
+                    "description": "For each record in source_collection (optionally filtered by source_query), reads the column value and uses an LLM to identify policy sections (logical chunks). The LLM returns line ranges (start_line, end_line) plus metadata (heading, category); the backend extracts subsection text from the original document by line numbers and writes one record per section to destination_collection. Optional parse_prompt: when provided, appended as additional instructions; when blank, uses the default prompt.",
                     "requestBody": {
                         "required": True,
                         "content": {
@@ -1902,6 +2090,68 @@ def build_openapi_spec():
                                     },
                                     "multiple": {
                                         "summary": "Multiple policy documents (v3)",
+                                        "value": {
+                                            "policy_document_ids": ["doc-123", "doc-456"],
+                                            "applicable_jurisdictions": ["CA", "VA"],
+                                            "num_rows": 10,
+                                            "save_results": True,
+                                        },
+                                    },
+                                },
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Gap analysis with gaps, summary, retrieval_metadata (statute_items_considered, statute_pairs_matched)",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/GapAnalysisResponse"},
+                                }
+                            },
+                        },
+                        "202": {
+                            "description": "Job started (when run_async=true). Returns job_id; poll GET /api/compliance/jobs/{job_id} for result.",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "job_id": {"type": "string"},
+                                            "status": {"type": "string", "example": "pending"},
+                                            "message": {"type": "string"},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                        "400": {"description": "Bad request (e.g. policy not indexed)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "404": {"description": "Policy not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "422": {"description": "Validation error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                    },
+                }
+            },
+            f"{COMPLIANCE_V4_API_PREFIX}/gap-analysis": {
+                "post": {
+                    "summary": "Gap analysis (v4)",
+                    "description": "Gap analysis v4: Category-mapping-driven approach. Uses statute_sub_topic_embeddings and policy_legal_embeddings with category_mapping to drive comparisons. Injects definitions and applicability as reference context when analyzing consumer_rights and controller_duties requirements.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/GapAnalysisRequest"},
+                                "examples": {
+                                    "single": {
+                                        "summary": "Single policy document",
+                                        "value": {
+                                            "policy_document_id": "doc-123",
+                                            "applicable_jurisdictions": ["CA", "VA"],
+                                            "num_rows": 10,
+                                            "save_results": True,
+                                        },
+                                    },
+                                    "multiple": {
+                                        "summary": "Multiple policy documents (v4)",
                                         "value": {
                                             "policy_document_ids": ["doc-123", "doc-456"],
                                             "applicable_jurisdictions": ["CA", "VA"],
