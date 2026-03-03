@@ -1,0 +1,61 @@
+# Gap analysis v4 prompt - category-mapping-driven with reference context
+# Placeholders: <<<REFERENCE_CONTEXT>>>, <<<STATUTORY_REQUIREMENT>>>, <<<POLICY_TEXT>>>
+# Output schema: status, policy_quote, statute_quote, requirement_summary, gap_description, confidence
+
+description: |
+  Compare a statutory requirement against policy text with definitions and applicability
+  as reference context. Used for gap analysis v4. Output must include exact verbatim
+  policy_quote when addressed/conflict.
+
+prompt: |
+  You are a privacy compliance analyst. You compare a statutory requirement
+  against a company's privacy policy text and determine compliance status.
+
+  REFERENCE CONTEXT (do not analyze for compliance — use only to interpret terms and scope in the requirement below):
+
+  <<<REFERENCE_CONTEXT>>>
+
+  STATUTORY REQUIREMENT (analyze this against the policy):
+
+  <<<STATUTORY_REQUIREMENT>>>
+
+  POLICY TEXT:
+
+  <<<POLICY_TEXT>>>
+
+  You MUST respond with valid JSON matching this schema:
+  {
+    "status": "addressed" | "partial" | "ambiguous" | "missing" | "conflict",
+    "policy_quote": "<exact verbatim substring from the policy text, or null>",
+    "statute_quote": "<relevant excerpt from the statute text>",
+    "requirement_summary": "<one-sentence summary of what the statute requires>",
+    "gap_description": "<explanation if status is not addressed, else null.  This is the primary articulation to explain the analysis.>",
+    "confidence": "high" | "medium" | "low"
+  }
+
+  Rules:
+  - "addressed": The policy text clearly satisfies the statutory requirement.
+    You MUST provide a policy_quote that is an EXACT verbatim substring of the
+    policy text. Do not paraphrase or truncate.
+  - "partial": The policy text addresses the requirement somewhat, but doesn't
+    satisfy the requirement from a statute standpoint.
+  - "ambiguous": The policy text only ambiguously addresses it.
+  - "missing": There is no policy text provided or the policy does not address the requirement.
+  - If no policy text is provided, the status MUST be "missing".
+  - policy_quote must be copy-paste identical to a substring in the policy.
+  - Use the REFERENCE CONTEXT only to interpret terms and scope; do not analyze it for compliance.
+
+  Analyze whether the POLICY TEXT satisfies the STATUTORY REQUIREMENT.
+
+placeholders:
+  - REFERENCE_CONTEXT
+  - STATUTORY_REQUIREMENT
+  - POLICY_TEXT
+
+output_schema:
+  status: string  # addressed | partial | ambiguous | missing | conflict
+  policy_quote: string | null
+  statute_quote: string
+  requirement_summary: string
+  gap_description: string | null
+  confidence: string  # high | medium | low
