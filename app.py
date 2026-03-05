@@ -8,6 +8,7 @@ import json
 import logging
 import os
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import anthropic
 from dotenv import load_dotenv
@@ -36,11 +37,22 @@ if not MONGODB_URI:
 if not ANTHROPIC_API_KEY:
     raise RuntimeError("ANTHROPIC_API_KEY is not set")
 
+
+def _mongo_uri_with_retry_writes(uri: str, retry_writes: bool) -> str:
+    """Set retryWrites in MongoDB URI. Avoids TransactionTooOld when false."""
+    parsed = urlparse(uri)
+    q = dict(parse_qsl(parsed.query or ""))
+    q["retryWrites"] = "true" if retry_writes else "false"
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, urlencode(q), parsed.fragment))
+
+
 logger.info("Initializing Flask application")
 app = Flask(__name__)
 
+# retryWrites=false avoids TransactionTooOld errors when connection pool is shared across concurrent requests
+_mongo_uri = _mongo_uri_with_retry_writes(MONGODB_URI, retry_writes=False)
 logger.info("Connecting to MongoDB at %s", MONGODB_URI.split("@")[-1] if "@" in MONGODB_URI else "localhost")
-mongo_client = MongoClient(MONGODB_URI)
+mongo_client = MongoClient(_mongo_uri)
 
 logger.info("Initializing Firecrawl client")
 firecrawl_client = FirecrawlApp(api_key=FIRECRAWL_API_KEY)
