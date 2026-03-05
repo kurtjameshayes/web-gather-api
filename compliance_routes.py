@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import logging
 import os
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from flask import Blueprint, jsonify, request
+from pymongo import MongoClient
 from pydantic import ValidationError
 
 from audit_logger import AuditLogger
@@ -125,7 +127,18 @@ def init_compliance(mongo_client) -> None:
         llm_client=llm_client,
         rate_limiter=rate_limiter,
     )
-    _job_storage = ComplianceJobStorage(mongo_client, _config)
+    # Job storage uses a dedicated client with retryWrites=false to avoid
+    # TransactionTooOld / session conflicts when the shared pool is used concurrently
+    _uri = os.getenv("MONGODB_URI", "")
+    if _uri:
+        _parsed = urlparse(_uri)
+        _q = dict(parse_qsl(_parsed.query or ""))
+        _q["retryWrites"] = "false"
+        _job_uri = urlunparse((_parsed.scheme, _parsed.netloc, _parsed.path, _parsed.params, urlencode(_q), _parsed.fragment))
+        _job_client = MongoClient(_job_uri)
+    else:
+        _job_client = mongo_client
+    _job_storage = ComplianceJobStorage(_job_client, _config)
 
 
 def set_compliance_service(service: ComplianceService | None, config: ComplianceConfig | None = None) -> None:
