@@ -21,8 +21,9 @@ COMPLIANCE_V3_API_PREFIX = "/api/v3/compliance"
 
 def _start_v3_gap_analysis_job(request_dict: dict) -> str:
     """Start v3 gap analysis in background. Job creates compliance_results only when action completes."""
+    svc = _get_gap_analysis_v3_service()
     async def run_v3(req):
-        return await _get_gap_analysis_v3_service().run(req)
+        return await svc.run(req)
     request_dict = dict(request_dict)
     request_dict["save_results"] = False
     return start_gap_analysis_job(

@@ -54,7 +54,7 @@ _config: ComplianceConfig | None = None
 
 
 def init_compliance(mongo_client) -> None:
-    global _service, _suite_service, _gap_analysis_v3_service, _job_storage, _config
+    global _service, _suite_service, _gap_analysis_v3_service, _gap_analysis_v4_service, _job_storage, _config
     _config = load_config()
 
     # Ensure MongoDB indexes on privacy-compliance collections (idempotent).

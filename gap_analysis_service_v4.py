@@ -107,6 +107,12 @@ class GapAnalysisServiceV4:
 
         # --- STEP 1: Load category mappings (consumer_rights, controller_duties only) ---
         mappings = list(cat_map_coll.find({"statute_category": {"$in": list(ANALYZE_CATEGORIES)}}))
+        # Fallback: user spec said "category_mappings" (plural); db.py uses "category_mapping" (singular)
+        if not mappings and self.cfg.category_mapping_collection == "category_mapping":
+            alt_coll = self.mongo[self.db]["category_mappings"]
+            mappings = list(alt_coll.find({"statute_category": {"$in": list(ANALYZE_CATEGORIES)}}))
+            if mappings:
+                cat_map_coll = alt_coll
         if not mappings:
             return self._empty_response(policy_ids, company_name, req, db_for_policy)
 
