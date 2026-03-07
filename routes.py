@@ -278,7 +278,7 @@ def build_openapi_spec():
                     "properties": {
                         "policy_document_id": {"type": "string"},
                         "applicable_jurisdictions": {"type": "array", "items": {"type": "string"}},
-                        "weights": {"type": "object"},
+                        "weights": {"type": "object", "description": "Optional. Override default weights. Keys: exact match on requirement_summary[:50], or substring (e.g. 'right to know'). Default weights prioritize consumer rights (1.5), controller duties (1.2), processor duties (1.0)."},
                         "database": {"type": "string"},
                         "policy_collection": {"type": "string"},
                         "save_results": {"type": "boolean", "default": True},
@@ -1474,10 +1474,10 @@ def build_openapi_spec():
                     },
                 }
             },
-            "/create-policy-subsections": {
+            "/parse-policy-subsections": {
                 "post": {
-                    "summary": "Split policy section column into subsections using LLM",
-                    "description": "For each record in source_collection (optionally filtered by source_query), reads the column value and uses an LLM to identify policy sections (logical chunks). The LLM returns line ranges (start_line, end_line) plus metadata (heading, category); the backend extracts subsection text from the original document by line numbers and writes one record per section to destination_collection. Optional parse_prompt: when provided, appended as additional instructions; when blank, uses the default prompt.",
+                    "summary": "Parse policy section column into subsections (return in response)",
+                    "description": "For each record in collection (optionally filtered by source_query), reads the column value and uses an LLM to identify policy sections (logical chunks). Returns subsections in the response instead of writing to a collection. Optional parse_prompt: when provided, appended as additional instructions.",
                     "requestBody": {
                         "required": True,
                         "content": {
@@ -1486,32 +1486,42 @@ def build_openapi_spec():
                                     "type": "object",
                                     "properties": {
                                         "database": {"type": "string"},
-                                        "source_collection": {"type": "string", "description": "Source collection to read from"},
-                                        "destination_collection": {"type": "string", "description": "Collection to write subsections to"},
+                                        "collection": {"type": "string", "description": "Source collection to read from"},
                                         "column": {"type": "string", "description": "Source field containing policy text (e.g. chunk_text)"},
-                                        "subsection_column": {"type": "string", "description": "Field name for subsection text in destination (e.g. subchunk_text)"},
                                         "source_query": {"type": "object", "description": "Optional MongoDB query to filter source records."},
                                         "parse_prompt": {"type": "string", "description": "Optional. Additional parsing instructions. When blank, uses default prompt."},
                                     },
-                                    "required": ["database", "source_collection", "destination_collection", "column", "subsection_column"],
+                                    "required": ["database", "collection", "column"],
                                 }
                             }
                         }
                     },
                     "responses": {
                         "200": {
-                            "description": "Records inserted and counts",
+                            "description": "Parsed subsections and counts",
                             "content": {
                                 "application/json": {
                                     "schema": {
                                         "type": "object",
                                         "properties": {
                                             "database": {"type": "string"},
-                                            "source_collection": {"type": "string"},
-                                            "destination_collection": {"type": "string"},
+                                            "collection": {"type": "string"},
                                             "column": {"type": "string"},
-                                            "subsection_column": {"type": "string"},
-                                            "records_inserted": {"type": "integer"},
+                                            "subsections": {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "source_id": {"type": "string"},
+                                                        "subsection_identifier": {"type": "string"},
+                                                        "subsection_text": {"type": "string"},
+                                                        "heading": {"type": "string"},
+                                                        "category": {"type": "string"},
+                                                        "start_line": {"type": "integer"},
+                                                        "end_line": {"type": "integer"},
+                                                    },
+                                                },
+                                            },
                                             "source_rows_processed": {"type": "integer"},
                                             "source_rows_skipped": {"type": "integer"},
                                             "llm_errors": {"type": "integer"},
@@ -1520,7 +1530,7 @@ def build_openapi_spec():
                                 }
                             }
                         },
-                        "400": {"description": "Missing required parameters"},
+                        "400": {"description": "Missing required parameters or invalid source_query JSON"},
                         "500": {"description": "Failed to read source collection"},
                     },
                 }
@@ -1671,7 +1681,7 @@ def build_openapi_spec():
             "/create-sub-vector-index": {
                 "post": {
                     "summary": "Start background job to create sub-vector indexes",
-                    "description": "Creates subsections, embeddings, and vector index for statute or policy chunks. Runs as a background LangChain workflow. Returns job_id immediately. Use GET /index-jobs/{job_id} to poll status.",
+                    "description": "Creates embeddings and vector index for statute or policy chunks. Statute: subsections -> subtopics -> statute_sub_embeddings. Policy: policy_chunks -> policy_legal_embeddings (no subsections). Runs as a background LangChain workflow. Returns job_id immediately. Use GET /index-jobs/{job_id} to poll status. For policy, provide source_query with document_id to index a specific policy.",
                     "requestBody": {
                         "required": True,
                         "content": {
@@ -1689,14 +1699,14 @@ def build_openapi_spec():
                                                 {"type": "object", "description": "MongoDB query object"},
                                                 {"type": "string", "description": "JSON string of MongoDB query"},
                                             ],
-                                            "description": "Optional MongoDB query to filter source records",
+                                            "description": "MongoDB query to filter source records. For policy, use {\"document_id\": \"<policy-uuid>\"} to index a specific policy.",
                                         },
                                     },
                                     "required": ["document_type"],
                                 },
                                 "example": {
-                                    "document_type": "statute",
-                                    "source_query": {},
+                                    "document_type": "policy",
+                                    "source_query": {"document_id": "b13529b1-c5ad-4e5d-8a44-d4557ebde360"},
                                 },
                             }
                         },
@@ -2221,7 +2231,7 @@ def build_openapi_spec():
             f"{COMPLIANCE_API_PREFIX}/health-score": {
                 "post": {
                     "summary": "Privacy health score",
-                    "description": "Compute a 0-100 privacy health score from gap analysis results.",
+                    "description": "Compute a 0-100 privacy health score from v4 gap analysis (statute_sub_topic_embeddings, policy_legal_embeddings, consumer_rights/controller_duties only). Uses standard weights by default: consumer rights (1.5), controller duties (1.2), processor duties (1.0). Override via weights in request or requirement_weights in config.",
                     "requestBody": {
                         "required": True,
                         "content": {

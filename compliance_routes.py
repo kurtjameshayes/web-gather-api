@@ -103,6 +103,12 @@ def init_compliance(mongo_client) -> None:
         audit_logger=audit_logger,
         rate_limiter=rate_limiter,
     )
+    _gap_analysis_v4_service = GapAnalysisServiceV4(
+        mongo_client=mongo_client,
+        config=_config,
+        llm_client=llm_client,
+        rate_limiter=rate_limiter,
+    )
     _suite_service = ComplianceSuiteService(
         mongo_client=mongo_client,
         config=_config,
@@ -110,6 +116,7 @@ def init_compliance(mongo_client) -> None:
         llm_client=llm_client,
         storage=storage,
         rate_limiter=rate_limiter,
+        gap_analysis_v4_service=_gap_analysis_v4_service,
     )
     _gap_analysis_v3_service = GapAnalysisServiceV3(
         mongo_client=mongo_client,
@@ -117,12 +124,6 @@ def init_compliance(mongo_client) -> None:
         retriever=retriever,
         llm_client=llm_client,
         storage=storage,
-        rate_limiter=rate_limiter,
-    )
-    _gap_analysis_v4_service = GapAnalysisServiceV4(
-        mongo_client=mongo_client,
-        config=_config,
-        llm_client=llm_client,
         rate_limiter=rate_limiter,
     )
     _job_storage = ComplianceJobStorage(mongo_client, _config)

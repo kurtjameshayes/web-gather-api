@@ -1,6 +1,6 @@
 """Core endpoints for the Web Gather API.
 
-Includes endpoints: gather, ingest, parse-llm, gap-check, search, vector-search, create-paragraph-sections, create-statute-subsections, create-statute-subtopics, create-policy-subsections, create-chunks, index, and crawl.
+Includes endpoints: gather, ingest, parse-llm, gap-check, search, vector-search, create-paragraph-sections, create-statute-subsections, create-statute-subtopics, parse-policy-subsections, create-chunks, index, and crawl.
 """
 from __future__ import annotations
 
@@ -2672,6 +2672,109 @@ CATEGORIES:
 """
 
 
+def _parse_policy_section_to_subsections(
+    text: str,
+    parse_prompt: str = "",
+    doc: dict | None = None,
+) -> tuple[list[dict], str | None]:
+    """Parse policy text into subsections using LLM. Returns (list of subsection dicts, error_msg).
+
+    Uses POLICY_SUBSECTION_DEFAULT_PROMPT. Each subsection dict has: subsection_identifier,
+    subsection_text, heading, category, start_line, end_line.
+    """
+    if not text or not text.strip():
+        return [], None
+    base_instructions = POLICY_SUBSECTION_DEFAULT_PROMPT
+    if parse_prompt.strip():
+        base_instructions = base_instructions.rstrip() + "\n\nAdditional parsing instructions:\n" + parse_prompt.strip()
+
+    policy_truncated = text[:50000]
+    policy_lines = policy_truncated.split("\n")
+    numbered_lines = [f"{i + 1}: {line}" for i, line in enumerate(policy_lines)]
+    numbered_text = "\n".join(numbered_lines)
+
+    user_message = f"""{base_instructions}
+
+Policy section to parse (each line is numbered for reference):
+
+<policy_section>
+{numbered_text}
+</policy_section>
+
+Return only valid JSON with the sections array. Use start_line and end_line for each section; do not include a "text" field."""
+
+    try:
+        response = anthropic_client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=8192,
+            messages=[{"role": "user", "content": user_message}],
+        )
+        content = []
+        for block in response.content:
+            if block.type == "text":
+                content.append(block.text)
+        response_text = "".join(content)
+    except Exception as e:
+        return [], str(e)
+
+    raw_json = extract_json_block(response_text)
+    if not raw_json:
+        return [], "No JSON block in LLM response"
+
+    try:
+        parsed = json.loads(raw_json)
+    except json.JSONDecodeError:
+        try:
+            import json5
+            parsed = json5.loads(raw_json)
+        except Exception as e:
+            return [], f"Invalid JSON from LLM: {e!s}"
+
+    subsections_raw = parsed.get("sections") or parsed.get("subsections")
+    if not isinstance(subsections_raw, list) or not subsections_raw:
+        return [], None
+
+    orig_lines = policy_lines
+    n_lines = len(orig_lines)
+    result = []
+
+    for sub in subsections_raw:
+        sub_id = str(sub.get("identifier", "") or sub.get("section_index", "") or sub.get("heading", "")).strip()
+        sub_text = sub.get("text", "")
+
+        start_line = sub.get("start_line")
+        end_line = sub.get("end_line")
+        if start_line is not None and end_line is not None:
+            try:
+                start_idx = max(0, int(start_line) - 1)
+                end_idx = min(n_lines, int(end_line))
+                if start_idx < end_idx:
+                    sub_text = " ".join(line.strip() for line in orig_lines[start_idx:end_idx] if line.strip())
+            except (TypeError, ValueError):
+                pass
+
+        if not sub_text and not sub_id:
+            continue
+        sub_text = " ".join(sub_text.split())
+
+        category = None
+        if sub.get("category"):
+            category = str(sub["category"]).strip()
+        elif doc and doc.get("category") is not None:
+            category = str(doc["category"]).strip()
+
+        heading = str(sub["heading"]).strip() if sub.get("heading") else None
+
+        result.append({
+            "subsection_identifier": sub_id,
+            "subsection_text": sub_text,
+            "heading": heading,
+            "category": category,
+            "start_line": start_line,
+            "end_line": end_line,
+        })
+    return result, None
+
 
 POLICY_SUBSECTION_DEFAULT_PROMPT_OLD = """You are a privacy policy parser specializing in compliance-relevant content.
 
@@ -2701,30 +2804,21 @@ Return ONLY valid JSON with this exact structure (no surrounding text):
 }"""
 
 
-@core_bp.post("/create-policy-subsections")
-def create_policy_subsections():
-    """Split policy section column into subsections using LLM and write to destination collection.
+@core_bp.post("/parse-policy-subsections")
+def parse_policy_subsections():
+    """Parse policy section column into subsections using LLM and return in response.
 
-    For each record in source_collection, reads the value from `column`, uses an LLM
-    to identify policy subsections (logical chunks), excluding section headers and
-    irrelevant text. Creates one record per subsection in destination_collection.
-    Each destination record includes all source columns except the split column,
-    plus subsection_column, subsection_identifier, and a unique subchunk_id (guid).
-
-    Optional source_query: MongoDB query to filter source records.
-    Optional parse_prompt: when provided, appended as additional parsing instructions.
-    When blank, uses the default prompt for policy subsection extraction.
+    Uses LLM to identify policy sections (logical chunks) and returns subsections
+    in the result instead of writing to a collection.
     """
-    logger.info("POST /create-policy-subsections - Starting")
+    logger.info("POST /parse-policy-subsections - Starting")
     payload, err = _get_json_payload_or_error()
     if err is not None:
         return err[0], err[1]
     payload = payload or {}
     database = payload.get("database")
-    source_collection = payload.get("source_collection")
-    destination_collection = payload.get("destination_collection")
+    collection = payload.get("collection")
     column = payload.get("column")
-    subsection_column = payload.get("subsection_column")
     parse_prompt = payload.get("parse_prompt") or ""
     source_query_param = payload.get("source_query")
     source_query = {}
@@ -2735,7 +2829,7 @@ def create_policy_subsections():
             try:
                 source_query = json.loads(source_query_param)
             except json.JSONDecodeError as exc:
-                logger.warning("POST /create-policy-subsections - Invalid JSON in source_query: %s", exc)
+                logger.warning("POST /parse-policy-subsections - Invalid JSON in source_query: %s", exc)
                 return jsonify({"error": f"Invalid JSON in source_query: {str(exc)}"}), 400
         if not isinstance(source_query, dict):
             source_query = {}
@@ -2743,50 +2837,33 @@ def create_policy_subsections():
     missing = []
     if not database:
         missing.append("database")
-    if not source_collection:
-        missing.append("source_collection")
-    if not destination_collection:
-        missing.append("destination_collection")
+    if not collection:
+        missing.append("collection")
     if not column:
         missing.append("column")
-    if not subsection_column:
-        missing.append("subsection_column")
 
     if missing:
-        logger.warning("POST /create-policy-subsections - Missing required parameters: %s", missing)
+        logger.warning("POST /parse-policy-subsections - Missing required parameters: %s", missing)
         return jsonify({"error": f"Missing required parameters: {', '.join(missing)}"}), 400
 
     _warn_if_database_or_collection_not_found(
-        database, source_collection, "POST /create-policy-subsections",
+        database, collection, "POST /parse-policy-subsections",
     )
 
     logger.info(
-        "POST /create-policy-subsections - %s.%s -> %s.%s column=%s subsection_column=%s",
-        database, source_collection, database, destination_collection,
-        column, subsection_column,
+        "POST /parse-policy-subsections - %s.%s column=%s",
+        database, collection, column,
     )
 
     try:
         db = mongo_client[database]
-        source_coll = db[source_collection]
-        dest_coll = db[destination_collection]
+        source_coll = db[collection]
         docs = list(source_coll.find(source_query))
-        del_filter = source_query if source_query else {}
-        deleted = dest_coll.delete_many(del_filter)
-        if deleted.deleted_count:
-            logger.info(
-                "POST /create-policy-subsections - Removed %d existing subsections matching source_query",
-                deleted.deleted_count,
-            )
     except Exception as e:
-        logger.exception("POST /create-policy-subsections - Failed to read source collection")
+        logger.exception("POST /parse-policy-subsections - Failed to read source collection")
         return jsonify({"error": f"Failed to read source collection: {e!s}"}), 500
 
-    base_instructions = POLICY_SUBSECTION_DEFAULT_PROMPT
-    if parse_prompt.strip():
-        base_instructions = base_instructions.rstrip() + "\n\nAdditional parsing instructions:\n" + parse_prompt.strip()
-
-    records_inserted = 0
+    all_subsections = []
     source_rows_processed = 0
     source_rows_skipped = 0
     llm_errors = 0
@@ -2798,123 +2875,40 @@ def create_policy_subsections():
             source_rows_skipped += 1
             continue
 
-        # Add line numbers for LLM to reference (1-indexed). Use same truncated text for extraction.
-        policy_truncated = text[:50000]
-        policy_lines = policy_truncated.split("\n")
-        numbered_lines = [f"{i + 1}: {line}" for i, line in enumerate(policy_lines)]
-        numbered_text = "\n".join(numbered_lines)
-
-        user_message = f"""{base_instructions}
-
-Policy section to parse (each line is numbered for reference):
-
-<policy_section>
-{numbered_text}
-</policy_section>
-
-Return only valid JSON with the sections array. Use start_line and end_line for each section; do not include a "text" field."""
-
-        try:
-            response = anthropic_client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=8192,
-                messages=[{"role": "user", "content": user_message}],
-            )
-            content = []
-            for block in response.content:
-                if block.type == "text":
-                    content.append(block.text)
-            response_text = "".join(content)
-        except Exception as e:
-            logger.warning("POST /create-policy-subsections - LLM call failed for doc: %s", e)
+        subsections, parse_err = _parse_policy_section_to_subsections(text, parse_prompt, doc)
+        if parse_err is not None:
+            logger.warning("POST /parse-policy-subsections - %s for doc: %s", parse_err, doc.get("_id"))
             llm_errors += 1
             source_rows_skipped += 1
             continue
-
-        raw_json = extract_json_block(response_text)
-        if not raw_json:
-            logger.warning("POST /create-policy-subsections - No JSON block in LLM response")
-            llm_errors += 1
+        if not subsections:
             source_rows_skipped += 1
             continue
 
-        try:
-            parsed = json.loads(raw_json)
-        except json.JSONDecodeError:
-            try:
-                import json5
-                parsed = json5.loads(raw_json)
-            except Exception as e:
-                logger.warning("POST /create-policy-subsections - Invalid JSON from LLM: %s", e)
-                llm_errors += 1
-                source_rows_skipped += 1
-                continue
-
-        # Support both "sections" (new prompt) and "subsections" (legacy)
-        subsections = parsed.get("sections") or parsed.get("subsections")
-        if not isinstance(subsections, list) or not subsections:
-            source_rows_skipped += 1
-            continue
-
-        base = {k: v for k, v in doc.items() if k != column and k != "_id"}
-        if "_id" in doc:
-            base["source_id"] = str(doc["_id"])
-
-        orig_lines = policy_lines
-        n_lines = len(orig_lines)
-
+        source_id = str(doc["_id"]) if doc.get("_id") else None
         for sub in subsections:
-            sub_id = str(sub.get("identifier", "") or sub.get("section_index", "") or sub.get("heading", "")).strip()
-            sub_text = sub.get("text", "")
-
-            # Extract text from line range if start_line/end_line present
-            start_line = sub.get("start_line")
-            end_line = sub.get("end_line")
-            if start_line is not None and end_line is not None:
-                try:
-                    start_idx = max(0, int(start_line) - 1)
-                    end_idx = min(n_lines, int(end_line))
-                    if start_idx < end_idx:
-                        sub_text = " ".join(line.strip() for line in orig_lines[start_idx:end_idx] if line.strip())
-                except (TypeError, ValueError):
-                    pass
-
-            if not sub_text and not sub_id:
-                continue
-            sub_text = " ".join(sub_text.split())
-            record = {
-                **base,
-                subsection_column: sub_text,
-                "subsection_identifier": sub_id,
-                "subchunk_id": str(uuid.uuid4()),
-                column: text,
+            out = {
+                "subsection_identifier": sub["subsection_identifier"],
+                "subsection_text": sub["subsection_text"],
+                "heading": sub.get("heading"),
+                "category": sub.get("category"),
+                "start_line": sub.get("start_line"),
+                "end_line": sub.get("end_line"),
             }
-            if sub.get("heading"):
-                record["heading"] = str(sub["heading"]).strip()
-            # Category: prefer LLM's category when present, otherwise use source's category
-            if sub.get("category"):
-                record["category"] = str(sub["category"]).strip()
-            elif doc.get("category") is not None:
-                record["category"] = str(doc["category"]).strip()
-            try:
-                dest_coll.insert_one(record)
-                records_inserted += 1
-            except Exception as e:
-                logger.warning("POST /create-policy-subsections - Failed to insert: %s", e)
-                break
+            if source_id:
+                out["source_id"] = source_id
+            all_subsections.append(out)
         source_rows_processed += 1
 
     logger.info(
-        "POST /create-policy-subsections - Inserted %d records, processed %d source rows, skipped %d, llm_errors=%d",
-        records_inserted, source_rows_processed, source_rows_skipped, llm_errors,
+        "POST /parse-policy-subsections - %d subsections, processed %d rows, skipped %d, llm_errors=%d",
+        len(all_subsections), source_rows_processed, source_rows_skipped, llm_errors,
     )
     return jsonify({
         "database": database,
-        "source_collection": source_collection,
-        "destination_collection": destination_collection,
+        "collection": collection,
         "column": column,
-        "subsection_column": subsection_column,
-        "records_inserted": records_inserted,
+        "subsections": all_subsections,
         "source_rows_processed": source_rows_processed,
         "source_rows_skipped": source_rows_skipped,
         "llm_errors": llm_errors,

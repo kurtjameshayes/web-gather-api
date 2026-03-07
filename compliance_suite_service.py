@@ -104,6 +104,7 @@ class ComplianceSuiteService:
         llm_client: AnthropicLLMClient,
         storage: ComplianceStorage,
         rate_limiter: RateLimiter,
+        gap_analysis_v4_service: Any = None,
     ) -> None:
         self._mongo_client = mongo_client
         self._config = config
@@ -111,6 +112,7 @@ class ComplianceSuiteService:
         self._llm_client = llm_client
         self._storage = storage
         self._rate_limiter = rate_limiter
+        self._gap_analysis_v4_service = gap_analysis_v4_service
         self._semaphore = asyncio.Semaphore(config.llm_concurrency)
         self._database = config.compliance_database
         self._retrieval_database = (config.statute_database or "").strip() or config.compliance_database
@@ -545,7 +547,11 @@ class ComplianceSuiteService:
             policy_collection=req.policy_collection,
             save_results=req.save_results,
         )
-        gap_result = await self.gap_analysis(gap_req)
+        # Use v4 gap analysis (statute_sub_topic_embeddings, policy_legal_embeddings, consumer_rights/controller_duties)
+        if self._gap_analysis_v4_service is not None:
+            gap_result = await self._gap_analysis_v4_service.run(gap_req)
+        else:
+            gap_result = await self.gap_analysis(gap_req)
 
         if not gap_result.gaps:
             return HealthScoreResponse(
@@ -563,10 +569,23 @@ class ComplianceSuiteService:
         weighted_sum = 0.0
         j_weight_sum: Dict[str, float] = {}
         j_weight_addressed: Dict[str, float] = {}
+
+        def _get_weight(requirement_summary: str) -> float:
+            """Resolve weight: exact match on first 50 chars, else longest substring match, else 1.0."""
+            exact_key = requirement_summary[:50]
+            if exact_key in weights:
+                return weights[exact_key]
+            req_lower = requirement_summary.lower()
+            # Sort keys by length descending so longer matches win (e.g. "right to delete" before "right to")
+            for key in sorted(weights.keys(), key=len, reverse=True):
+                if key.lower() in req_lower:
+                    return weights[key]
+            return 1.0
+
         for g in gap_result.gaps:
             if g.analysis_failed:
                 continue
-            w = weights.get(g.requirement_summary[:50], 1.0)
+            w = _get_weight(g.requirement_summary)
             total_weight += w
             if g.status == "addressed":
                 weighted_sum += w

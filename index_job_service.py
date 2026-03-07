@@ -145,7 +145,8 @@ def build_sub_vector_index_graph(
             with flask_app.app_context():
                 client = flask_app.test_client()
 
-                db = "privacy-compliance"
+                cfg = job_storage._config
+                db = cfg.compliance_database
 
                 if document_type == DOCUMENT_TYPE_STATUTE:
                     # 1. create-statute-subsections
@@ -206,42 +207,27 @@ def build_sub_vector_index_graph(
                     )
 
                 elif document_type == DOCUMENT_TYPE_POLICY:
-                    # 1. create-policy-subsections
-                    _run_pipeline_step(
-                        client,
-                        "create-policy-subsections",
-                        "/create-policy-subsections",
-                        {
-                            "column": "chunk_text",
-                            "database": db,
-                            "destination_collection": "policy_sub_chunks",
-                            "parse_prompt": "",
-                            "source_collection": "policy_chunks",
-                            "source_query": source_query,
-                            "subsection_column": "sub_chunk_text",
-                        },
-                    )
-                    # 2. create-embeddings
+                    # 1. create-embeddings: policy_chunks -> policy_legal_embeddings
                     _run_pipeline_step(
                         client,
                         "create-embeddings",
                         "/create-embeddings",
                         {
-                            "index_collection_name": "policy_sub_embeddings",
-                            "index_database_name": db,
-                            "source_collection_name": "policy_sub_chunks",
                             "source_database_name": db,
+                            "source_collection_name": cfg.policy_chunks_collection,
+                            "index_database_name": db,
+                            "index_collection_name": cfg.policy_legal_embeddings_collection,
                             "source_query": source_query,
-                            "text_column": "sub_chunk_text",
+                            "text_column": "chunk_text",
                         },
                     )
-                    # 3. create-vector-index
+                    # 2. create-vector-index
                     _run_pipeline_step(
                         client,
                         "create-vector-index",
                         "/create-vector-index",
                         {
-                            "collection_name": "policy_sub_embeddings",
+                            "collection_name": cfg.policy_legal_embeddings_collection,
                             "database_name": db,
                             "filter_fields": ["document_id"],
                             "index_name": "vector_index",
