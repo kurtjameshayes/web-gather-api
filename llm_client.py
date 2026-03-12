@@ -668,6 +668,43 @@ class AnthropicLLMClient:
         }
 
 
+    async def consumer_rights_router(
+        self,
+        request_type: str,
+        request_type_label: str,
+        policy_text: str,
+        statute_context: str,
+        jurisdictions: str,
+        prompt_path: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Generate decision trees and policy gap flags for a single request type across jurisdictions.
+
+        Returns { trees: { <slug>: DecisionTreeNode, ... }, policy_gaps: { <slug>: { covered, gap }, ... } }
+        or None on failure.
+        """
+        from prompt_loader import load_prompt_yaml, render_prompt
+
+        path = prompt_path or getattr(
+            self._config, "consumer_rights_router_prompt_path", "prompts/consumer_rights_router.yaml"
+        )
+        cfg = load_prompt_yaml(path)
+        prompt = render_prompt(
+            cfg["prompt"],
+            REQUEST_TYPE=request_type or "",
+            REQUEST_TYPE_LABEL=request_type_label or "",
+            POLICY_TEXT=(policy_text or "")[:12000],
+            STATUTE_CONTEXT=(statute_context or "")[:8000],
+            JURISDICTIONS=jurisdictions or "",
+        )
+        out = await self._call_json(prompt, max_tokens=4096)
+        if not out or not isinstance(out.get("trees"), dict):
+            return None
+        return {
+            "trees": out.get("trees") or {},
+            "policy_gaps": out.get("policy_gaps") or {},
+        }
+
+
 class StubLLMClient:
     """Deterministic stub for tests."""
 

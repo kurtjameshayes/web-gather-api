@@ -15,6 +15,11 @@ from compliance_suite_schemas import (
     _score_assessment,
     ApplicabilityResponse,
     CitationItem,
+    ConsumerRightsRouterRequest,
+    ConsumerRightsRouterResponse,
+    JurisdictionInfo,
+    PolicyGapItem,
+    REQUEST_TYPE_LABELS,
     RetrievalMetadata,
     CitationsRequest,
     CitationsResponse,
@@ -36,6 +41,7 @@ from compliance_suite_schemas import (
     SuggestPolicyResponse,
     TemplateItem,
     TemplatesResponse,
+    VALID_REQUEST_TYPES,
 )
 from compliance_storage import ComplianceStorage
 from compliance_utils import jurisdiction_filter_values, normalize_jurisdiction, truncate_at_sentence, utc_now
@@ -213,6 +219,48 @@ class ComplianceSuiteService:
         if header and text:
             return f"{header}\n\n{text}"
         return header or text or ""
+
+    async def _load_policy_from_chunks(
+        self,
+        policy_document_id: str,
+        database: str = "privacy-compliance",
+        collection: str = "policy_legal_embeddings",
+    ) -> Tuple[str, Optional[str]]:
+        """Assemble full policy text from per-chunk embedding documents.
+
+        The policy_legal_embeddings collection stores one doc per chunk with
+        fields: document_id, chunk_index, chunk_text, chunk_header_text, etc.
+        """
+        doc_id_field = self._config.policy_document_id_field
+
+        def find_chunks():
+            coll = self._mongo_client[database][collection]
+            return list(
+                coll.find(
+                    {doc_id_field: policy_document_id},
+                    {"chunk_text": 1, "chunk_header_text": 1, "chunk_index": 1, "company_name": 1},
+                ).sort("chunk_index", 1)
+            )
+
+        chunks = await _run_in_thread(find_chunks)
+        if not chunks:
+            return "", None
+
+        parts = []
+        for c in chunks:
+            header = (c.get("chunk_header_text") or "").strip()
+            body = (c.get("chunk_text") or "").strip()
+            if header and body:
+                parts.append(f"{header}\n{body}")
+            elif body:
+                parts.append(body)
+        text = "\n\n".join(parts).strip()
+        company_name = None
+        for c in chunks:
+            if isinstance(c.get("company_name"), str):
+                company_name = c["company_name"]
+                break
+        return text, company_name
 
     async def applicability(self, req: ApplicabilityRequest) -> ApplicabilityResponse:
         if not await self._rate_limiter.allow():
@@ -1164,3 +1212,128 @@ class ComplianceSuiteService:
         return TemplatesResponse(
             templates=[TemplateItem(id="default", label="Default DPIA-style")],
         )
+
+    # ----- Consumer Rights Request Router -----
+
+    _JURISDICTION_META: Dict[str, Dict[str, str]] = {
+        "CA": {"slug": "california", "name": "California (CCPA/CPRA)", "abbr": "CA"},
+        "VA": {"slug": "virginia", "name": "Virginia (VCDPA)", "abbr": "VA"},
+        "CO": {"slug": "colorado", "name": "Colorado (CPA)", "abbr": "CO"},
+        "TX": {"slug": "texas", "name": "Texas (TDPSA)", "abbr": "TX"},
+        "CT": {"slug": "connecticut", "name": "Connecticut (CTDPA)", "abbr": "CT"},
+    }
+
+    async def consumer_rights_router(
+        self, req: ConsumerRightsRouterRequest
+    ) -> ConsumerRightsRouterResponse:
+        if not await self._rate_limiter.allow():
+            raise ComplianceSuiteServiceError("Rate limit exceeded", status_code=429)
+
+        if req.text:
+            policy_text = req.text.strip()
+            company_name: Optional[str] = None
+            policy_document_id = None
+        else:
+            policy_document_id = req.policy_document_id or ""
+            policy_text, company_name = await self._load_policy_from_chunks(
+                policy_document_id,
+                database="privacy-compliance",
+                collection="policy_legal_embeddings",
+            )
+        if not policy_text:
+            raise ComplianceSuiteServiceError("Policy text not found or empty.", status_code=400)
+
+        jurisdictions = req.applicable_jurisdictions or self._config.default_jurisdictions
+        request_types = list(req.request_types or VALID_REQUEST_TYPES)
+
+        v4_docs_by_j = await self._fetch_v4_statute_docs(
+            jurisdictions, categories=["consumer_rights"]
+        )
+
+        statute_parts: List[str] = []
+        for j in jurisdictions:
+            docs = v4_docs_by_j.get(j, [])
+            for doc in docs[:10]:
+                chunk_text = self._v4_statute_text(doc)
+                if chunk_text:
+                    statute_parts.append(f"[{j}] {chunk_text[:600]}")
+        statute_context = "\n\n".join(statute_parts)[:8000]
+
+        jur_meta = {}
+        for j in jurisdictions:
+            meta = self._JURISDICTION_META.get(j.upper())
+            if meta:
+                jur_meta[j] = meta
+            else:
+                jur_meta[j] = {"slug": j.lower(), "name": j, "abbr": j.upper()}
+
+        jurisdictions_text = "\n".join(
+            f"- {m['abbr']}: {m['name']} (slug: {m['slug']})" for m in jur_meta.values()
+        )
+
+        async def _call_for_type(rt: str) -> tuple:
+            label = REQUEST_TYPE_LABELS.get(rt, rt)
+            async with self._semaphore:
+                result = await self._llm_client.consumer_rights_router(
+                    request_type=rt,
+                    request_type_label=label,
+                    policy_text=policy_text,
+                    statute_context=statute_context,
+                    jurisdictions=jurisdictions_text,
+                    prompt_path=self._config.consumer_rights_router_prompt_path,
+                )
+            return rt, result
+
+        results = await asyncio.gather(
+            *[_call_for_type(rt) for rt in request_types],
+            return_exceptions=True,
+        )
+
+        all_trees: Dict[str, Dict[str, Any]] = {}
+        all_gaps: Dict[str, Dict[str, PolicyGapItem]] = {}
+
+        for item in results:
+            if isinstance(item, Exception):
+                logger.warning("consumer_rights_router LLM call failed: %s", item)
+                continue
+            rt, result = item
+            if not result:
+                logger.warning("consumer_rights_router returned None for %s", rt)
+                all_trees[rt] = {}
+                all_gaps[rt] = {}
+                continue
+            all_trees[rt] = result.get("trees") or {}
+            raw_gaps = result.get("policy_gaps") or {}
+            parsed_gaps: Dict[str, PolicyGapItem] = {}
+            for slug, gap_data in raw_gaps.items():
+                if isinstance(gap_data, dict):
+                    parsed_gaps[slug] = PolicyGapItem(
+                        covered=bool(gap_data.get("covered", False)),
+                        gap=gap_data.get("gap"),
+                    )
+            all_gaps[rt] = parsed_gaps
+
+        states_map = {
+            m["slug"]: JurisdictionInfo(name=m["name"], abbr=m["abbr"])
+            for m in jur_meta.values()
+        }
+
+        rt_labels = {rt: REQUEST_TYPE_LABELS.get(rt, rt) for rt in request_types}
+
+        response = ConsumerRightsRouterResponse(
+            policy_document_id=policy_document_id,
+            company_name=company_name,
+            applicable_jurisdictions=jurisdictions,
+            analyzed_at=_iso(),
+            states=states_map,
+            request_types=rt_labels,
+            trees=all_trees,
+            policy_gaps=all_gaps,
+        )
+
+        if req.save_results and policy_document_id:
+            result_doc = response.model_dump()
+            result_doc["result_type"] = "consumer_rights_router"
+            await self._storage.write_compliance_result(result_doc)
+
+        return response

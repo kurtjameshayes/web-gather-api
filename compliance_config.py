@@ -123,6 +123,7 @@ class ComplianceConfig:
     policy_legal_embeddings_collection: str
     category_mapping_collection: str
     gap_analysis_v4_prompt_path: str
+    consumer_rights_router_prompt_path: str
 
 
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -247,6 +248,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "policy_legal_embeddings_collection": "policy_legal_embeddings",
     "category_mapping_collection": "category_mapping",
     "gap_analysis_v4_prompt_path": "prompts/gap_analysis_v4.yaml",
+    "consumer_rights_router_prompt_path": "prompts/consumer_rights_router.yaml",
 }
 
 
@@ -405,4 +407,5 @@ def load_config() -> ComplianceConfig:
         policy_legal_embeddings_collection=data.get("policy_legal_embeddings_collection", DEFAULT_CONFIG["policy_legal_embeddings_collection"]),
         category_mapping_collection=data.get("category_mapping_collection", DEFAULT_CONFIG["category_mapping_collection"]),
         gap_analysis_v4_prompt_path=data.get("gap_analysis_v4_prompt_path", DEFAULT_CONFIG["gap_analysis_v4_prompt_path"]),
+        consumer_rights_router_prompt_path=data.get("consumer_rights_router_prompt_path", DEFAULT_CONFIG["consumer_rights_router_prompt_path"]),
     )

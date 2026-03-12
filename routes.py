@@ -512,6 +512,91 @@ def build_openapi_spec():
                         "analyzed_at": {"type": "string", "description": "ISO8601 timestamp of when the analysis was performed."},
                     },
                 },
+                "ConsumerRightsRouterRequest": {
+                    "type": "object",
+                    "description": "Request to generate consumer rights request handling decision trees and policy gap analysis.",
+                    "properties": {
+                        "policy_document_id": {"type": "string", "description": "Policy document ID in privacy-compliance.policy_legal_embeddings."},
+                        "text": {"type": "string", "description": "Raw policy text (alternative to policy_document_id)."},
+                        "applicable_jurisdictions": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Jurisdictions to analyze (e.g. ['CA', 'VA', 'CO', 'TX']). Defaults to config.",
+                        },
+                        "request_types": {
+                            "type": "array",
+                            "items": {"type": "string", "enum": ["deletion", "access", "optout", "correction"]},
+                            "description": "Consumer rights request types to include. Defaults to all four.",
+                        },
+                        "save_results": {"type": "boolean", "default": True, "description": "Whether to persist results to compliance_results."},
+                    },
+                },
+                "DecisionTreeNode": {
+                    "type": "object",
+                    "description": "Recursive decision tree node. Either a question (branch) with yes/no children, or an action (leaf) with operational details.",
+                    "properties": {
+                        "id": {"type": "string", "description": "Unique node identifier (e.g. 'ca-del-1')."},
+                        "question": {"type": "string", "description": "Question text (present on branch nodes)."},
+                        "yes": {"$ref": "#/components/schemas/DecisionTreeNode"},
+                        "no": {"$ref": "#/components/schemas/DecisionTreeNode"},
+                        "action": {"type": "string", "description": "Action title in caps (present on leaf nodes)."},
+                        "detail": {"type": "string", "description": "Detailed operational instructions (leaf nodes)."},
+                        "sla": {"type": "string", "description": "Statutory response deadline (leaf nodes)."},
+                        "exceptions": {"type": "array", "items": {"type": "string"}, "description": "Applicable statutory exceptions (leaf nodes)."},
+                    },
+                    "required": ["id"],
+                },
+                "PolicyGapItem": {
+                    "type": "object",
+                    "properties": {
+                        "covered": {"type": "boolean", "description": "Whether the policy adequately covers this right for this jurisdiction."},
+                        "gap": {"type": "string", "nullable": True, "description": "Description of the policy gap with statute citation, or null if aligned."},
+                    },
+                    "required": ["covered"],
+                },
+                "JurisdictionInfo": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Full jurisdiction name (e.g. 'California (CCPA/CPRA)')."},
+                        "abbr": {"type": "string", "description": "Two-letter abbreviation (e.g. 'CA')."},
+                    },
+                    "required": ["name", "abbr"],
+                },
+                "ConsumerRightsRouterResponse": {
+                    "type": "object",
+                    "properties": {
+                        "policy_document_id": {"type": "string", "nullable": True},
+                        "company_name": {"type": "string", "nullable": True},
+                        "applicable_jurisdictions": {"type": "array", "items": {"type": "string"}},
+                        "analyzed_at": {"type": "string", "description": "ISO8601 timestamp."},
+                        "states": {
+                            "type": "object",
+                            "description": "Map of state slug to JurisdictionInfo.",
+                            "additionalProperties": {"$ref": "#/components/schemas/JurisdictionInfo"},
+                        },
+                        "request_types": {
+                            "type": "object",
+                            "description": "Map of request type key to display label.",
+                            "additionalProperties": {"type": "string"},
+                        },
+                        "trees": {
+                            "type": "object",
+                            "description": "trees[request_type][state_slug] = DecisionTreeNode.",
+                            "additionalProperties": {
+                                "type": "object",
+                                "additionalProperties": {"$ref": "#/components/schemas/DecisionTreeNode"},
+                            },
+                        },
+                        "policy_gaps": {
+                            "type": "object",
+                            "description": "policy_gaps[request_type][state_slug] = PolicyGapItem.",
+                            "additionalProperties": {
+                                "type": "object",
+                                "additionalProperties": {"$ref": "#/components/schemas/PolicyGapItem"},
+                            },
+                        },
+                    },
+                },
             }
         },
         "paths": {
@@ -2406,6 +2491,33 @@ def build_openapi_spec():
                         "422": {"description": "Validation error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
                         "429": {"description": "Rate limit exceeded", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
                         "502": {"description": "LLM failed to generate suggestion", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                    },
+                }
+            },
+            f"{COMPLIANCE_API_PREFIX}/consumer-rights-router": {
+                "post": {
+                    "summary": "Consumer rights request decision trees",
+                    "description": "Analyze a privacy policy against US state privacy statutes to generate per-jurisdiction decision trees for handling consumer data-subject requests (deletion, access, opt-out, correction). Returns decision trees for operational routing and flags policy gaps where the stated handling does not meet statutory requirements. Uses privacy-compliance.policy_legal_embeddings for policy lookup.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/ConsumerRightsRouterRequest"},
+                                "example": {
+                                    "policy_document_id": "doc-123",
+                                    "applicable_jurisdictions": ["CA", "VA", "CO", "TX"],
+                                },
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Decision trees and policy gap analysis per request type per jurisdiction",
+                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ConsumerRightsRouterResponse"}}},
+                        },
+                        "400": {"description": "Policy not found or empty", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "422": {"description": "Validation error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "429": {"description": "Rate limit exceeded", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
                     },
                 }
             },

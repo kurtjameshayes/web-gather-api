@@ -15,6 +15,7 @@ from compliance_suite_schemas import (
     AlertListItem,
     ApplicabilityRequest,
     CitationsRequest,
+    ConsumerRightsRouterRequest,
     DriftCheckRequest,
     GapAnalysisRequest,
     HealthScoreRequest,
@@ -591,4 +592,29 @@ async def suggest_policy():
         return jsonify({"error": str(exc)}), exc.status_code
     except Exception:
         logger.exception("Unhandled error in suggest_policy")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@compliance_bp.post("/consumer-rights-router")
+async def consumer_rights_router():
+    logger.info("POST /consumer-rights-router - Consumer rights request decision trees")
+    payload = request.get_json(silent=True) or {}
+    try:
+        request_model = ConsumerRightsRouterRequest.model_validate(payload)
+    except ValidationError as exc:
+        errors = [{k: (str(v) if k == "ctx" else v) for k, v in e.items()} for e in exc.errors()]
+        return jsonify({"error": "Validation error", "details": errors}), 422
+    try:
+        authorize_request(_get_config(), request)
+    except AuthorizationError as exc:
+        return jsonify({"error": exc.message}), exc.status_code
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 500
+    try:
+        result = await _get_suite_service().consumer_rights_router(request_model)
+        return jsonify(result.model_dump())
+    except ComplianceSuiteServiceError as exc:
+        return jsonify({"error": str(exc)}), exc.status_code
+    except Exception:
+        logger.exception("Unhandled error in consumer_rights_router")
         return jsonify({"error": "Internal server error"}), 500

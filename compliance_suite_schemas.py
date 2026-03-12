@@ -432,3 +432,74 @@ class SuggestPolicyResponse(BaseModel):
     suggested_policy_text: str
     modifications_description: str
     analyzed_at: str  # ISO8601
+
+
+# ----- Consumer Rights Request Router -----
+
+VALID_REQUEST_TYPES = ("deletion", "access", "optout", "correction")
+
+REQUEST_TYPE_LABELS: Dict[str, str] = {
+    "deletion": "Right to Delete",
+    "access": "Right to Access / Know",
+    "optout": "Right to Opt-Out of Sale",
+    "correction": "Right to Correction",
+}
+
+
+class DecisionTreeNode(BaseModel):
+    """Recursive decision-tree node. Either a question (branch) or action (leaf)."""
+
+    id: str
+    question: Optional[str] = None
+    yes: Optional["DecisionTreeNode"] = None
+    no: Optional["DecisionTreeNode"] = None
+    action: Optional[str] = None
+    detail: Optional[str] = None
+    sla: Optional[str] = None
+    exceptions: Optional[List[str]] = None
+
+
+DecisionTreeNode.model_rebuild()
+
+
+class PolicyGapItem(BaseModel):
+    covered: bool
+    gap: Optional[str] = None
+
+
+class JurisdictionInfo(BaseModel):
+    name: str
+    abbr: str
+
+
+class ConsumerRightsRouterRequest(BaseModel):
+    policy_document_id: Optional[str] = None
+    text: Optional[str] = None
+    applicable_jurisdictions: Optional[List[str]] = None
+    request_types: Optional[List[str]] = None
+    save_results: bool = True
+
+    @model_validator(mode="after")
+    def validate_source(self) -> "ConsumerRightsRouterRequest":
+        if not self.policy_document_id and not self.text:
+            raise ValueError("Either policy_document_id or text must be provided.")
+        return self
+
+    @model_validator(mode="after")
+    def validate_request_types(self) -> "ConsumerRightsRouterRequest":
+        if self.request_types:
+            invalid = [rt for rt in self.request_types if rt not in VALID_REQUEST_TYPES]
+            if invalid:
+                raise ValueError(f"Invalid request_types: {invalid}. Must be one of {VALID_REQUEST_TYPES}.")
+        return self
+
+
+class ConsumerRightsRouterResponse(BaseModel):
+    policy_document_id: Optional[str] = None
+    company_name: Optional[str] = None
+    applicable_jurisdictions: List[str] = Field(default_factory=list)
+    analyzed_at: str  # ISO8601
+    states: Dict[str, JurisdictionInfo] = Field(default_factory=dict)
+    request_types: Dict[str, str] = Field(default_factory=dict)
+    trees: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    policy_gaps: Dict[str, Dict[str, PolicyGapItem]] = Field(default_factory=dict)
