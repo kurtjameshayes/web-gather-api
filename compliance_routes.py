@@ -1,4 +1,4 @@
-"""Flask routes for policy statute compliance."""
+"""Flask routes for statute-policy compliance."""
 from __future__ import annotations
 
 import logging
@@ -7,11 +7,8 @@ import os
 from flask import Blueprint, jsonify, request
 from pydantic import ValidationError
 
-from audit_logger import AuditLogger
 from cache import SimpleLRUCache
 from compliance_config import ComplianceConfig, load_config
-from compliance_evaluator import ComplianceEvaluator
-from compliance_service import ComplianceService, ServiceError
 from compliance_storage import ComplianceStorage
 from compliance_suite_schemas import (
     AlertsListResponse,
@@ -26,6 +23,7 @@ from compliance_suite_schemas import (
     RiskAssessmentRequest,
     RunSummaryItem,
     RunsListResponse,
+    SuggestPolicyRequest,
 )
 from compliance_job_service import ComplianceJobStorage, start_gap_analysis_job, start_health_score_job
 from compliance_suite_service import ComplianceSuiteService, ComplianceSuiteServiceError
@@ -35,17 +33,14 @@ from db import ensure_privacy_compliance_indexes, get_embedding_model_name, set_
 from embedder import Embedder
 from llm_client import AnthropicLLMClient
 from rate_limiter import RateLimiter
-from redactor import Redactor
-from schemas import PolicyStatuteComplianceRequest
+from schemas import StatutePolicyComplianceRequest, StatutePolicyComplianceResponse
 from security import AuthorizationError, authorize_request
-from segmenter import PolicySegmenter
 from vector_retriever import VectorRetriever
 
 logger = logging.getLogger("policy-compliance")
 
 compliance_bp = Blueprint("compliance", __name__)
 
-_service: ComplianceService | None = None
 _suite_service: ComplianceSuiteService | None = None
 _gap_analysis_v3_service: GapAnalysisServiceV3 | None = None
 _gap_analysis_v4_service: GapAnalysisServiceV4 | None = None
@@ -54,7 +49,7 @@ _config: ComplianceConfig | None = None
 
 
 def init_compliance(mongo_client) -> None:
-    global _service, _suite_service, _gap_analysis_v3_service, _gap_analysis_v4_service, _job_storage, _config
+    global _suite_service, _gap_analysis_v3_service, _gap_analysis_v4_service, _job_storage, _config
     _config = load_config()
 
     # Ensure MongoDB indexes on privacy-compliance collections (idempotent).
@@ -85,24 +80,9 @@ def init_compliance(mongo_client) -> None:
     embedder = Embedder(model_name, embedding_cache)
     retriever = VectorRetriever(mongo_client, embedder, _config, retrieval_cache)
     llm_client = AnthropicLLMClient(api_key, _config)
-    evaluator = ComplianceEvaluator(_config.evidence_score_threshold)
-    segmenter = PolicySegmenter(_config.max_section_chars)
-    redactor = Redactor()
-    audit_logger = AuditLogger(mongo_client, _config)
     rate_limiter = RateLimiter(_config.rate_limit_per_minute)
     storage = ComplianceStorage(mongo_client, _config)
 
-    _service = ComplianceService(
-        mongo_client=mongo_client,
-        config=_config,
-        segmenter=segmenter,
-        retriever=retriever,
-        llm_client=llm_client,
-        evaluator=evaluator,
-        redactor=redactor,
-        audit_logger=audit_logger,
-        rate_limiter=rate_limiter,
-    )
     _gap_analysis_v4_service = GapAnalysisServiceV4(
         mongo_client=mongo_client,
         config=_config,
@@ -129,37 +109,26 @@ def init_compliance(mongo_client) -> None:
     _job_storage = ComplianceJobStorage(mongo_client, _config)
 
 
-def set_compliance_service(service: ComplianceService | None, config: ComplianceConfig | None = None) -> None:
-    global _service, _config
-    _service = service
-    if config is not None:
-        _config = config
-
-
-def _get_service() -> ComplianceService:
-    if _service is None:
-        raise RuntimeError("Compliance service not initialized.")
-    return _service
-
-
 def _get_config() -> ComplianceConfig:
     if _config is None:
         raise RuntimeError("Compliance config not initialized.")
     return _config
 
 
-@compliance_bp.post("/policy-statute-compliance")
-async def policy_statute_compliance():
-    logger.info("policy_statute_compliance received request: %s %s", request.method, request.path)
-    logger.info("POST /policy-statute-compliance - Starting compliance check")
+@compliance_bp.post("/statute-policy-compliance")
+async def statute_policy_compliance():
+    """Statute-first compliance: iterate statutory requirements via category mappings,
+    find matching policy chunks in policy_legal_embeddings, and evaluate gaps."""
+    logger.info("statute_policy_compliance received request: %s %s", request.method, request.path)
+    logger.info("POST /statute-policy-compliance - Starting statute-first compliance check")
     payload = request.get_json(silent=True) or {}
     logger.info(
-        "POST /policy-statute-compliance - Parameters: policy_collection=%s, policy_id=%s, jurisdiction=%s",
-        payload.get("policy_collection"), payload.get("policy_id"), payload.get("jurisdiction"),
+        "POST /statute-policy-compliance - Parameters: policy_id=%s, jurisdiction=%s",
+        payload.get("policy_id"), payload.get("jurisdiction"),
     )
 
     try:
-        request_model = PolicyStatuteComplianceRequest.model_validate(payload)
+        request_model = StatutePolicyComplianceRequest.model_validate(payload)
     except ValidationError as exc:
         return jsonify({"error": "Validation error", "details": exc.errors()}), 422
 
@@ -172,12 +141,29 @@ async def policy_statute_compliance():
         return jsonify({"error": str(exc)}), 500
 
     try:
-        result = await _get_service().compare_policy(request_model)
-        return jsonify(result.model_dump())
-    except ServiceError as exc:
+        gap_request = GapAnalysisRequest(
+            policy_document_id=request_model.policy_id,
+            applicable_jurisdictions=[request_model.jurisdiction],
+            database=config.compliance_database,
+            policy_collection=request_model.policy_collection,
+            save_results=False,
+            run_async=False,
+        )
+        gap_result = await _get_gap_analysis_v4_service().run(gap_request)
+        response = StatutePolicyComplianceResponse(
+            policy_id=request_model.policy_id,
+            applicable_jurisdictions=gap_result.applicable_jurisdictions,
+            analyzed_at=gap_result.analyzed_at,
+            gaps=gap_result.gaps,
+            summary=gap_result.summary,
+            retrieval_metadata=gap_result.retrieval_metadata,
+            warnings=[],
+        )
+        return jsonify(response.model_dump())
+    except GapAnalysisServiceV4Error as exc:
         return jsonify({"error": str(exc)}), exc.status_code
     except Exception as e:  # pragma: no cover - defensive fallback
-        logger.exception("Unhandled error in policy_statute_compliance")
+        logger.exception("Unhandled error in statute_policy_compliance")
         return jsonify({"error": "Internal server error"}), 500
 
 
@@ -582,3 +568,27 @@ async def list_alerts():
     alerts = [AlertListItem(**a) for a in alerts_docs]
     resp = AlertsListResponse(alerts=alerts, total=total, limit=limit, offset=offset)
     return jsonify(resp.model_dump())
+
+
+@compliance_bp.post("/suggest-policy")
+async def suggest_policy():
+    logger.info("POST /suggest-policy - Suggest compliant policy text")
+    payload = request.get_json(silent=True) or {}
+    try:
+        request_model = SuggestPolicyRequest.model_validate(payload)
+    except ValidationError as exc:
+        return jsonify({"error": "Validation error", "details": exc.errors()}), 422
+    try:
+        authorize_request(_get_config(), request)
+    except AuthorizationError as exc:
+        return jsonify({"error": exc.message}), exc.status_code
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 500
+    try:
+        result = await _get_suite_service().suggest_policy(request_model)
+        return jsonify(result.model_dump())
+    except ComplianceSuiteServiceError as exc:
+        return jsonify({"error": str(exc)}), exc.status_code
+    except Exception:
+        logger.exception("Unhandled error in suggest_policy")
+        return jsonify({"error": "Internal server error"}), 500

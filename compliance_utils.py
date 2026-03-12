@@ -1,4 +1,4 @@
-"""Shared helpers for policy statute compliance service."""
+"""Shared helpers for statute-policy compliance service."""
 from __future__ import annotations
 
 import hashlib

@@ -179,6 +179,41 @@ Output only valid JSON:
 }
 """
 
+SUGGEST_POLICY_PROMPT = """You are a privacy law compliance editor. Your task is to rewrite or add text to a privacy policy so that it becomes compliant with the given statute.
+
+You are provided with:
+1. The current policy text.
+2. A gap analysis finding that describes a compliance gap.
+3. The gap analysis match status (e.g. "missing", "conflict", "partial").
+4. The authoritative statute text that the policy must comply with.
+
+Instructions:
+- Analyze the gap analysis finding to understand exactly what the policy is missing or where it conflicts with the statute.
+- Reference the statute text as the authoritative requirement.
+- Rewrite or extend the policy text to address the gap while preserving all existing compliant language. Do not remove or weaken language that is already compliant.
+- If the gap is about missing language, add the necessary provisions in the most natural location within the policy.
+- If the gap is a conflict, revise the conflicting language to align with the statute.
+- If the gap is partial, strengthen the existing language to fully satisfy the requirement.
+
+Current policy text:
+<<<POLICY_TEXT>>>
+
+Gap analysis finding:
+<<<GAP_ANALYSIS_TEXT>>>
+
+Gap analysis match status:
+<<<GAP_ANALYSIS_MATCH>>>
+
+Statute text (authoritative requirement):
+<<<STATUTE_TEXT>>>
+
+Output only valid JSON with this exact structure:
+{
+  "suggested_policy_text": "The full revised policy text with all modifications applied.",
+  "modifications_description": "A plain-language summary of every change made and why each change was necessary to achieve compliance."
+}
+"""
+
 RISK_ASSESSMENT_PROMPT = """You are a privacy law analyst. From the following policy text and statute requirements, fill a DPIA-style risk assessment. List processing purposes, data categories, risks, mitigations, and any gaps between policy and statute.
 
 Policy text:
@@ -260,17 +295,24 @@ class AnthropicLLMClient:
         text = await _run_in_thread(lambda: run_call(reminder))
         return text
 
-    async def _call_json(self, prompt: str, retry_with_reminder: bool = True) -> Optional[Dict[str, Any]]:
+    async def _call_json(self, prompt: str, retry_with_reminder: bool = True, max_tokens: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """Call LLM with prompt, parse JSON from response. Retry once with reminder if parse fails."""
         reminder = "\n\nOutput only valid JSON with no surrounding text."
+        tokens = max_tokens or self._max_tokens
+        # region agent log
+        _dbg_stop_reason = [None]
+        # endregion
 
         def run_call(extra: str = "") -> str:
             full_prompt = prompt + extra
             response = self._client.messages.create(
                 model=self._model,
-                max_tokens=self._max_tokens,
+                max_tokens=tokens,
                 messages=[{"role": "user", "content": full_prompt}],
             )
+            # region agent log
+            _dbg_stop_reason[0] = getattr(response, "stop_reason", None)
+            # endregion
             content = []
             for block in response.content:
                 if block.type == "text":
@@ -279,14 +321,23 @@ class AnthropicLLMClient:
 
         text = await _run_in_thread(run_call)
         raw = extract_json_block(text)
+        # region agent log
+        import time as _t; open("/Users/kurthayes/Dev/AI/web-gather-api/.cursor/debug-4b665c.log","a").write(json.dumps({"sessionId":"4b665c","hypothesisId":"A,B","location":"llm_client.py:_call_json:first_call","message":"first LLM call result","data":{"text_len":len(text),"raw_extracted":raw is not None,"raw_len":len(raw) if raw else 0,"stop_reason":_dbg_stop_reason[0],"max_tokens":tokens,"text_tail":text[-200:] if text else "","prompt_len":len(prompt)},"timestamp":int(_t.time()*1000)})+"\n")
+        # endregion
         if raw:
             try:
                 return json.loads(raw)
             except json.JSONDecodeError:
+                # region agent log
+                open("/Users/kurthayes/Dev/AI/web-gather-api/.cursor/debug-4b665c.log","a").write(json.dumps({"sessionId":"4b665c","hypothesisId":"A","location":"llm_client.py:_call_json:json_decode_fail","message":"JSON decode failed on first call","data":{"raw_head":raw[:300] if raw else "","raw_tail":raw[-300:] if raw else ""},"timestamp":int(_t.time()*1000)})+"\n")
+                # endregion
                 pass
         if retry_with_reminder:
             text = await _run_in_thread(lambda: run_call(reminder))
             raw = extract_json_block(text)
+            # region agent log
+            open("/Users/kurthayes/Dev/AI/web-gather-api/.cursor/debug-4b665c.log","a").write(json.dumps({"sessionId":"4b665c","hypothesisId":"A,B","location":"llm_client.py:_call_json:retry","message":"retry LLM call result","data":{"text_len":len(text),"raw_extracted":raw is not None,"raw_len":len(raw) if raw else 0,"stop_reason":_dbg_stop_reason[0],"max_tokens":tokens,"text_tail":text[-200:] if text else ""},"timestamp":int(_t.time()*1000)})+"\n")
+            # endregion
             if raw:
                 try:
                     return json.loads(raw)
@@ -588,6 +639,32 @@ class AnthropicLLMClient:
             "risks": out.get("risks") or [],
             "mitigations": out.get("mitigations") or [],
             "gaps_from_statute": out.get("gaps_from_statute") or [],
+        }
+
+    async def suggest_policy(
+        self,
+        policy_text: str,
+        gap_analysis_text: str,
+        gap_analysis_match: str,
+        statute_text: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Return { suggested_policy_text, modifications_description } or None on failure."""
+        prompt = (
+            SUGGEST_POLICY_PROMPT
+            .replace("<<<POLICY_TEXT>>>", (policy_text or "")[:8000])
+            .replace("<<<GAP_ANALYSIS_TEXT>>>", (gap_analysis_text or "")[:3000])
+            .replace("<<<GAP_ANALYSIS_MATCH>>>", (gap_analysis_match or "")[:500])
+            .replace("<<<STATUTE_TEXT>>>", (statute_text or "")[:6000])
+        )
+        out = await self._call_json(prompt, max_tokens=4096)
+        # region agent log
+        import time as _t; open("/Users/kurthayes/Dev/AI/web-gather-api/.cursor/debug-4b665c.log","a").write(json.dumps({"sessionId":"4b665c","hypothesisId":"C,D","location":"llm_client.py:suggest_policy:result","message":"suggest_policy LLM result","data":{"out_is_none":out is None,"has_suggested_text":isinstance(out.get("suggested_policy_text"),str) if out else False,"suggested_text_len":len(out.get("suggested_policy_text","")) if out else 0,"modifications_len":len(str(out.get("modifications_description",""))) if out else 0,"prompt_len":len(prompt)},"timestamp":int(_t.time()*1000)})+"\n")
+        # endregion
+        if not out or not isinstance(out.get("suggested_policy_text"), str):
+            return None
+        return {
+            "suggested_policy_text": out["suggested_policy_text"],
+            "modifications_description": str(out.get("modifications_description") or ""),
         }
 
 

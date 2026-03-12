@@ -64,106 +64,69 @@ def build_openapi_spec():
                         },
                     },
                 },
-                "PolicyStatuteComplianceRequest": {
+                "StatutePolicyComplianceRequest": {
                     "type": "object",
-                    "description": "Request body for policy statute compliance. Compare the policy identified by collection and id to the statute in the given jurisdiction.",
+                    "description": "Request body for statute-policy compliance. Iterates statutory requirements via category mappings and finds matching policy chunks to evaluate gaps.",
                     "properties": {
-                        "policy_collection": {
-                            "type": "string",
-                            "description": "Collection name that holds the policy chunks (e.g. policy_embeddings).",
-                        },
                         "policy_id": {
                             "type": "string",
-                            "description": "Document ID of the policy (document_id in policy chunks).",
+                            "description": "Document ID of the policy (document_id in the policies collection).",
                         },
                         "jurisdiction": {
                             "type": "string",
-                            "description": "Jurisdiction for statute comparison (e.g. GDPR, CCPA).",
+                            "description": "Jurisdiction for statute comparison (e.g. CA, VA, CCPA).",
                         },
-                    },
-                    "required": ["policy_collection", "policy_id", "jurisdiction"],
-                },
-                "AppliedStatute": {
-                    "type": "object",
-                    "properties": {
-                        "statute_id": {"type": "string"},
-                        "jurisdiction": {"type": "string"},
-                        "title": {"type": "string"},
-                        "section_id": {"type": "string"},
-                        "matched_span": {"type": "string"},
-                        "evidence_score": {"type": "number"},
-                    },
-                    "required": [
-                        "statute_id",
-                        "jurisdiction",
-                        "title",
-                        "section_id",
-                        "matched_span",
-                        "evidence_score",
-                    ],
-                },
-                "PolicySectionResult": {
-                    "type": "object",
-                    "properties": {
-                        "section_id": {"type": "string"},
-                        "section_text": {"type": "string"},
-                        "applied_statutes": {
-                            "type": "array",
-                            "items": {"$ref": "#/components/schemas/AppliedStatute"},
-                        },
-                        "compliance": {
+                        "policy_collection": {
                             "type": "string",
-                            "enum": ["compliant", "non_compliant", "neither"],
+                            "description": "Optional collection name for indexed policy chunks. Defaults to policy_legal_embeddings when omitted.",
                         },
-                        "confidence": {"type": "number"},
-                        "rationale": {"type": "string"},
-                        "remediation_suggestions": {"type": "array", "items": {"type": "string"}},
-                        "retrieval_trace": {"type": "array", "items": {"type": "string"}},
                     },
-                    "required": [
-                        "section_id",
-                        "section_text",
-                        "applied_statutes",
-                        "compliance",
-                        "confidence",
-                        "rationale",
-                        "remediation_suggestions",
-                        "retrieval_trace",
-                    ],
+                    "required": ["policy_id", "jurisdiction"],
                 },
-                "SummaryCounts": {
+                "GapItemSchema": {
                     "type": "object",
+                    "description": "A single statutory requirement gap item.",
                     "properties": {
-                        "compliant": {"type": "integer"},
-                        "non_compliant": {"type": "integer"},
-                        "neither": {"type": "integer"},
-                    },
-                    "required": ["compliant", "non_compliant", "neither"],
-                },
-                "SummaryResult": {
-                    "type": "object",
-                    "properties": {
-                        "overall_compliance": {
-                            "type": "string",
-                            "enum": ["compliant", "non_compliant", "mixed", "unknown"],
-                        },
-                        "counts": {"$ref": "#/components/schemas/SummaryCounts"},
-                    },
-                    "required": ["overall_compliance", "counts"],
-                },
-                "PolicyStatuteComplianceResponse": {
-                    "type": "object",
-                    "properties": {
-                        "policy_id": {"type": "string", "nullable": True},
                         "jurisdiction": {"type": "string"},
-                        "sections": {
+                        "statute_reference": {"type": "string"},
+                        "requirement_summary": {"type": "string"},
+                        "status": {"type": "string", "enum": ["missing", "addressed", "conflict", "partial", "ambiguous"]},
+                        "policy_quote": {"type": "string", "nullable": True},
+                        "statute_quote": {"type": "string", "nullable": True},
+                        "conflict_description": {"type": "string", "nullable": True},
+                        "analysis_failed": {"type": "boolean"},
+                        "confidence": {"type": "string", "enum": ["high", "medium", "low"], "nullable": True},
+                    },
+                    "required": ["jurisdiction", "statute_reference", "requirement_summary", "status"],
+                },
+                "GapSummarySchema": {
+                    "type": "object",
+                    "description": "Summary counts for gap analysis results.",
+                    "properties": {
+                        "total_requirements": {"type": "integer"},
+                        "missing": {"type": "integer"},
+                        "addressed": {"type": "integer"},
+                        "conflicts": {"type": "integer"},
+                        "partial": {"type": "integer"},
+                        "ambiguous": {"type": "integer"},
+                        "analysis_failures": {"type": "integer"},
+                    },
+                },
+                "StatutePolicyComplianceResponse": {
+                    "type": "object",
+                    "properties": {
+                        "policy_id": {"type": "string"},
+                        "applicable_jurisdictions": {"type": "array", "items": {"type": "string"}},
+                        "analyzed_at": {"type": "string", "description": "ISO8601 timestamp"},
+                        "gaps": {
                             "type": "array",
-                            "items": {"$ref": "#/components/schemas/PolicySectionResult"},
+                            "items": {"$ref": "#/components/schemas/GapItemSchema"},
                         },
-                        "summary": {"$ref": "#/components/schemas/SummaryResult"},
+                        "summary": {"$ref": "#/components/schemas/GapSummarySchema"},
+                        "retrieval_metadata": {"type": "object", "nullable": True},
                         "warnings": {"type": "array", "items": {"type": "string"}},
                     },
-                    "required": ["policy_id", "jurisdiction", "sections", "summary", "warnings"],
+                    "required": ["policy_id", "applicable_jurisdictions", "analyzed_at", "gaps", "summary"],
                 },
                 "ErrorResponse": {
                     "type": "object",
@@ -292,6 +255,7 @@ def build_openapi_spec():
                         "policy_document_id": {"type": "string"},
                         "company_name": {"type": "string", "nullable": True},
                         "privacy_health_score": {"type": "integer", "nullable": True},
+                        "score_assessment": {"type": "string", "nullable": True, "description": "Human-readable assessment (e.g. Excellent, Good, Fair, Needs improvement, Critical)"},
                         "score_breakdown": {"type": "object"},
                         "components": {"type": "object"},
                         "analyzed_at": {"type": "string"},
@@ -429,6 +393,7 @@ def build_openapi_spec():
                         "run_at": {"type": "string", "description": "ISO8601"},
                         "types": {"type": "array", "items": {"type": "string"}},
                         "privacy_health_score": {"type": "integer", "nullable": True},
+                        "score_assessment": {"type": "string", "nullable": True},
                         "summary": {"type": "object", "properties": {"total_requirements": {"type": "integer"}, "missing": {"type": "integer"}, "addressed": {"type": "integer"}, "conflicts": {"type": "integer"}}},
                     },
                 },
@@ -528,6 +493,24 @@ def build_openapi_spec():
                         "offset": {"type": "integer"},
                     },
                     "required": ["alerts", "total", "limit", "offset"],
+                },
+                "SuggestPolicyRequest": {
+                    "type": "object",
+                    "properties": {
+                        "policy_text": {"type": "string", "description": "The current policy text to be revised for compliance."},
+                        "gap_analysis_text": {"type": "string", "description": "The gap analysis finding describing the compliance gap."},
+                        "gap_analysis_match": {"type": "string", "description": "The gap analysis match status (e.g. missing, conflict, partial)."},
+                        "statute_text": {"type": "string", "description": "The authoritative statute text that the policy must comply with."},
+                    },
+                    "required": ["policy_text", "gap_analysis_text", "gap_analysis_match", "statute_text"],
+                },
+                "SuggestPolicyResponse": {
+                    "type": "object",
+                    "properties": {
+                        "suggested_policy_text": {"type": "string", "description": "The full revised policy text with modifications applied."},
+                        "modifications_description": {"type": "string", "description": "Plain-language summary of every change made and why."},
+                        "analyzed_at": {"type": "string", "description": "ISO8601 timestamp of when the analysis was performed."},
+                    },
                 },
             }
         },
@@ -1891,72 +1874,36 @@ def build_openapi_spec():
                     },
                 }
             },
-            f"{COMPLIANCE_API_PREFIX}/policy-statute-compliance": {
+            f"{COMPLIANCE_API_PREFIX}/statute-policy-compliance": {
                 "post": {
-                    "summary": "Compare policy to statutes for compliance",
-                    "description": "Loads the policy identified by policy_collection and policy_id from the compliance database (privacy-compliance), segments it, retrieves relevant statutes for the given jurisdiction, and returns compliance determinations with evidence.",
+                    "summary": "Statute-first compliance check",
+                    "description": "Iterates statutory requirements via category mappings, finds matching policy chunks in policy_legal_embeddings using vector search, and evaluates each requirement for compliance gaps. Returns per-requirement gap items with status, quotes, and a summary.",
                     "requestBody": {
                         "required": True,
                         "content": {
                             "application/json": {
-                                "schema": {"$ref": "#/components/schemas/PolicyStatuteComplianceRequest"},
+                                "schema": {"$ref": "#/components/schemas/StatutePolicyComplianceRequest"},
                                 "example": {
-                                    "policy_collection": "policy_embeddings",
                                     "policy_id": "doc-123",
-                                    "jurisdiction": "CCPA",
+                                    "jurisdiction": "CA",
                                 },
                             }
                         },
                     },
                     "responses": {
                         "200": {
-                            "description": "Compliance analysis response",
+                            "description": "Statute-policy compliance analysis response with gap items",
                             "content": {
                                 "application/json": {
-                                    "schema": {"$ref": "#/components/schemas/PolicyStatuteComplianceResponse"}
+                                    "schema": {"$ref": "#/components/schemas/StatutePolicyComplianceResponse"}
                                 }
                             },
                         },
-                        "400": {
-                            "description": "Bad request",
-                            "content": {
-                                "application/json": {
-                                    "schema": {"$ref": "#/components/schemas/ErrorResponse"}
-                                }
-                            },
-                        },
-                        "401": {
-                            "description": "Missing API key",
-                            "content": {
-                                "application/json": {
-                                    "schema": {"$ref": "#/components/schemas/ErrorResponse"}
-                                }
-                            },
-                        },
-                        "403": {
-                            "description": "Unauthorized",
-                            "content": {
-                                "application/json": {
-                                    "schema": {"$ref": "#/components/schemas/ErrorResponse"}
-                                }
-                            },
-                        },
-                        "422": {
-                            "description": "Validation error",
-                            "content": {
-                                "application/json": {
-                                    "schema": {"$ref": "#/components/schemas/ErrorResponse"}
-                                }
-                            },
-                        },
-                        "500": {
-                            "description": "Internal server error",
-                            "content": {
-                                "application/json": {
-                                    "schema": {"$ref": "#/components/schemas/ErrorResponse"}
-                                }
-                            },
-                        },
+                        "400": {"description": "Bad request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "401": {"description": "Missing API key", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "403": {"description": "Unauthorized", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "422": {"description": "Validation error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "500": {"description": "Internal server error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
                     },
                 }
             },
@@ -2439,25 +2386,47 @@ def build_openapi_spec():
                     },
                 }
             },
-            "/policy-statute-compliance": {
+            f"{COMPLIANCE_API_PREFIX}/suggest-policy": {
                 "post": {
-                    "summary": "Compare policy to statutes for compliance (root path)",
-                    "description": "Same as /api/compliance/policy-statute-compliance. Loads the policy identified by policy_collection and policy_id, segments it, retrieves relevant statutes for the given jurisdiction, and returns compliance determinations with evidence.",
+                    "summary": "Suggest compliant policy text",
+                    "description": "Analyze a gap analysis finding and rewrite or add text to a policy to make it compliant with the given statute. Returns the full revised policy text and a description of the modifications.",
                     "requestBody": {
                         "required": True,
                         "content": {
                             "application/json": {
-                                "schema": {"$ref": "#/components/schemas/PolicyStatuteComplianceRequest"},
+                                "schema": {"$ref": "#/components/schemas/SuggestPolicyRequest"},
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Suggested compliant policy text with modification details",
+                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SuggestPolicyResponse"}}},
+                        },
+                        "422": {"description": "Validation error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "429": {"description": "Rate limit exceeded", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "502": {"description": "LLM failed to generate suggestion", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                    },
+                }
+            },
+            "/statute-policy-compliance": {
+                "post": {
+                    "summary": "Statute-first compliance check (root path)",
+                    "description": "Same as /api/compliance/statute-policy-compliance. Iterates statutory requirements via category mappings, finds matching policy chunks, and evaluates each requirement for compliance gaps.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/StatutePolicyComplianceRequest"},
                                 "example": {
-                                    "policy_collection": "policy_embeddings",
                                     "policy_id": "doc-123",
-                                    "jurisdiction": "CCPA",
+                                    "jurisdiction": "CA",
                                 },
                             }
                         },
                     },
                     "responses": {
-                        "200": {"description": "Compliance analysis response", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PolicyStatuteComplianceResponse"}}}},
+                        "200": {"description": "Statute-policy compliance analysis response", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/StatutePolicyComplianceResponse"}}}},
                         "400": {"description": "Bad request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
                         "401": {"description": "Missing API key", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
                         "403": {"description": "Unauthorized", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},

@@ -1,4 +1,4 @@
-"""Tests for policy statute compliance service."""
+"""Tests for statute-policy compliance service."""
 from __future__ import annotations
 
 import asyncio
@@ -15,14 +15,14 @@ sys.modules["sentence_transformers"] = MagicMock()
 from cache import SimpleLRUCache
 from compliance_config import load_config
 from compliance_evaluator import ComplianceEvaluator
-from compliance_routes import compliance_bp, set_compliance_service
-from compliance_service import ComplianceService
+import compliance_routes
+from compliance_routes import compliance_bp
 from llm_client import build_prompt
 from redactor import Redactor
 from segmenter import PolicySegmenter
 from vector_retriever import StatuteCandidate, VectorRetriever
 from rate_limiter import RateLimiter
-from schemas import PolicyStatuteComplianceResponse
+from schemas import StatutePolicyComplianceResponse
 
 
 def test_segmenter_splits_on_headings():
@@ -136,114 +136,72 @@ def test_retriever_returns_statute_candidates():
     assert results[0].score == 0.77
 
 
-class StubRetriever:
-    async def retrieve(
-        self,
-        database,
-        section_text,
-        jurisdiction,
-        statute_corpus_id,
-        top_k,
-    ):
-        return [
-            StatuteCandidate(
-                statute_id="stat-901",
-                jurisdiction=jurisdiction,
-                title="Data Retention Limits",
-                section_id="DR-3",
-                chunk_text="Data retention for analytics must not exceed 3 years.",
-                score=0.92,
-                chunk_id="DR-3",
-            )
-        ]
+def test_statute_policy_compliance_endpoint_delegates_to_v4():
+    """Verify the statute-policy endpoint delegates to GapAnalysisServiceV4 and returns gap items."""
+    from compliance_suite_schemas import GapAnalysisResponse, GapItem, GapSummary, RetrievalMetadata
 
-
-class StubLLM:
-    async def compare_section(self, section_id, section_text, candidates):
-        return json.dumps(
-            {
-                "section_id": section_id,
-                "applied_statutes": [
-                    {
-                        "statute_id": "stat-901",
-                        "jurisdiction": "US",
-                        "title": "Data Retention Limits",
-                        "matched_span": "retain user data for 10 years",
-                        "evidence_score": 0.92,
-                    }
-                ],
-                "compliance": "non_compliant",
-                "confidence": 0.86,
-                "rationale": "Policy retention exceeds statutory limit.",
-                "remediation_suggestions": [
-                    "Reduce retention to 3 years or justify exception."
-                ],
-            }
-        )
-
-
-def test_policy_compliance_endpoint_retention_non_compliant():
     try:
         asyncio.get_event_loop()
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
 
     config = load_config()
-    config.enable_audit_logging = False
-    config.enable_redaction = True
     config.auth_required = False
 
-    policy_text = "We retain user data for 10 years for analytics."
-    mock_chunks = [
-        {
-            config.policy_document_id_field: "test-policy-id",
-            config.policy_chunk_index_field: 0,
-            config.policy_chunk_text_field: policy_text,
-            config.policy_chunk_header_field: "",
-        }
-    ]
-    mock_cursor = MagicMock()
-    mock_cursor.sort.return_value = mock_chunks
-    mock_coll = MagicMock()
-    mock_coll.find.return_value = mock_cursor
-    mock_db = MagicMock()
-    mock_db.__getitem__.return_value = mock_coll
-    mock_mongo = MagicMock()
-    mock_mongo.__getitem__.return_value = mock_db
-
-    service = ComplianceService(
-        mongo_client=mock_mongo,
-        config=config,
-        segmenter=PolicySegmenter(config.max_section_chars),
-        retriever=StubRetriever(),
-        llm_client=StubLLM(),
-        evaluator=ComplianceEvaluator(config.evidence_score_threshold),
-        redactor=Redactor(),
-        audit_logger=MagicMock(log=AsyncMock()),
-        rate_limiter=RateLimiter(1000),
+    fake_response = GapAnalysisResponse(
+        policy_document_id="test-policy-id",
+        applicable_jurisdictions=["CA"],
+        analyzed_at="2026-03-10T00:00:00Z",
+        gaps=[
+            GapItem(
+                jurisdiction="CA",
+                statute_reference="CCPA § 1798.100(a)",
+                requirement_summary="Right to know what personal information is collected",
+                status="missing",
+                conflict_description="The policy does not contain provisions that address this statutory requirement.",
+            )
+        ],
+        summary=GapSummary(total_requirements=1, missing=1),
+        retrieval_metadata=RetrievalMetadata(statute_items_considered=1, statute_pairs_matched=1),
     )
 
-    set_compliance_service(service, config)
-    app = Flask(__name__)
-    app.register_blueprint(compliance_bp)
-    client = app.test_client()
-    response = client.post(
-        "/policy-statute-compliance",
-        json={
-            "policy_collection": "policy_embeddings",
-            "policy_id": "test-policy-id",
-            "jurisdiction": "US",
-        },
-    )
+    mock_v4 = MagicMock()
+    mock_v4.run = AsyncMock(return_value=fake_response)
 
-    assert response.status_code == 200
-    body = response.get_json()
-    PolicyStatuteComplianceResponse.model_validate(body)
-    assert body["sections"][0]["compliance"] == "non_compliant"
-    assert body["sections"][0]["confidence"] >= 0.8
-    assert "Reduce retention to 3 years" in body["sections"][0]["remediation_suggestions"][0]
+    old_v4 = compliance_routes._gap_analysis_v4_service
+    old_config = compliance_routes._config
+    compliance_routes._gap_analysis_v4_service = mock_v4
+    compliance_routes._config = config
 
-    set_compliance_service(None)
+    try:
+        app = Flask(__name__)
+        app.register_blueprint(compliance_bp)
+        client = app.test_client()
+        response = client.post(
+            "/statute-policy-compliance",
+            json={
+                "policy_id": "test-policy-id",
+                "jurisdiction": "CA",
+            },
+        )
+
+        assert response.status_code == 200
+        body = response.get_json()
+        StatutePolicyComplianceResponse.model_validate(body)
+        assert len(body["gaps"]) == 1
+        assert body["gaps"][0]["status"] == "missing"
+        assert body["gaps"][0]["statute_reference"] == "CCPA § 1798.100(a)"
+        assert body["summary"]["total_requirements"] == 1
+        assert body["summary"]["missing"] == 1
+        assert body["applicable_jurisdictions"] == ["CA"]
+
+        call_args = mock_v4.run.call_args[0][0]
+        assert call_args.policy_document_id == "test-policy-id"
+        assert call_args.applicable_jurisdictions == ["CA"]
+        assert call_args.save_results is False
+    finally:
+        compliance_routes._gap_analysis_v4_service = old_v4
+        compliance_routes._config = old_config
 
 
 def test_adversarial_ambiguous_language_neither():

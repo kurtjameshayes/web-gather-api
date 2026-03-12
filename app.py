@@ -86,7 +86,7 @@ app.register_blueprint(compliance_bp, url_prefix="/api/compliance")
 app.register_blueprint(compliance_v2_bp, url_prefix="/api/v2/compliance")
 app.register_blueprint(compliance_v3_bp, url_prefix="/api/v3/compliance")
 app.register_blueprint(compliance_v4_bp, url_prefix="/api/v4/compliance")
-# Also mount at root so POST /policy-statute-compliance works (Swagger/docs and legacy clients).
+# Also mount at root so POST /statute-policy-compliance works (Swagger/docs and legacy clients).
 app.register_blueprint(compliance_bp, url_prefix="", name="compliance_root")
 
 # Initialize index job service (requires app for test client in background workflow)

@@ -271,6 +271,7 @@ def build_health_score_graph(
                         "company_name": result_dict.get("company_name"),
                         "applicable_jurisdictions": result_dict.get("applicable_jurisdictions", []),
                         "privacy_health_score": result_dict.get("privacy_health_score"),
+                        "score_assessment": result_dict.get("score_assessment"),
                         "score_breakdown": result_dict.get("score_breakdown", {}),
                         "components": result_dict.get("components", {}),
                         "analyzed_at": result_dict.get("analyzed_at"),

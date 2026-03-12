@@ -1,4 +1,4 @@
-"""Configuration loader for policy statute compliance service."""
+"""Configuration loader for statute-policy compliance service."""
 from __future__ import annotations
 
 import json
@@ -97,6 +97,7 @@ class ComplianceConfig:
     max_statute_quote_chars: int
     default_jurisdictions: List[str]
     conflict_penalty_multiplier: float
+    partial_credit_percent: float  # 0.0-1.0; partial status contributes this fraction to health score
     requirement_weights: Dict[str, float]
     canonical_requirement_ids: List[str]
     disclosure_queries: List[str]
@@ -182,6 +183,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "max_statute_quote_chars": 300,
     "default_jurisdictions": ["CA", "VA", "CO", "CT"],
     "conflict_penalty_multiplier": 0.7,
+    "partial_credit_percent": 0.5,
     "requirement_weights": {
         # Consumer rights (core CCPA/CPRA-style protections) - weight 1.5
         "right to know": 1.5,
@@ -378,6 +380,9 @@ def load_config() -> ComplianceConfig:
         default_jurisdictions=data.get("default_jurisdictions", DEFAULT_CONFIG["default_jurisdictions"]),
         conflict_penalty_multiplier=_to_float(
             os.getenv("COMPLIANCE_CONFLICT_PENALTY"), data.get("conflict_penalty_multiplier", DEFAULT_CONFIG["conflict_penalty_multiplier"])
+        ),
+        partial_credit_percent=_to_float(
+            os.getenv("COMPLIANCE_PARTIAL_CREDIT_PERCENT"), data.get("partial_credit_percent", DEFAULT_CONFIG["partial_credit_percent"])
         ),
         requirement_weights=data.get("requirement_weights", DEFAULT_CONFIG["requirement_weights"]) or {},
         canonical_requirement_ids=data.get("canonical_requirement_ids", DEFAULT_CONFIG["canonical_requirement_ids"]),

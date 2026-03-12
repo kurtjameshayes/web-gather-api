@@ -208,6 +208,7 @@ class ComplianceStorage:
                 "run_at": run_at,
                 "types": type_list,
                 "privacy_health_score": doc.get("privacy_health_score"),
+                "score_assessment": doc.get("score_assessment"),
                 "summary": doc.get("summary"),
             })
         return run_summaries, total

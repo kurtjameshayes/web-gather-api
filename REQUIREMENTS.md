@@ -60,16 +60,15 @@ This document is derived from the current codebase behavior and structure.
   - Return structured sections with parsed header and text.
   - Files: `core.py`, `llm_client.py`
 
-### 5) Policy-Statute Compliance
+### 5) Statute-Policy Compliance
 
-- FR-5.1 Compliance Analysis (`POST /policy-statute-compliance`)
-  - Segment policy text into sections.
-  - Retrieve relevant statutes via vector search.
-  - Compare policy sections to statutes using an LLM.
-  - Classify compliance as compliant, non_compliant, or neither.
-  - Return per-section results with confidence, rationale, and remediation.
-  - Return a summary with overall compliance status and counts.
-  - Files: `compliance_routes.py`, `compliance_service.py`
+- FR-5.1 Compliance Analysis (`POST /statute-policy-compliance`)
+  - Iterate statutory requirements via category mappings (statute-first).
+  - For each requirement, find matching policy chunks via vector search.
+  - Evaluate gaps using LLM (addressed, missing, conflict, partial, ambiguous).
+  - Return per-requirement gap items with status, quotes, and confidence.
+  - Return a summary with counts of addressed, missing, conflicts, etc.
+  - Files: `compliance_routes.py`, `gap_analysis_service_v4.py`
 - FR-5.2 Statute Retrieval
   - Vector search in statutes or embeddings collections.
   - Filter by jurisdiction and optional corpus id.

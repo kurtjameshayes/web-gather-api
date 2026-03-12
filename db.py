@@ -82,6 +82,20 @@ def utc_now():
     return datetime.now(timezone.utc)
 
 
+def _convert_extended_json(obj):
+    """Recursively convert MongoDB Extended JSON types (e.g. {"$oid": "..."}) to native BSON types."""
+    if isinstance(obj, dict):
+        if len(obj) == 1 and "$oid" in obj:
+            try:
+                return ObjectId(obj["$oid"])
+            except (InvalidId, TypeError):
+                return obj
+        return {k: _convert_extended_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_convert_extended_json(item) for item in obj]
+    return obj
+
+
 def get_embedding_model_name(database_name: str):
     """Look up the embedding model configured for a database."""
     logger.info("Looking up embedding model for database: %s", database_name)
@@ -127,10 +141,14 @@ def list_documents():
             if not isinstance(mongo_query, dict):
                 logger.warning("GET /documents - Query must be a JSON object")
                 return jsonify({"error": "query must be a JSON object"}), 400
+            mongo_query = _convert_extended_json(mongo_query)
         except json.JSONDecodeError as e:
             logger.warning("GET /documents - Invalid JSON in query parameter: %s", str(e))
             return jsonify({"error": f"Invalid JSON in query parameter: {str(e)}"}), 400
 
+    # region agent log
+    import time as _t; open("/Users/kurthayes/Dev/AI/web-gather-api/.cursor/debug-4b665c.log","a").write(json.dumps({"sessionId":"4b665c","hypothesisId":"oid_fix","location":"db.py:list_documents","message":"query after conversion","data":{"mongo_query":str(mongo_query),"database":database_name,"collection":collection_name},"timestamp":int(_t.time()*1000)})+"\n")
+    # endregion
     logger.info("GET /documents - Querying %s.%s with query: %s", database_name, collection_name, mongo_query)
     db = mongo_client[database_name]
     docs = list(db[collection_name].find(mongo_query))

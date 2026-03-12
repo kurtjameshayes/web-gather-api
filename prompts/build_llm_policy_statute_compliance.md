@@ -16,7 +16,7 @@ Below are **requirements, environment details, data model, evaluation rubric, AP
 ---
 
 #### API specification (required)
-- **Endpoint**: `POST /policy-statute-compliance`
+- **Endpoint**: `POST /statute-policy-compliance`
 - **Request JSON**:
   ```json
   {

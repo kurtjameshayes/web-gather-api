@@ -7,7 +7,7 @@ Design the backend functionality (routes, services, storage, vector search, and 
 ## Current state (from codebase)
 
 - **App**: Flask; entry point [app.py](../app.py). Blueprints: `db`, `core`, `util`, `routes`, `compliance` (no URL prefix).
-- **Compliance today**: Single endpoint `POST /policy-statute-compliance` in [compliance_routes.py](../compliance_routes.py). [ComplianceService](../compliance_service.py) loads policy (by id or inline text), segments via [PolicySegmenter](../segmenter.py), retrieves statute candidates with [VectorRetriever](../vector_retriever.py) (MongoDB `$vectorSearch` by jurisdiction), compares via [AnthropicLLMClient](../llm_client.py), evaluates with [ComplianceEvaluator](../compliance_evaluator.py), audits via [AuditLogger](../audit_logger.py).
+- **Compliance today**: `POST /statute-policy-compliance` in [compliance_routes.py](../compliance_routes.py) delegates to [GapAnalysisServiceV4](../gap_analysis_service_v4.py) (statute-first: iterates statutory requirements via category mappings, finds matching policy chunks in `policy_legal_embeddings`, evaluates gaps with LLM).
 - **Vector**: [VectorRetriever](../vector_retriever.py) already supports vector search with metadata filter (jurisdiction, statute_corpus_id) against statute or embeddings collection. Core [GET /search](../core.py) is per-document only (document_id + query).
 - **Config**: [ComplianceConfig](../compliance_config.py) + [policy_compliance_config.json](../policy_compliance_config.json) drive database, collection names, and field names (e.g. `statutes_collection`, `statute_text_field`, `statute_jurisdiction_field`). No `privacy-compliance` DB or `policy_chunks`/`statute_chunks` names in code; design will stay config-driven so spec schema (document_id, chunk_header_text, chunk_text) can be mapped via config.
 - **DB usage**: Generic [db.py](../db.py) (write_to_collection, documents, etc.). Audit uses config `audit_collection` in the same database as the request.
@@ -49,7 +49,7 @@ Design the backend functionality (routes, services, storage, vector search, and 
 
 **Base path:** Mount compliance suite under `/api/compliance/` so the spec's "routes under `/api/compliance/`" is satisfied. Two options:
 
-- **Option A (recommended):** Register the existing `compliance_bp` with `url_prefix='/api/compliance'`. Then existing endpoint becomes `POST /api/compliance/policy-statute-compliance`. Add new routes on the same blueprint.
+- **Option A (recommended):** Register the existing `compliance_bp` with `url_prefix='/api/compliance'`. Then existing endpoint becomes `POST /api/compliance/statute-policy-compliance`. Add new routes on the same blueprint.
 - **Option B:** Keep current compliance blueprint at root; create a second blueprint `compliance_suite_bp` with `url_prefix='/api/compliance'` for the new endpoints only.
 
 **New endpoints (all POST, JSON body, JSON response):**
@@ -132,7 +132,7 @@ Design the backend functionality (routes, services, storage, vector search, and 
   - **compliance_alerts:** Alert records from drift. Fields: alert_id, type=regulatory_drift, policy_document_id, company_name, trigger, affected_jurisdictions, new_gaps, resolved_gaps, score_delta, previous_score, current_score, detected_at. Index: detected_at, policy_document_id.
   - **compliance_run_log:** Audit trail for every run. Fields: policy_document_id, statute_index_version, applicable_jurisdictions, run_timestamp, statute_chunk_ids_used (or hash), result_id (reference to compliance_results), optional input_hash. Enables "score over time" and reproducibility.
 - **Writes:** From Gap Analysis and Health Score: write one compliance_results doc and one compliance_run_log doc per run. From Drift: write one compliance_alerts doc per affected policy. All in the same DB (configurable).
-- **Existing audit:** Keep [AuditLogger](../audit_logger.py) for the existing policy-statute-compliance endpoint; new suite can also write to compliance_run_log for a unified trail.
+- **Existing audit:** The statute-policy-compliance endpoint delegates to GapAnalysisServiceV4 which writes to compliance_results and compliance_run_log directly.
 
 ---
 

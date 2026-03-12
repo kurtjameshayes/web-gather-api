@@ -31,10 +31,11 @@ Selenium requires Chrome/Chromium and chromedriver (or use webdriver-manager). T
 python app.py
 ```
 
-## Policy Statute Compliance API (Flask)
+## Statute-Policy Compliance API (Flask)
 
-This repository includes a Flask endpoint for comparing privacy policy sections
-against statute excerpts with compliance determinations.
+This repository includes a Flask endpoint for statute-first compliance analysis.
+It iterates statutory requirements via category mappings, finds matching policy
+chunks via vector search, and evaluates compliance gaps.
 
 ### Required environment variables
 
@@ -58,7 +59,7 @@ AUDIT_LOG_KEY=base64_fernet_key
 ### Compliance endpoint (served by Flask)
 
 ```
-POST /policy-statute-compliance
+POST /statute-policy-compliance
 ```
 
 Example request/response JSON files are provided in:
@@ -84,7 +85,7 @@ The compliance endpoint retrieves statute chunks by vector similarity and jurisd
 - **Atlas vector index:** The search index name in Atlas must match `vector_index_name` (e.g. `statute_vector_index`). The index definition must use the same **path** as `embedding_vector_field` (e.g. `embedding`) and **numDimensions** must match the embedder output (e.g. **384** for `all-MiniLM-L6-v2`). Example Atlas index definition for `statute_embeddings`: `{"fields":[{"type":"vector","path":"embedding","numDimensions":384,"similarity":"cosine"}]}`. If any of these differ (index name, path, or dimensions), `$vectorSearch` can return 0 results.
 - **Jurisdiction:** Stored values are compared in normalized form (e.g. "California" and "CA" both normalize to "CA"). Use one normalized form consistently (e.g. two-letter codes) in stored documents and requests.
 - **Statute database:** Statute and embedding retrieval use the **compliance database** by default. If you ran `POST /create-embeddings` and wrote `statute_embeddings` into a different MongoDB database, set `"statute_database"` in `policy_compliance_config.json` to that database name (the same as `index_database_name` in the create-embeddings request). Leave it empty or omit it to use the compliance database.
-- **Compliance readiness:** To verify retrieval without running a full policy: call `POST /policy-statute-compliance` with a known `policy_id` and `jurisdiction`; if sections show `retrieval_trace: ["0 candidates (jurisdiction=CA)"]`, retrieval ran but found no statute candidates—check index, collection, and jurisdiction in config and data.
+- **Compliance readiness:** To verify retrieval, call `POST /statute-policy-compliance` with a known `policy_id` and `jurisdiction`; if the response returns zero gaps with `retrieval_metadata.statute_items_considered: 0`, check that category mappings and statute embeddings exist for the given jurisdiction.
 
 ### Tests
 
@@ -104,4 +105,4 @@ pytest
 - `GET /embedding-models`
 - `POST /embedding-models`
 - `POST /create-vector-index` (create Atlas vector index from web-gather embedding_model)
-- `POST /policy-statute-compliance`
+- `POST /statute-policy-compliance`
