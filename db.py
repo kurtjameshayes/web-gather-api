@@ -138,6 +138,8 @@ def list_documents():
     if query_param:
         try:
             mongo_query = json.loads(query_param)
+            if isinstance(mongo_query, str):
+                mongo_query = json.loads(mongo_query)
             if not isinstance(mongo_query, dict):
                 logger.warning("GET /documents - Query must be a JSON object")
                 return jsonify({"error": "query must be a JSON object"}), 400
@@ -146,9 +148,6 @@ def list_documents():
             logger.warning("GET /documents - Invalid JSON in query parameter: %s", str(e))
             return jsonify({"error": f"Invalid JSON in query parameter: {str(e)}"}), 400
 
-    # region agent log
-    import time as _t; open("/Users/kurthayes/Dev/AI/web-gather-api/.cursor/debug-4b665c.log","a").write(json.dumps({"sessionId":"4b665c","hypothesisId":"oid_fix","location":"db.py:list_documents","message":"query after conversion","data":{"mongo_query":str(mongo_query),"database":database_name,"collection":collection_name},"timestamp":int(_t.time()*1000)})+"\n")
-    # endregion
     logger.info("GET /documents - Querying %s.%s with query: %s", database_name, collection_name, mongo_query)
     db = mongo_client[database_name]
     docs = list(db[collection_name].find(mongo_query))
@@ -182,6 +181,8 @@ def delete_documents() -> Response:
     if query_param:
         try:
             mongo_query = json.loads(query_param)
+            if isinstance(mongo_query, str):
+                mongo_query = json.loads(mongo_query)
             if not isinstance(mongo_query, dict):
                 logger.warning("DELETE /documents - Query must be a JSON object")
                 return jsonify({"error": "query must be a JSON object"}), 400

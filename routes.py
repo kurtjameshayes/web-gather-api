@@ -769,8 +769,8 @@ def build_openapi_spec():
                             "name": "query",
                             "in": "query",
                             "required": False,
-                            "schema": {"type": "string"},
-                            "description": "MongoDB query as JSON string to filter documents (e.g., '{\"status\": \"active\"}' or '{\"age\": {\"$gt\": 25}}')",
+                            "schema": {"type": "string", "example": "{\"status\": \"active\"}"},
+                            "description": "MongoDB query as JSON object string to filter documents",
                         },
                     ],
                     "responses": {
@@ -828,8 +828,8 @@ def build_openapi_spec():
                             "name": "query",
                             "in": "query",
                             "required": False,
-                            "schema": {"type": "string"},
-                            "description": "MongoDB query as JSON string to filter documents (e.g., '{\"status\": \"inactive\"}' or '{\"age\": {\"$lt\": 18}}')",
+                            "schema": {"type": "string", "example": "{\"status\": \"inactive\"}"},
+                            "description": "MongoDB query as JSON object string to filter documents",
                         },
                     ],
                     "responses": {
