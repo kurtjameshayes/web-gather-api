@@ -299,9 +299,6 @@ class AnthropicLLMClient:
         """Call LLM with prompt, parse JSON from response. Retry once with reminder if parse fails."""
         reminder = "\n\nOutput only valid JSON with no surrounding text."
         tokens = max_tokens or self._max_tokens
-        # region agent log
-        _dbg_stop_reason = [None]
-        # endregion
 
         def run_call(extra: str = "") -> str:
             full_prompt = prompt + extra
@@ -310,9 +307,6 @@ class AnthropicLLMClient:
                 max_tokens=tokens,
                 messages=[{"role": "user", "content": full_prompt}],
             )
-            # region agent log
-            _dbg_stop_reason[0] = getattr(response, "stop_reason", None)
-            # endregion
             content = []
             for block in response.content:
                 if block.type == "text":
@@ -321,23 +315,14 @@ class AnthropicLLMClient:
 
         text = await _run_in_thread(run_call)
         raw = extract_json_block(text)
-        # region agent log
-        import time as _t; open("/Users/kurthayes/Dev/AI/web-gather-api/.cursor/debug-4b665c.log","a").write(json.dumps({"sessionId":"4b665c","hypothesisId":"A,B","location":"llm_client.py:_call_json:first_call","message":"first LLM call result","data":{"text_len":len(text),"raw_extracted":raw is not None,"raw_len":len(raw) if raw else 0,"stop_reason":_dbg_stop_reason[0],"max_tokens":tokens,"text_tail":text[-200:] if text else "","prompt_len":len(prompt)},"timestamp":int(_t.time()*1000)})+"\n")
-        # endregion
         if raw:
             try:
                 return json.loads(raw)
             except json.JSONDecodeError:
-                # region agent log
-                open("/Users/kurthayes/Dev/AI/web-gather-api/.cursor/debug-4b665c.log","a").write(json.dumps({"sessionId":"4b665c","hypothesisId":"A","location":"llm_client.py:_call_json:json_decode_fail","message":"JSON decode failed on first call","data":{"raw_head":raw[:300] if raw else "","raw_tail":raw[-300:] if raw else ""},"timestamp":int(_t.time()*1000)})+"\n")
-                # endregion
                 pass
         if retry_with_reminder:
             text = await _run_in_thread(lambda: run_call(reminder))
             raw = extract_json_block(text)
-            # region agent log
-            open("/Users/kurthayes/Dev/AI/web-gather-api/.cursor/debug-4b665c.log","a").write(json.dumps({"sessionId":"4b665c","hypothesisId":"A,B","location":"llm_client.py:_call_json:retry","message":"retry LLM call result","data":{"text_len":len(text),"raw_extracted":raw is not None,"raw_len":len(raw) if raw else 0,"stop_reason":_dbg_stop_reason[0],"max_tokens":tokens,"text_tail":text[-200:] if text else ""},"timestamp":int(_t.time()*1000)})+"\n")
-            # endregion
             if raw:
                 try:
                     return json.loads(raw)
@@ -657,9 +642,6 @@ class AnthropicLLMClient:
             .replace("<<<STATUTE_TEXT>>>", (statute_text or "")[:6000])
         )
         out = await self._call_json(prompt, max_tokens=4096)
-        # region agent log
-        import time as _t; open("/Users/kurthayes/Dev/AI/web-gather-api/.cursor/debug-4b665c.log","a").write(json.dumps({"sessionId":"4b665c","hypothesisId":"C,D","location":"llm_client.py:suggest_policy:result","message":"suggest_policy LLM result","data":{"out_is_none":out is None,"has_suggested_text":isinstance(out.get("suggested_policy_text"),str) if out else False,"suggested_text_len":len(out.get("suggested_policy_text","")) if out else 0,"modifications_len":len(str(out.get("modifications_description",""))) if out else 0,"prompt_len":len(prompt)},"timestamp":int(_t.time()*1000)})+"\n")
-        # endregion
         if not out or not isinstance(out.get("suggested_policy_text"), str):
             return None
         return {
