@@ -9,6 +9,7 @@ import pytest
 
 # Avoid loading heavy optional dependencies during unit tests.
 sys.modules["sentence_transformers"] = MagicMock()
+sys.modules["anthropic"] = MagicMock()
 
 from compliance_config import load_config
 from compliance_suite_schemas import ConsumerRightsRouterRequest
