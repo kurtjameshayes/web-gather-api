@@ -609,7 +609,7 @@ class AnthropicLLMClient:
             RISK_ASSESSMENT_PROMPT.replace("<<<POLICY_TEXT>>>", (policy_text or "")[:8000])
             .replace("<<<STATUTE_SUMMARY>>>", (statute_summary or "")[:6000])
         )
-        out = await self._call_json(prompt)
+        out = await self._call_json(prompt, max_tokens=4096)
         if not out:
             return {
                 "processing_purposes": [],
