@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 # Avoid loading sentence_transformers in unit tests.
 sys.modules["sentence_transformers"] = MagicMock()
+sys.modules["anthropic"] = MagicMock()
 
 from compliance_config import load_config
 from llm_client import AnthropicLLMClient
