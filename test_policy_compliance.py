@@ -17,7 +17,8 @@ from compliance_config import load_config
 from compliance_evaluator import ComplianceEvaluator
 import compliance_routes
 from compliance_routes import compliance_bp
-from llm_client import build_prompt
+import llm_client
+from llm_client import AnthropicLLMClient, build_prompt
 from redactor import Redactor
 from segmenter import PolicySegmenter
 from vector_retriever import StatuteCandidate, VectorRetriever
@@ -260,3 +261,135 @@ def test_precision_recall_f1_on_labeled_dataset():
     assert precision == 1.0
     assert recall == 1.0
     assert f1 == 1.0
+
+
+def test_gap_item_schema_accepts_partial_and_ambiguous():
+    from compliance_suite_schemas import GapItem
+
+    common = {
+        "jurisdiction": "CA",
+        "statute_reference": "CCPA § 1798.100(a)",
+        "requirement_summary": "Disclose categories of personal information collected.",
+    }
+    partial = GapItem(**common, status="partial")
+    ambiguous = GapItem(**common, status="ambiguous")
+
+    assert partial.status == "partial"
+    assert ambiguous.status == "ambiguous"
+
+
+def test_gap_check_v3_accepts_partial_and_prefers_gap_description(monkeypatch):
+    import prompt_loader
+
+    monkeypatch.setattr(llm_client.anthropic, "Anthropic", lambda api_key: MagicMock())
+    monkeypatch.setattr(prompt_loader, "load_prompt_yaml", lambda _: {"prompt": "<<<STATUTE_CHUNK>>>\n<<<POLICY_CHUNK>>>"})
+    monkeypatch.setattr(
+        prompt_loader,
+        "render_prompt",
+        lambda template, **kwargs: template.replace("<<<STATUTE_CHUNK>>>", kwargs["STATUTE_CHUNK"]).replace(
+            "<<<POLICY_CHUNK>>>", kwargs["POLICY_CHUNK"]
+        ),
+    )
+
+    client = AnthropicLLMClient(api_key="test-key", config=load_config())
+    client._call_json = AsyncMock(
+        return_value={
+            "status": "partial",
+            "policy_quote": "We disclose data categories upon request.",
+            "statute_quote": "A business shall disclose categories collected.",
+            "requirement_summary": "Disclose categories of personal information collected.",
+            "gap_description": "Missing timeline details for disclosure responses.",
+            "conflict_description": "This should be ignored when gap_description is present.",
+            "confidence": "medium",
+        }
+    )
+
+    result = asyncio.run(
+        client.gap_check_v3(
+            statute_chunk_text="Disclose categories of personal information collected.",
+            policy_chunk_text="We disclose data categories upon request.",
+        )
+    )
+
+    assert result["status"] == "partial"
+    assert result["confidence"] == "medium"
+    assert result["conflict_description"] == "Missing timeline details for disclosure responses."
+    assert result["_analysis_failed"] is False
+
+
+def test_gap_check_v3_invalid_status_defaults_to_missing(monkeypatch):
+    import prompt_loader
+
+    monkeypatch.setattr(llm_client.anthropic, "Anthropic", lambda api_key: MagicMock())
+    monkeypatch.setattr(prompt_loader, "load_prompt_yaml", lambda _: {"prompt": "<<<STATUTE_CHUNK>>>\n<<<POLICY_CHUNK>>>"})
+    monkeypatch.setattr(
+        prompt_loader,
+        "render_prompt",
+        lambda template, **kwargs: template.replace("<<<STATUTE_CHUNK>>>", kwargs["STATUTE_CHUNK"]).replace(
+            "<<<POLICY_CHUNK>>>", kwargs["POLICY_CHUNK"]
+        ),
+    )
+
+    client = AnthropicLLMClient(api_key="test-key", config=load_config())
+    client._call_json = AsyncMock(
+        return_value={
+            "status": "some-new-status",
+            "policy_quote": None,
+            "confidence": "HIGH",
+        }
+    )
+
+    result = asyncio.run(
+        client.gap_check_v3(
+            statute_chunk_text="Statute requirement text.",
+            policy_chunk_text="Policy text.",
+        )
+    )
+
+    assert result["status"] == "missing"
+    assert result["confidence"] == "low"
+    assert result["conflict_description"] is None
+    assert result["_analysis_failed"] is False
+
+
+def test_gap_check_v4_accepts_ambiguous_status(monkeypatch):
+    import prompt_loader
+
+    monkeypatch.setattr(llm_client.anthropic, "Anthropic", lambda api_key: MagicMock())
+    monkeypatch.setattr(
+        prompt_loader,
+        "load_prompt_yaml",
+        lambda _: {"prompt": "<<<REFERENCE_CONTEXT>>>\n<<<STATUTORY_REQUIREMENT>>>\n<<<POLICY_TEXT>>>"},
+    )
+    monkeypatch.setattr(
+        prompt_loader,
+        "render_prompt",
+        lambda template, **kwargs: template.replace("<<<REFERENCE_CONTEXT>>>", kwargs["REFERENCE_CONTEXT"])
+        .replace("<<<STATUTORY_REQUIREMENT>>>", kwargs["STATUTORY_REQUIREMENT"])
+        .replace("<<<POLICY_TEXT>>>", kwargs["POLICY_TEXT"]),
+    )
+
+    client = AnthropicLLMClient(api_key="test-key", config=load_config())
+    client._call_json = AsyncMock(
+        return_value={
+            "status": "ambiguous",
+            "policy_quote": "We may use data where appropriate.",
+            "statute_quote": "Must clearly define lawful basis and scope.",
+            "requirement_summary": "Define lawful basis and scope for data use.",
+            "conflict_description": "Policy language is unclear about scope.",
+            "confidence": "high",
+        }
+    )
+
+    result = asyncio.run(
+        client.gap_check_v4(
+            reference_context="Definitions and applicability context.",
+            statutory_requirement="Define lawful basis and scope for data use.",
+            policy_text="We may use data where appropriate.",
+        )
+    )
+
+    assert result["status"] == "ambiguous"
+    assert result["confidence"] == "high"
+    assert result["conflict_description"] == "Policy language is unclear about scope."
+    assert result["_analysis_failed"] is False
