@@ -181,3 +181,65 @@ def test_crawl_missing_url(client, mock_clients) -> None:
     assert response.status_code == 400
     payload = response.get_json()
     assert "url" in payload["error"]
+
+
+def test_gap_check_missing_policy_params(client, mock_clients) -> None:
+    """POST /gap-check without policy params returns 400."""
+    response = client.post(
+        "/gap-check",
+        json={
+            "statute_database_name": "db",
+            "statute_collection_name": "coll",
+            "statute_document_id": "stat-1",
+        },
+    )
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert "policy" in payload["error"].lower()
+
+
+def test_gap_check_missing_statute_params(client, mock_clients) -> None:
+    """POST /gap-check without statute params returns 400."""
+    response = client.post(
+        "/gap-check",
+        json={
+            "policy_database_name": "db",
+            "policy_collection_name": "coll",
+            "policy_document_id": "pol-1",
+        },
+    )
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert "statute" in payload["error"].lower()
+
+
+def test_gap_check_success(client, mock_clients) -> None:
+    """POST /gap-check with valid params and mocked fetch/LLM returns gap_check result."""
+    with patch("core._fetch_document_text") as mock_fetch:
+        mock_fetch.side_effect = [
+            ("Statute text: data retention limit 3 years.", None),
+            ("Policy text: we retain data for 5 years.", None),
+        ]
+        mock_response = MagicMock()
+        text_block = MagicMock()
+        text_block.type = "text"
+        text_block.text = '{"addressed": true, "policy_quote": "5 years", "missing": false, "conflict": false, "conflict_description": null}'
+        mock_response.content = [text_block]
+        mock_clients["anthropic"].messages.create.return_value = mock_response
+
+        response = client.post(
+            "/gap-check",
+            json={
+                "policy_database_name": "pdb",
+                "policy_collection_name": "policies",
+                "policy_document_id": "pol-1",
+                "statute_database_name": "sdb",
+                "statute_collection_name": "statutes",
+                "statute_document_id": "stat-1",
+            },
+        )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert "gap_check" in payload
+    assert payload["gap_check"]["addressed"] is True
+    assert payload["gap_check"]["policy_quote"] == "5 years"
