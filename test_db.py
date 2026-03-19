@@ -1,4 +1,6 @@
 """Unit tests for database endpoints in db.py."""
+from __future__ import annotations
+
 import pytest
 from unittest.mock import MagicMock, patch
 

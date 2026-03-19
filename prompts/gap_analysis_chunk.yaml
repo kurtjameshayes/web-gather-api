@@ -1,0 +1,43 @@
+# Chunk-level gap analysis prompt (v2: statute_embeddings vs policy_embeddings)
+# Placeholders: <<<STATUTE_CHUNK>>>, <<<POLICY_CHUNK>>>
+# Output schema: addressed, policy_quote, missing, conflict, conflict_description
+
+description: |
+  Compare a statute chunk (requirement) to a policy chunk for compliance.
+  Use this for chunk-level gap analysis when matching statute_embeddings to policy_embeddings.
+
+prompt: |
+  You are a privacy law analyst. A statute chunk states a disclosure or obligation. Determine if the policy chunk addresses it, and if there is any conflict.
+
+  Statute chunk (requirement):
+  <<<STATUTE_CHUNK>>>
+
+  Policy chunk:
+  <<<POLICY_CHUNK>>>
+
+  Answer:
+  (a) Is the required disclosure/obligation in the statute addressed in the policy chunk? (yes/no)
+  (b) If yes, quote the exact policy phrase that addresses it in policy_quote. If no, use null.
+  (c) Is there any statement in the policy chunk that conflicts with the statute? (yes/no)
+  (d) If conflict, briefly describe it in conflict_description. If the policy contains a phrase that conflicts, also quote that exact phrase in policy_quote.
+  (e) policy_quote must be a verbatim substring of the policy chunk text (for addressed or conflict cases).
+
+  Output only valid JSON with this exact structure:
+  {
+    "addressed": true or false,
+    "policy_quote": "exact phrase from policy or null",
+    "missing": true or false,
+    "conflict": true or false,
+    "conflict_description": "brief description or null"
+  }
+
+placeholders:
+  - STATUTE_CHUNK
+  - POLICY_CHUNK
+
+output_schema:
+  addressed: boolean
+  policy_quote: string | null
+  missing: boolean
+  conflict: boolean
+  conflict_description: string | null

@@ -1,0 +1,111 @@
+# Consumer Rights Request Router prompt
+# Placeholders: <<<REQUEST_TYPE>>>, <<<REQUEST_TYPE_LABEL>>>, <<<POLICY_TEXT>>>, <<<STATUTE_CONTEXT>>>, <<<JURISDICTIONS>>>
+# Output: trees (per jurisdiction decision tree) and policy_gaps (per jurisdiction gap flag)
+
+description: |
+  Generate a decision tree for handling a specific consumer rights request type
+  (e.g. deletion, access, opt-out, correction) across multiple US state jurisdictions.
+  Also flag policy gaps where the policy's stated handling does not meet statutory
+  requirements. Called once per request type with all jurisdictions in a single call.
+
+prompt: |
+  You are a US state privacy law compliance expert. Your task is to produce an
+  operational decision tree for handling a specific type of consumer data-subject
+  request (DSR) under each jurisdiction listed below, AND to flag any gaps between
+  the company's privacy policy and what each statute actually requires.
+
+  REQUEST TYPE: <<<REQUEST_TYPE_LABEL>>> (<<<REQUEST_TYPE>>>)
+
+  JURISDICTIONS (generate a tree for each):
+
+  <<<JURISDICTIONS>>>
+
+  STATUTE CONTEXT (use to ground your trees in actual statutory requirements):
+
+  <<<STATUTE_CONTEXT>>>
+
+  COMPANY PRIVACY POLICY (compare against statute requirements for gap detection):
+
+  <<<POLICY_TEXT>>>
+
+  ─────────────────────────────────────
+  OUTPUT SPECIFICATION
+  ─────────────────────────────────────
+
+  Return valid JSON with exactly this top-level shape:
+
+  {
+    "trees": {
+      "<jurisdiction_slug>": <DecisionTreeNode>,
+      ...
+    },
+    "policy_gaps": {
+      "<jurisdiction_slug>": { "covered": <bool>, "gap": <string or null> },
+      ...
+    }
+  }
+
+  Where <jurisdiction_slug> is the lowercase state name (e.g. "california",
+  "virginia", "colorado", "texas").
+
+  A DecisionTreeNode is EITHER a question (branch) node or an action (leaf) node:
+
+  Question node (branch — always has yes and no children):
+  {
+    "id": "<slug>-<abbrev>-<n>",
+    "question": "Is the requestor a <state> resident?",
+    "yes": <DecisionTreeNode>,
+    "no": <DecisionTreeNode>
+  }
+
+  Action node (leaf — terminal outcome):
+  {
+    "id": "<slug>-<abbrev>-<n>",
+    "action": "SHORT ACTION TITLE IN CAPS",
+    "detail": "Detailed operational instructions for the compliance team.",
+    "sla": "Response deadline from statute (e.g. '45 days (+ 45 day extension with notice)')",
+    "exceptions": ["Exception 1", "Exception 2"]
+  }
+
+  RULES FOR TREES:
+  1. The root question for each jurisdiction must ask whether the requestor
+     is a resident of that state.
+  2. The "no" branch of the root should be a leaf: "NO OBLIGATION UNDER <statute>".
+  3. The "yes" branch should continue with verification, data-type, and
+     exception questions as appropriate for the statute.
+  4. Each leaf must have actionable detail, the correct statutory SLA, and
+     any applicable exceptions from the statute.
+  5. Use the STATUTE CONTEXT to ground SLAs, exception lists, and requirements.
+  6. Keep trees 2-5 levels deep — enough to capture the statute's logic without
+     over-branching.
+  7. Node IDs should follow the pattern: "<state_abbr_lower>-<type_abbr>-<n>"
+     e.g. "ca-del-1", "va-acc-2", "co-opt-3".
+
+  RULES FOR POLICY GAPS:
+  1. For each jurisdiction, set "covered": true if the policy adequately
+     addresses this right for this state (correct SLA, mentions required
+     mechanisms, etc.).
+  2. Set "covered": false and provide a "gap" string citing the specific
+     statutory section or requirement the policy misses (e.g. "Policy does
+     not mention honoring GPC / universal opt-out signals (required by
+     CPRA §1798.135)").
+  3. If the policy text is empty or does not address this right at all,
+     set covered=false with a gap noting the omission.
+  4. Be specific in gap descriptions — cite statute sections when possible.
+
+  Output ONLY valid JSON. No surrounding text or markdown fences.
+
+placeholders:
+  - REQUEST_TYPE
+  - REQUEST_TYPE_LABEL
+  - POLICY_TEXT
+  - STATUTE_CONTEXT
+  - JURISDICTIONS
+
+output_schema:
+  trees:
+    type: object
+    description: "Map of jurisdiction_slug to DecisionTreeNode"
+  policy_gaps:
+    type: object
+    description: "Map of jurisdiction_slug to {covered: bool, gap: string|null}"
