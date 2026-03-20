@@ -12,7 +12,15 @@ from bson import ObjectId
 from bson.errors import InvalidId
 from flask import Blueprint, Response, jsonify, request
 
+from compliance_utils import validate_collection_name
+
 logger = logging.getLogger("web-gather-api")
+
+# MongoDB reserved database names; reject to prevent access to system DBs
+RESERVED_DB_NAMES = frozenset({"admin", "config", "local"})
+
+# Max documents returned by GET /documents to prevent OOM
+DOCUMENTS_QUERY_LIMIT = 10_000
 
 # Will be initialized by app.py
 mongo_client = None
@@ -82,6 +90,25 @@ def utc_now():
     return datetime.now(timezone.utc)
 
 
+def _reject_dangerous_operators(obj: dict | list) -> None:
+    """Raise ValueError if query contains MongoDB operators other than $oid (ObjectId format).
+
+    Prevents NoSQL injection via $where, $regex, $gt, etc.
+    Only allows {"$oid": "..."} for _id matching.
+    """
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k.startswith("$"):
+                if k != "$oid":
+                    raise ValueError(f"Query operator '{k}' is not allowed")
+                if len(obj) != 1:
+                    raise ValueError("$oid must be the only key in object")
+            _reject_dangerous_operators(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            _reject_dangerous_operators(item)
+
+
 def _convert_extended_json(obj):
     """Recursively convert MongoDB Extended JSON types (e.g. {"$oid": "..."}) to native BSON types."""
     if isinstance(obj, dict):
@@ -133,6 +160,14 @@ def list_documents():
         logger.warning("GET /documents - Missing required parameters")
         return jsonify({"error": "database_name and collection_name are required"}), 400
 
+    if not validate_collection_name(database_name) or not validate_collection_name(collection_name):
+        logger.warning("GET /documents - Invalid database or collection name")
+        return jsonify({"error": "database_name and collection_name must contain only letters, numbers, underscores, and hyphens"}), 400
+
+    if database_name.lower() in RESERVED_DB_NAMES:
+        logger.warning("GET /documents - Reserved database name: %s", database_name)
+        return jsonify({"error": "Access to reserved database is not allowed"}), 400
+
     # Parse the query parameter if provided
     mongo_query = {}
     if query_param:
@@ -143,14 +178,18 @@ def list_documents():
             if not isinstance(mongo_query, dict):
                 logger.warning("GET /documents - Query must be a JSON object")
                 return jsonify({"error": "query must be a JSON object"}), 400
+            _reject_dangerous_operators(mongo_query)
             mongo_query = _convert_extended_json(mongo_query)
         except json.JSONDecodeError as e:
             logger.warning("GET /documents - Invalid JSON in query parameter: %s", str(e))
-            return jsonify({"error": f"Invalid JSON in query parameter: {str(e)}"}), 400
+            return jsonify({"error": "Invalid JSON in query parameter"}), 400
+        except ValueError as e:
+            logger.warning("GET /documents - Disallowed query operator: %s", e)
+            return jsonify({"error": str(e)}), 400
 
     logger.info("GET /documents - Querying %s.%s with query: %s", database_name, collection_name, mongo_query)
     db = mongo_client[database_name]
-    docs = list(db[collection_name].find(mongo_query))
+    docs = list(db[collection_name].find(mongo_query).limit(DOCUMENTS_QUERY_LIMIT))
     for doc in docs:
         if "_id" in doc:
             doc["_id"] = str(doc["_id"])
@@ -177,6 +216,14 @@ def delete_documents() -> Response:
         logger.warning("DELETE /documents - Missing required parameters")
         return jsonify({"error": "database_name and collection_name are required"}), 400
 
+    if not validate_collection_name(database_name) or not validate_collection_name(collection_name):
+        logger.warning("DELETE /documents - Invalid database or collection name")
+        return jsonify({"error": "database_name and collection_name must contain only letters, numbers, underscores, and hyphens"}), 400
+
+    if database_name.lower() in RESERVED_DB_NAMES:
+        logger.warning("DELETE /documents - Reserved database name: %s", database_name)
+        return jsonify({"error": "Access to reserved database is not allowed"}), 400
+
     mongo_query = {}
     if query_param:
         try:
@@ -186,15 +233,17 @@ def delete_documents() -> Response:
             if not isinstance(mongo_query, dict):
                 logger.warning("DELETE /documents - Query must be a JSON object")
                 return jsonify({"error": "query must be a JSON object"}), 400
+            _reject_dangerous_operators(mongo_query)
+            mongo_query = _convert_extended_json(mongo_query)
         except json.JSONDecodeError as exc:
             logger.warning(
                 "DELETE /documents - Invalid JSON in query parameter: %s",
                 str(exc),
             )
-            return (
-                jsonify({"error": f"Invalid JSON in query parameter: {str(exc)}"}),
-                400,
-            )
+            return jsonify({"error": "Invalid JSON in query parameter"}), 400
+        except ValueError as exc:
+            logger.warning("DELETE /documents - Disallowed query operator: %s", exc)
+            return jsonify({"error": str(exc)}), 400
 
     logger.info(
         "DELETE /documents - Deleting from %s.%s with query: %s",

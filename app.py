@@ -51,7 +51,8 @@ app = Flask(__name__)
 
 # retryWrites=false avoids TransactionTooOld errors when connection pool is shared across concurrent requests
 _mongo_uri = _mongo_uri_with_retry_writes(MONGODB_URI, retry_writes=False)
-logger.info("Connecting to MongoDB at %s", MONGODB_URI.split("@")[-1] if "@" in MONGODB_URI else "localhost")
+_mongo_host = urlparse(MONGODB_URI).hostname or "localhost"
+logger.info("Connecting to MongoDB at %s", _mongo_host)
 mongo_client = MongoClient(_mongo_uri)
 
 logger.info("Initializing Firecrawl client")
@@ -107,16 +108,42 @@ def redirect_404_to_docs(_exc):
     return jsonify({"error": "Not found"}), 404
 
 
+# Max length for request body in logs (avoids PII/secret leakage)
+_LOG_BODY_MAX_LEN = 500
+
+
+def _safe_log_body(body) -> str | dict | list | None:
+    """Return body for logging: truncated and with sensitive keys redacted."""
+    if body is None:
+        return None
+    if isinstance(body, dict):
+        redacted = {}
+        sensitive = frozenset({"api_key", "apikey", "password", "token", "secret", "authorization"})
+        for k, v in body.items():
+            key_lower = str(k).lower()
+            if any(s in key_lower for s in sensitive):
+                redacted[k] = "[REDACTED]"
+            else:
+                redacted[k] = v
+        to_serialize = redacted
+    else:
+        to_serialize = body
+    s = json.dumps(to_serialize, default=str)
+    if len(s) > _LOG_BODY_MAX_LEN:
+        return s[:_LOG_BODY_MAX_LEN] + "... [truncated]"
+    return to_serialize
+
+
 @app.before_request
 def log_request_params():
-    """Log all API parameters for every request."""
+    """Log all API parameters for every request. Body is truncated and sensitive keys redacted."""
     params = {"method": request.method, "path": request.path}
     if request.args:
         params["query"] = dict(request.args)
     if request.method in ("POST", "PUT", "PATCH") and request.is_json:
         body = request.get_json(silent=True)
         if body is not None:
-            params["body"] = body
+            params["body"] = _safe_log_body(body)
     elif request.form:
         params["form"] = dict(request.form)
     logger.info("API request: %s", json.dumps(params, default=str))

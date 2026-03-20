@@ -119,6 +119,36 @@ def test_ingest_pdf_success(client, mock_clients) -> None:
     assert payload["pages"] == 1
 
 
+def test_ingest_rejects_ssrf_localhost(client, mock_clients) -> None:
+    """SSRF protection: localhost URLs must be rejected."""
+    response = client.post(
+        "/ingest",
+        json={
+            "url": "http://localhost/admin",
+            "database": "test_db",
+            "collection": "docs",
+        },
+    )
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert "localhost" in payload["error"].lower() or "scheme" in payload["error"].lower()
+
+
+def test_ingest_rejects_ssrf_private_ip(client, mock_clients) -> None:
+    """SSRF protection: private IP URLs must be rejected."""
+    response = client.post(
+        "/ingest",
+        json={
+            "url": "http://169.254.169.254/metadata",
+            "database": "test_db",
+            "collection": "docs",
+        },
+    )
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert "private" in payload["error"].lower() or "link-local" in payload["error"].lower()
+
+
 def test_ingest_invalid_mode(client, mock_clients) -> None:
     response = client.post(
         "/ingest",
@@ -174,6 +204,14 @@ def test_crawl_fallback_to_firecrawl(client, mock_clients) -> None:
     payload = response.get_json()
     assert payload["crawl_method"] == "firecrawl"
     assert payload["pages_crawled"] == 1
+
+
+def test_crawl_rejects_ssrf_url(client, mock_clients) -> None:
+    """SSRF protection: localhost URLs must be rejected."""
+    response = client.post("/crawl", json={"url": "http://127.0.0.1/internal"})
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert "localhost" in payload["error"].lower() or "private" in payload["error"].lower()
 
 
 def test_crawl_missing_url(client, mock_clients) -> None:

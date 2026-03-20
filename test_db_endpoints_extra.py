@@ -48,10 +48,10 @@ def test_list_documents_success(client, mock_mongo_client) -> None:
     dbs = _wire_mongo(mock_mongo_client)
     first_id = ObjectId()
     second_id = ObjectId()
-    dbs["user_db"].__getitem__.return_value.find.return_value = [
-        {"_id": first_id, "name": "doc1"},
-        {"_id": second_id, "name": "doc2"},
-    ]
+    docs = [{"_id": first_id, "name": "doc1"}, {"_id": second_id, "name": "doc2"}]
+    cursor_mock = MagicMock()
+    cursor_mock.limit.return_value = docs
+    dbs["user_db"].__getitem__.return_value.find.return_value = cursor_mock
     response = client.get(
         "/documents?database_name=test_db&collection_name=test_collection"
     )
@@ -69,6 +69,38 @@ def test_list_documents_invalid_query_json(client, mock_mongo_client) -> None:
     assert response.status_code == 400
     payload = response.get_json()
     assert "Invalid JSON" in payload["error"]
+
+
+def test_list_documents_rejects_dangerous_operators(client, mock_mongo_client) -> None:
+    """NoSQL injection: $where, $regex, etc. must be rejected."""
+    import urllib.parse
+    query = urllib.parse.quote('{"$where": "1==1"}')
+    response = client.get(
+        f"/documents?database_name=test_db&collection_name=test_collection&query={query}"
+    )
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert "not allowed" in payload["error"].lower() or "operator" in payload["error"].lower()
+
+
+def test_list_documents_invalid_collection_name(client, mock_mongo_client) -> None:
+    """Invalid chars in database/collection name must be rejected."""
+    response = client.get(
+        "/documents?database_name=test.db&collection_name=my_collection"
+    )
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert "letters, numbers" in payload["error"] or "invalid" in payload["error"].lower()
+
+
+def test_list_documents_reserved_database(client, mock_mongo_client) -> None:
+    """Reserved database names (admin, config, local) must be rejected."""
+    response = client.get(
+        "/documents?database_name=admin&collection_name=users"
+    )
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert "reserved" in payload["error"].lower()
 
 
 def test_delete_documents_success(client, mock_mongo_client) -> None:
@@ -95,6 +127,18 @@ def test_delete_documents_invalid_query_json(client, mock_mongo_client) -> None:
     assert response.status_code == 400
     payload = response.get_json()
     assert "Invalid JSON" in payload["error"]
+
+
+def test_delete_documents_rejects_dangerous_operators(client, mock_mongo_client) -> None:
+    """NoSQL injection: $where must be rejected on DELETE."""
+    import urllib.parse
+    query = urllib.parse.quote('{"$where": "1==1"}')
+    response = client.delete(
+        f"/documents?database_name=test_db&collection_name=test_collection&query={query}"
+    )
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert "not allowed" in payload["error"].lower() or "operator" in payload["error"].lower()
 
 
 def test_delete_documents_missing_params(client, mock_mongo_client) -> None:

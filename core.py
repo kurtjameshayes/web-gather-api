@@ -5,6 +5,7 @@ Includes endpoints: gather, ingest, parse-llm, gap-check, search, vector-search,
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import io
 import json
 import logging
@@ -38,6 +39,44 @@ logger = logging.getLogger("web-gather-api")
 mongo_client = None
 firecrawl_client = None
 anthropic_client = None
+
+
+def _validate_url_block_ssrf(url: str) -> tuple[bool, str | None]:
+    """Validate URL for fetch/crawl. Returns (True, None) if safe, else (False, error_message).
+
+    Blocks: non-http(s) schemes, private IPs, localhost, link-local.
+    """
+    try:
+        parsed = urlparse(url)
+        scheme = (parsed.scheme or "").lower()
+        if scheme not in ("http", "https"):
+            return (False, "URL scheme must be http or https")
+
+        hostname = (parsed.hostname or "").strip()
+        if not hostname:
+            return (False, "URL must have a valid hostname")
+
+        host_lower = hostname.lower()
+        if host_lower in ("localhost", "localhost.", "::1"):
+            return (False, "URL must not target localhost")
+
+        # Check for IP addresses (IPv4 and IPv6)
+        if host_lower.startswith("[") and host_lower.endswith("]"):
+            host_for_ip = host_lower[1:-1]
+        else:
+            host_for_ip = host_lower
+
+        try:
+            ip = ipaddress.ip_address(host_for_ip)
+            if ip.is_private or ip.is_loopback or ip.is_link_local:
+                return (False, "URL must not target private or link-local addresses")
+        except ValueError:
+            pass  # Not an IP, assume hostname (DNS will resolve; we block on first request if needed)
+
+        return (True, None)
+    except Exception as e:
+        logger.warning("URL validation failed for %r: %s", url, e)
+        return (False, "Invalid URL")
 
 
 def _warn_if_database_or_collection_not_found(
@@ -1159,13 +1198,9 @@ def ingest():
     logger.info("POST /ingest - Starting document ingestion (load only)")
     payload = request.get_json(silent=True) or {}
     url = payload.get("url")
-    depth = int(payload.get("depth", 1))
-    breadth = int(payload.get("breadth", 5))
     database_name = payload.get("database")
     collection_name = payload.get("collection")
     mode = payload.get("mode", "append").lower()
-    logger.info("POST /ingest - Parameters: url=%s, depth=%d, breadth=%d, database=%s, collection=%s, mode=%s",
-                url, depth, breadth, database_name, collection_name, mode)
 
     if not url or not database_name or not collection_name:
         logger.warning("POST /ingest - Missing required parameters")
@@ -1189,6 +1224,28 @@ def ingest():
             ),
             400,
         )
+
+    # SSRF protection: validate URL scheme and block private/local targets
+    ok, err = _validate_url_block_ssrf(url)
+    if not ok:
+        logger.warning("POST /ingest - URL validation failed: %s", err)
+        return jsonify({"error": err}), 400
+
+    # Validate depth and breadth (with safe defaults and caps)
+    try:
+        depth = int(payload.get("depth", 1))
+        if depth < 1:
+            depth = 1
+    except (TypeError, ValueError):
+        return jsonify({"error": "depth must be a positive integer"}), 400
+    try:
+        breadth = int(payload.get("breadth", 5))
+        breadth = max(1, min(breadth, 100))
+    except (TypeError, ValueError):
+        return jsonify({"error": "breadth must be a positive integer (max 100)"}), 400
+
+    logger.info("POST /ingest - Parameters: url=%s, depth=%d, breadth=%d, database=%s, collection=%s, mode=%s",
+                url, depth, breadth, database_name, collection_name, mode)
 
     # Detect if URL is a PDF file
     is_pdf = is_pdf_url(url)
@@ -3550,7 +3607,7 @@ def gap_check():
 
         if result is None:
             logger.error("POST /gap-check - Could not parse LLM response")
-            return jsonify({"error": "Could not parse SLM response"}), 500
+            return jsonify({"error": "Could not parse LLM response"}), 500
 
         logger.info("POST /gap-check - Success")
         return jsonify({"gap_check": result})
@@ -3585,22 +3642,26 @@ def crawl():
         logger.warning("POST /crawl - Missing required parameter: url")
         return jsonify({"error": "url is required"}), 400
 
+    # SSRF protection: validate URL scheme and block private/local targets
+    ok, err = _validate_url_block_ssrf(url)
+    if not ok:
+        logger.warning("POST /crawl - URL validation failed: %s", err)
+        return jsonify({"error": err}), 400
+
     # Validate and convert depth and breadth to integers
     try:
         depth = int(depth)
-        if depth < 1:
-            raise ValueError("depth must be at least 1")
-    except (TypeError, ValueError) as e:
+        depth = max(1, min(depth, 10))
+    except (TypeError, ValueError):
         logger.warning("POST /crawl - Invalid depth parameter: %s", depth)
-        return jsonify({"error": f"depth must be a positive integer: {e}"}), 400
+        return jsonify({"error": "depth must be a positive integer (max 10)"}), 400
 
     try:
         breadth = int(breadth)
-        if breadth < 1:
-            raise ValueError("breadth must be at least 1")
+        breadth = max(1, min(breadth, 100))
     except (TypeError, ValueError) as e:
         logger.warning("POST /crawl - Invalid breadth parameter: %s", breadth)
-        return jsonify({"error": f"breadth must be a positive integer: {e}"}), 400
+        return jsonify({"error": "breadth must be a positive integer (max 100)"}), 400
 
     logger.info("POST /crawl - Crawling URL: %s (depth=%d, breadth=%d)", url, depth, breadth)
 
