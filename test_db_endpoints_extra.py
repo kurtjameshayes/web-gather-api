@@ -71,6 +71,40 @@ def test_list_documents_invalid_query_json(client, mock_mongo_client) -> None:
     assert "Invalid JSON" in payload["error"]
 
 
+def test_list_documents_accepts_double_encoded_query(client, mock_mongo_client) -> None:
+    dbs = _wire_mongo(mock_mongo_client)
+    dbs["user_db"].__getitem__.return_value.find.return_value = []
+    double_encoded_query = json.dumps(json.dumps({"status": "active"}))
+    response = client.get(
+        "/documents",
+        query_string={
+            "database_name": "test_db",
+            "collection_name": "test_collection",
+            "query": double_encoded_query,
+        },
+    )
+    assert response.status_code == 200
+    dbs["user_db"].__getitem__.return_value.find.assert_called_once_with(
+        {"status": "active"}
+    )
+
+
+def test_list_documents_rejects_double_encoded_non_object(client, mock_mongo_client) -> None:
+    _wire_mongo(mock_mongo_client)
+    double_encoded_query = json.dumps(json.dumps(["not", "an", "object"]))
+    response = client.get(
+        "/documents",
+        query_string={
+            "database_name": "test_db",
+            "collection_name": "test_collection",
+            "query": double_encoded_query,
+        },
+    )
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert payload["error"] == "query must be a JSON object"
+
+
 def test_delete_documents_success(client, mock_mongo_client) -> None:
     dbs = _wire_mongo(mock_mongo_client)
     delete_result = MagicMock()
@@ -95,6 +129,26 @@ def test_delete_documents_invalid_query_json(client, mock_mongo_client) -> None:
     assert response.status_code == 400
     payload = response.get_json()
     assert "Invalid JSON" in payload["error"]
+
+
+def test_delete_documents_accepts_double_encoded_query(client, mock_mongo_client) -> None:
+    dbs = _wire_mongo(mock_mongo_client)
+    delete_result = MagicMock()
+    delete_result.deleted_count = 0
+    dbs["user_db"].__getitem__.return_value.delete_many.return_value = delete_result
+    double_encoded_query = json.dumps(json.dumps({"status": "inactive"}))
+    response = client.delete(
+        "/documents",
+        query_string={
+            "database_name": "test_db",
+            "collection_name": "test_collection",
+            "query": double_encoded_query,
+        },
+    )
+    assert response.status_code == 200
+    dbs["user_db"].__getitem__.return_value.delete_many.assert_called_once_with(
+        {"status": "inactive"}
+    )
 
 
 def test_delete_documents_missing_params(client, mock_mongo_client) -> None:
