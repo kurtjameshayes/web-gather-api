@@ -4,3 +4,9 @@ __pycache__/
 .env
 .venv/
 venv/
+/.cursor/debug-4b665c.log
+/.idea/misc.xml
+/.idea/inspectionProfiles/Project_Default.xml
+/.idea/vcs.xml
+/.idea/web-gather-api.iml
+/.idea/workspace.xml

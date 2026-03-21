@@ -102,6 +102,24 @@ class ComplianceJobStorage:
             update["error"] = error
         self._coll().update_one({"job_id": job_id}, {"$set": update})
 
+    def cleanup_zombie_jobs(self) -> int:
+        """Mark stale running/pending jobs as failed on startup.
+
+        Returns the number of jobs cleaned up.
+        """
+        result = self._coll().update_many(
+            {"status": {"$in": [JOB_STATUS_PENDING, JOB_STATUS_RUNNING]}},
+            {"$set": {
+                "status": JOB_STATUS_FAILED,
+                "error": "Job interrupted by server restart.",
+                "completed_at": _iso(),
+            }},
+        )
+        count = result.modified_count
+        if count:
+            logger.warning("Cleaned up %d zombie compliance jobs on startup", count)
+        return count
+
 
 def build_gap_analysis_graph(
     run_gap_analysis_fn,

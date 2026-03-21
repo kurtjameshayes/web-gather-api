@@ -27,6 +27,14 @@ def build_openapi_spec():
         },
         "servers": [{"url": "/", "description": "API root (relative to current host)"}],
         "components": {
+            "securitySchemes": {
+                "ApiKeyAuth": {
+                    "type": "apiKey",
+                    "in": "header",
+                    "name": "x-api-key",
+                    "description": "API key required when APP_API_KEY is configured (core/db/util) or COMPLIANCE_API_KEY is set (compliance).",
+                },
+            },
             "schemas": {
                 "ConfidenceThresholds": {
                     "type": "object",
@@ -599,7 +607,46 @@ def build_openapi_spec():
                 },
             }
         },
+        "security": [{"ApiKeyAuth": []}],
         "paths": {
+            "/health": {
+                "get": {
+                    "summary": "Health check",
+                    "description": "Returns service health status including database connectivity. No authentication required.",
+                    "security": [],
+                    "responses": {
+                        "200": {
+                            "description": "Service is healthy",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "status": {"type": "string", "example": "ok"},
+                                            "database": {"type": "string", "example": "ok"},
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                        "503": {
+                            "description": "Service is degraded",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "status": {"type": "string", "example": "degraded"},
+                                            "database": {"type": "string", "example": "error"},
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                    "tags": ["Health"],
+                },
+            },
             "/gather": {
                 "post": {
                     "summary": "Gather web documents based on query",
@@ -772,6 +819,20 @@ def build_openapi_spec():
                             "schema": {"type": "string", "example": "{\"status\": \"active\"}"},
                             "description": "MongoDB query as JSON object string to filter documents",
                         },
+                        {
+                            "name": "limit",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "integer", "default": 100, "minimum": 1, "maximum": 10000},
+                            "description": "Maximum number of documents to return (default 100, max 10000)",
+                        },
+                        {
+                            "name": "offset",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "integer", "default": 0, "minimum": 0},
+                            "description": "Number of documents to skip for pagination",
+                        },
                     ],
                     "responses": {
                         "200": {
@@ -785,7 +846,9 @@ def build_openapi_spec():
                                                 "type": "array",
                                                 "items": {"type": "object"},
                                                 "description": "List of documents matching the query",
-                                            }
+                                            },
+                                            "limit": {"type": "integer", "description": "Page size used"},
+                                            "offset": {"type": "integer", "description": "Offset used"},
                                         },
                                     }
                                 }

@@ -1,7 +1,7 @@
-"""Simple in-memory token bucket rate limiter."""
+"""Simple in-memory token bucket rate limiter (thread-safe across event loops)."""
 from __future__ import annotations
 
-import asyncio
+import threading
 import time
 
 
@@ -10,12 +10,10 @@ class RateLimiter:
         self._rate = max(1, rate_per_minute)
         self._allowance = float(self._rate)
         self._last_check = time.monotonic()
-        self._lock: asyncio.Lock | None = None
+        self._lock = threading.Lock()
 
     async def allow(self) -> bool:
-        if self._lock is None:
-            self._lock = asyncio.Lock()
-        async with self._lock:
+        with self._lock:
             now = time.monotonic()
             elapsed = now - self._last_check
             self._last_check = now

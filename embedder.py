@@ -1,21 +1,13 @@
 """Embedding wrapper with caching."""
 from __future__ import annotations
 
-import asyncio
 from typing import List
 
 from sentence_transformers import SentenceTransformer
 
+from async_utils import run_in_thread
 from cache import SimpleLRUCache
 from compliance_utils import hash_text
-
-
-async def _run_in_thread(func, *args, **kwargs):
-    """Run sync function in a thread (Python 3.8 compat: asyncio.to_thread added in 3.9)."""
-    if hasattr(asyncio, "to_thread"):
-        return await asyncio.to_thread(func, *args, **kwargs)
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
 
 
 class Embedder:
@@ -38,7 +30,7 @@ class Embedder:
             return cached
 
         model = self._get_model()
-        embedding = await _run_in_thread(
+        embedding = await run_in_thread(
             lambda: model.encode(
                 [text],
                 convert_to_numpy=True,

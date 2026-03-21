@@ -8,7 +8,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import urlparse
 
 import anthropic
 from dotenv import load_dotenv
@@ -38,28 +38,22 @@ if not ANTHROPIC_API_KEY:
     raise RuntimeError("ANTHROPIC_API_KEY is not set")
 
 
-def _mongo_uri_with_retry_writes(uri: str, retry_writes: bool) -> str:
-    """Set retryWrites in MongoDB URI. Avoids TransactionTooOld when false."""
-    parsed = urlparse(uri)
-    q = dict(parse_qsl(parsed.query or ""))
-    q["retryWrites"] = "true" if retry_writes else "false"
-    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, urlencode(q), parsed.fragment))
-
-
 logger.info("Initializing Flask application")
 app = Flask(__name__)
 
-# retryWrites=false avoids TransactionTooOld errors when connection pool is shared across concurrent requests
-_mongo_uri = _mongo_uri_with_retry_writes(MONGODB_URI, retry_writes=False)
 _mongo_host = urlparse(MONGODB_URI).hostname or "localhost"
 logger.info("Connecting to MongoDB at %s", _mongo_host)
-mongo_client = MongoClient(_mongo_uri)
+mongo_client = MongoClient(MONGODB_URI)
 
 logger.info("Initializing Firecrawl client")
 firecrawl_client = FirecrawlApp(api_key=FIRECRAWL_API_KEY)
 
 logger.info("Initializing Anthropic client")
 anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+# Initialize application-level API key for core/db/util endpoints
+from security import init_app_api_key
+init_app_api_key()
 
 # Import and initialize modules
 from db import db_bp, init_db
@@ -76,6 +70,16 @@ init_db(mongo_client)
 init_core(mongo_client, firecrawl_client, anthropic_client)
 init_util(mongo_client)
 init_compliance(mongo_client)
+
+# Clean up zombie compliance jobs from previous server restarts (F2)
+from compliance_job_service import ComplianceJobStorage
+from compliance_config import load_config as _load_compliance_config
+try:
+    _compliance_cfg = _load_compliance_config()
+    _job_storage = ComplianceJobStorage(mongo_client, _compliance_cfg)
+    _job_storage.cleanup_zombie_jobs()
+except Exception as _e:
+    logger.warning("Could not clean up zombie jobs on startup: %s", _e)
 
 # Register blueprints
 logger.info("Registering route blueprints")
@@ -98,6 +102,19 @@ init_index_job(app, mongo_client)
 def index():
     """Redirect root to docs."""
     return redirect("/docs", code=302)
+
+
+@app.get("/health")
+def health():
+    """Health check endpoint for load balancers and orchestrators."""
+    try:
+        mongo_client.admin.command("ping")
+        db_status = "ok"
+    except Exception:
+        db_status = "error"
+    status = "ok" if db_status == "ok" else "degraded"
+    code = 200 if status == "ok" else 503
+    return jsonify({"status": status, "database": db_status}), code
 
 
 @app.errorhandler(404)

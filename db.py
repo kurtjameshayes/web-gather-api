@@ -13,14 +13,19 @@ from bson.errors import InvalidId
 from flask import Blueprint, Response, jsonify, request
 
 from compliance_utils import validate_collection_name
+from security import require_api_key
 
 logger = logging.getLogger("web-gather-api")
 
 # MongoDB reserved database names; reject to prevent access to system DBs
 RESERVED_DB_NAMES = frozenset({"admin", "config", "local"})
 
-# Max documents returned by GET /documents to prevent OOM
-DOCUMENTS_QUERY_LIMIT = 10_000
+# Default and maximum page sizes for GET /documents
+DEFAULT_PAGE_SIZE = 100
+MAX_PAGE_SIZE = 10_000
+
+# Maximum document body size (bytes) for write_to_collection
+MAX_DOCUMENT_SIZE = 16 * 1024 * 1024  # 16 MB (MongoDB limit)
 
 # Will be initialized by app.py
 mongo_client = None
@@ -109,6 +114,26 @@ def _reject_dangerous_operators(obj: dict | list) -> None:
             _reject_dangerous_operators(item)
 
 
+def _parse_safe_query(query_param: str) -> tuple[dict | None, tuple | None]:
+    """Parse and validate a JSON query parameter, blocking dangerous operators.
+
+    Returns (mongo_query, None) on success, or (None, (response, status)) on error.
+    """
+    try:
+        mongo_query = json.loads(query_param)
+        if isinstance(mongo_query, str):
+            mongo_query = json.loads(mongo_query)
+        if not isinstance(mongo_query, dict):
+            return None, (jsonify({"error": "query must be a JSON object"}), 400)
+        _reject_dangerous_operators(mongo_query)
+        mongo_query = _convert_extended_json(mongo_query)
+        return mongo_query, None
+    except json.JSONDecodeError as e:
+        return None, (jsonify({"error": "Invalid JSON in query parameter"}), 400)
+    except ValueError as e:
+        return None, (jsonify({"error": str(e)}), 400)
+
+
 def _convert_extended_json(obj):
     """Recursively convert MongoDB Extended JSON types (e.g. {"$oid": "..."}) to native BSON types."""
     if isinstance(obj, dict):
@@ -149,114 +174,77 @@ def get_embedding_model_record(database_name: str):
 
 
 @db_bp.get("/documents")
+@require_api_key
 def list_documents():
-    """List documents in a MongoDB collection."""
+    """List documents in a MongoDB collection with pagination."""
     logger.info("GET /documents - Listing documents")
     database_name = request.args.get("database_name")
     collection_name = request.args.get("collection_name")
     query_param = request.args.get("query")
-    logger.info("GET /documents - Parameters: database_name=%s, collection_name=%s, query=%s", database_name, collection_name, query_param)
+
+    try:
+        limit = int(request.args.get("limit", DEFAULT_PAGE_SIZE))
+        limit = max(1, min(limit, MAX_PAGE_SIZE))
+    except (TypeError, ValueError):
+        limit = DEFAULT_PAGE_SIZE
+    try:
+        offset = int(request.args.get("offset", 0))
+        offset = max(0, offset)
+    except (TypeError, ValueError):
+        offset = 0
+
+    logger.debug("GET /documents - Parameters: database_name=%s, collection_name=%s, query=%s", database_name, collection_name, query_param)
     if not database_name or not collection_name:
-        logger.warning("GET /documents - Missing required parameters")
         return jsonify({"error": "database_name and collection_name are required"}), 400
 
     if not validate_collection_name(database_name) or not validate_collection_name(collection_name):
-        logger.warning("GET /documents - Invalid database or collection name")
         return jsonify({"error": "database_name and collection_name must contain only letters, numbers, underscores, and hyphens"}), 400
 
     if database_name.lower() in RESERVED_DB_NAMES:
-        logger.warning("GET /documents - Reserved database name: %s", database_name)
         return jsonify({"error": "Access to reserved database is not allowed"}), 400
 
-    # Parse the query parameter if provided
     mongo_query = {}
     if query_param:
-        try:
-            mongo_query = json.loads(query_param)
-            if isinstance(mongo_query, str):
-                mongo_query = json.loads(mongo_query)
-            if not isinstance(mongo_query, dict):
-                logger.warning("GET /documents - Query must be a JSON object")
-                return jsonify({"error": "query must be a JSON object"}), 400
-            _reject_dangerous_operators(mongo_query)
-            mongo_query = _convert_extended_json(mongo_query)
-        except json.JSONDecodeError as e:
-            logger.warning("GET /documents - Invalid JSON in query parameter: %s", str(e))
-            return jsonify({"error": "Invalid JSON in query parameter"}), 400
-        except ValueError as e:
-            logger.warning("GET /documents - Disallowed query operator: %s", e)
-            return jsonify({"error": str(e)}), 400
+        mongo_query, err = _parse_safe_query(query_param)
+        if err is not None:
+            return err
 
-    logger.info("GET /documents - Querying %s.%s with query: %s", database_name, collection_name, mongo_query)
     db = mongo_client[database_name]
-    docs = list(db[collection_name].find(mongo_query).limit(DOCUMENTS_QUERY_LIMIT))
+    docs = list(db[collection_name].find(mongo_query).skip(offset).limit(limit))
     for doc in docs:
         if "_id" in doc:
             doc["_id"] = str(doc["_id"])
     logger.info("GET /documents - Found %d documents", len(docs))
-    return jsonify({"documents": docs})
+    return jsonify({"documents": docs, "limit": limit, "offset": offset})
 
 
 @db_bp.delete("/documents")
+@require_api_key
 def delete_documents() -> Response:
     """Delete documents in a MongoDB collection."""
     logger.info("DELETE /documents - Deleting documents")
     database_name = request.args.get("database_name")
     collection_name = request.args.get("collection_name")
     query_param = request.args.get("query")
-    logger.info(
-        "DELETE /documents - Parameters: database_name=%s, collection_name=%s, "
-        "query=%s",
-        database_name,
-        collection_name,
-        query_param,
-    )
 
     if not database_name or not collection_name:
-        logger.warning("DELETE /documents - Missing required parameters")
         return jsonify({"error": "database_name and collection_name are required"}), 400
 
     if not validate_collection_name(database_name) or not validate_collection_name(collection_name):
-        logger.warning("DELETE /documents - Invalid database or collection name")
         return jsonify({"error": "database_name and collection_name must contain only letters, numbers, underscores, and hyphens"}), 400
 
     if database_name.lower() in RESERVED_DB_NAMES:
-        logger.warning("DELETE /documents - Reserved database name: %s", database_name)
         return jsonify({"error": "Access to reserved database is not allowed"}), 400
 
     mongo_query = {}
     if query_param:
-        try:
-            mongo_query = json.loads(query_param)
-            if isinstance(mongo_query, str):
-                mongo_query = json.loads(mongo_query)
-            if not isinstance(mongo_query, dict):
-                logger.warning("DELETE /documents - Query must be a JSON object")
-                return jsonify({"error": "query must be a JSON object"}), 400
-            _reject_dangerous_operators(mongo_query)
-            mongo_query = _convert_extended_json(mongo_query)
-        except json.JSONDecodeError as exc:
-            logger.warning(
-                "DELETE /documents - Invalid JSON in query parameter: %s",
-                str(exc),
-            )
-            return jsonify({"error": "Invalid JSON in query parameter"}), 400
-        except ValueError as exc:
-            logger.warning("DELETE /documents - Disallowed query operator: %s", exc)
-            return jsonify({"error": str(exc)}), 400
+        mongo_query, err = _parse_safe_query(query_param)
+        if err is not None:
+            return err
 
-    logger.info(
-        "DELETE /documents - Deleting from %s.%s with query: %s",
-        database_name,
-        collection_name,
-        mongo_query,
-    )
     db = mongo_client[database_name]
     result = db[collection_name].delete_many(mongo_query)
-    logger.info(
-        "DELETE /documents - Deleted %d documents",
-        result.deleted_count,
-    )
+    logger.info("DELETE /documents - Deleted %d documents", result.deleted_count)
 
     return jsonify({
         "database_name": database_name,
@@ -267,10 +255,10 @@ def delete_documents() -> Response:
 
 
 @db_bp.get("/databases")
+@require_api_key
 def list_databases():
     """List all databases with uploaded documents."""
     logger.info("GET /databases - Listing databases")
-    logger.info("GET /databases - Parameters: (none)")
     wg_db = mongo_client[WEB_GATHER_DB]
     databases = wg_db[DOCUMENTS_COLLECTION].distinct("database_name")
     logger.info("GET /databases - Found %d databases", len(databases))
@@ -278,26 +266,27 @@ def list_databases():
 
 
 @db_bp.get("/all-databases")
+@require_api_key
 def list_all_databases():
-    """List all databases in MongoDB."""
+    """List all databases in MongoDB (excludes reserved system databases)."""
     logger.info("GET /all-databases - Listing all MongoDB databases")
-    logger.info("GET /all-databases - Parameters: (none)")
-    databases = mongo_client.list_database_names()
+    databases = [
+        db for db in mongo_client.list_database_names()
+        if db.lower() not in RESERVED_DB_NAMES
+    ]
     logger.info("GET /all-databases - Found %d databases", len(databases))
     return jsonify({"databases": databases})
 
 
 @db_bp.get("/collections")
+@require_api_key
 def list_collections():
     """List collections with uploaded documents."""
     logger.info("GET /collections - Listing collections")
     database_name = request.args.get("database_name")
-    logger.info("GET /collections - Parameters: database_name=%s", database_name)
     if not database_name:
-        logger.warning("GET /collections - Missing required parameter: database_name")
         return jsonify({"error": "database_name is required"}), 400
 
-    logger.info("GET /collections - Querying collections for database: %s", database_name)
     wg_db = mongo_client[WEB_GATHER_DB]
     collections = wg_db[DOCUMENTS_COLLECTION].distinct(
         "collection_name", {"database_name": database_name}
@@ -307,41 +296,33 @@ def list_collections():
 
 
 @db_bp.get("/all-collections")
+@require_api_key
 def list_all_collections():
     """List all collections in a MongoDB database."""
     logger.info("GET /all-collections - Listing all MongoDB collections")
     database_name = request.args.get("database_name")
-    logger.info("GET /all-collections - Parameters: database_name=%s", database_name)
     if not database_name:
-        logger.warning("GET /all-collections - Missing required parameter: database_name")
         return jsonify({"error": "database_name is required"}), 400
 
-    logger.info("GET /all-collections - Querying all collections for database: %s", database_name)
+    if database_name.lower() in RESERVED_DB_NAMES:
+        return jsonify({"error": "Access to reserved database is not allowed"}), 400
+
     collections = mongo_client[database_name].list_collection_names()
     logger.info("GET /all-collections - Found %d collections", len(collections))
     return jsonify({"database_name": database_name, "collections": collections})
 
 
 @db_bp.get("/count-documents")
+@require_api_key
 def count_documents():
-    """Count documents in a MongoDB collection.
-
-    Returns the number of documents in the specified database and collection.
-    """
+    """Count documents in a MongoDB collection."""
     logger.info("GET /count-documents - Counting documents")
     database_name = request.args.get("database_name")
     collection_name = request.args.get("collection_name")
-    logger.info("GET /count-documents - Parameters: database_name=%s, collection_name=%s", database_name, collection_name)
 
     if not database_name or not collection_name:
-        logger.warning("GET /count-documents - Missing required parameters")
         return jsonify({"error": "database_name and collection_name are required"}), 400
 
-    logger.info(
-        "GET /count-documents - Counting documents in %s.%s",
-        database_name,
-        collection_name,
-    )
     db = mongo_client[database_name]
     count = db[collection_name].count_documents({})
     logger.info("GET /count-documents - Found %d documents", count)
@@ -354,6 +335,7 @@ def count_documents():
 
 
 @db_bp.post("/write_to_collection")
+@require_api_key
 def write_to_collection():
     """Write a JSON document to a MongoDB collection.
 
@@ -369,30 +351,31 @@ def write_to_collection():
     mode = data.get("mode", "append")
     document = data.get("document")
     update_id = data.get("update_id")
-    logger.info("POST /write_to_collection - Parameters: database_name=%s, collection_name=%s, mode=%s, update_id=%s, document=%s",
-                database_name, collection_name, mode, update_id, "provided" if document else None)
 
     if not database_name or not collection_name:
-        logger.warning("POST /write_to_collection - Missing required parameters")
         return jsonify({"error": "database_name and collection_name are required"}), 400
 
+    if not validate_collection_name(database_name) or not validate_collection_name(collection_name):
+        return jsonify({"error": "database_name and collection_name must contain only letters, numbers, underscores, and hyphens"}), 400
+
+    if database_name.lower() in RESERVED_DB_NAMES:
+        return jsonify({"error": "Access to reserved database is not allowed"}), 400
+
     if not document:
-        logger.warning("POST /write_to_collection - Missing document")
         return jsonify({"error": "document is required"}), 400
 
+    if not isinstance(document, dict):
+        return jsonify({"error": "document must be a JSON object"}), 400
+
     if mode not in ("append", "replace"):
-        logger.warning("POST /write_to_collection - Invalid mode: %s", mode)
         return jsonify({"error": "mode must be 'append' or 'replace'"}), 400
 
     if mode == "replace" and not update_id:
-        logger.warning("POST /write_to_collection - replace mode requires update_id")
         return jsonify({"error": "update_id is required when mode is 'replace'"}), 400
 
     logger.info(
         "POST /write_to_collection - Writing to %s.%s (mode=%s)",
-        database_name,
-        collection_name,
-        mode,
+        database_name, collection_name, mode,
     )
 
     db = mongo_client[database_name]
@@ -412,19 +395,16 @@ def write_to_collection():
         try:
             object_id = ObjectId(update_id)
         except InvalidId:
-            logger.warning("POST /write_to_collection - Invalid update_id: %s", update_id)
             return jsonify({"error": f"Invalid update_id: {update_id}"}), 400
 
         result = collection.replace_one({"_id": object_id}, document)
 
         if result.matched_count == 0:
-            logger.warning("POST /write_to_collection - Document not found with _id: %s", update_id)
             return jsonify({"error": f"Document not found with _id: {update_id}"}), 404
 
         logger.info(
             "POST /write_to_collection - Replaced document with _id: %s (modified: %d)",
-            update_id,
-            result.modified_count,
+            update_id, result.modified_count,
         )
         return jsonify({
             "database_name": database_name,
@@ -449,6 +429,7 @@ def _serialize_doc(doc):
 
 
 @db_bp.get("/category-mapping")
+@require_api_key
 def get_category_mapping():
     """List category mappings. Optionally filter by statute_category or sub_topic."""
     logger.info("GET /category-mapping - Listing category mappings")
@@ -462,12 +443,10 @@ def get_category_mapping():
     if sub_topic:
         mongo_query["sub_topic"] = sub_topic
     if query_param:
-        try:
-            mongo_query = json.loads(query_param)
-            if not isinstance(mongo_query, dict):
-                return jsonify({"error": "query must be a JSON object"}), 400
-        except json.JSONDecodeError as e:
-            return jsonify({"error": f"Invalid JSON in query: {str(e)}"}), 400
+        parsed, err = _parse_safe_query(query_param)
+        if err is not None:
+            return err
+        mongo_query = parsed
 
     coll = _get_category_mapping_coll()
     docs = list(coll.find(mongo_query))
@@ -478,6 +457,7 @@ def get_category_mapping():
 
 
 @db_bp.post("/category-mapping")
+@require_api_key
 def post_category_mapping():
     """Create a new category mapping. Requires statute_category and policy_categories."""
     logger.info("POST /category-mapping - Creating category mapping")
@@ -515,6 +495,7 @@ def post_category_mapping():
 
 
 @db_bp.delete("/category-mapping")
+@require_api_key
 def delete_category_mapping():
     """Delete category mappings. Use _id for single delete, or query for bulk delete."""
     logger.info("DELETE /category-mapping - Deleting category mappings")
@@ -533,12 +514,10 @@ def delete_category_mapping():
         except InvalidId:
             return jsonify({"error": f"Invalid _id: {_id_param}"}), 400
     else:
-        try:
-            mongo_query = json.loads(query_param)
-            if not isinstance(mongo_query, dict):
-                return jsonify({"error": "query must be a JSON object"}), 400
-        except json.JSONDecodeError as e:
-            return jsonify({"error": f"Invalid JSON in query: {str(e)}"}), 400
+        parsed, err = _parse_safe_query(query_param)
+        if err is not None:
+            return err
+        mongo_query = parsed
 
     coll = _get_category_mapping_coll()
     result = coll.delete_many(mongo_query)

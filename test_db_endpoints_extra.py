@@ -50,6 +50,7 @@ def test_list_documents_success(client, mock_mongo_client) -> None:
     second_id = ObjectId()
     docs = [{"_id": first_id, "name": "doc1"}, {"_id": second_id, "name": "doc2"}]
     cursor_mock = MagicMock()
+    cursor_mock.skip.return_value = cursor_mock
     cursor_mock.limit.return_value = docs
     dbs["user_db"].__getitem__.return_value.find.return_value = cursor_mock
     response = client.get(

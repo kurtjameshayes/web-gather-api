@@ -1,22 +1,14 @@
 """MongoDB vector search wrapper for statute retrieval."""
 from __future__ import annotations
 
-import asyncio
 import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+from async_utils import run_in_thread
+
 # Jurisdiction for vector search (override all callers). Configurable via env for DB values like "CA".
 VECTOR_SEARCH_JURISDICTION = (os.getenv("COMPLIANCE_VECTOR_SEARCH_JURISDICTION") or "California").strip() or "California"
-
-
-async def _run_in_thread(func):
-    """Run sync function in a thread (Python 3.8 compat: asyncio.to_thread added in 3.9)."""
-    if hasattr(asyncio, "to_thread"):
-        return await asyncio.to_thread(func)
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, func)
-
 
 from cache import SimpleLRUCache
 from compliance_config import ComplianceConfig
@@ -190,7 +182,7 @@ class VectorRetriever:
         def run_aggregate() -> List[Dict[str, Any]]:
             return list(collection.aggregate(pipeline))
 
-        raw_results = await _run_in_thread(run_aggregate)
+        raw_results = await run_in_thread(run_aggregate)
         candidates = []
         sec_field = self._config.statute_section_field
         sec_id_field = self._config.statute_section_id_field
@@ -296,7 +288,7 @@ class VectorRetriever:
             return list(embedding_collection.aggregate(pipeline))
 
         try:
-            raw_results = await _run_in_thread(run_aggregate)
+            raw_results = await run_in_thread(run_aggregate)
         except Exception:
             return []
         doc_ids = [r.get(self._config.embedding_doc_id_field) for r in raw_results if r.get(self._config.embedding_doc_id_field)]
@@ -316,7 +308,7 @@ class VectorRetriever:
                 )
             )
 
-        statute_docs = await _run_in_thread(run_fetch) if doc_ids else []
+        statute_docs = await run_in_thread(run_fetch) if doc_ids else []
         statute_map: Dict[str, Dict[str, Any]] = {}
         for doc in statute_docs:
             key_id = str(doc.get(self._config.statute_id_field, ""))
@@ -401,7 +393,7 @@ class VectorRetriever:
         def fetch_statute_subchunks() -> List[Dict[str, Any]]:
             return list(statute_coll.find(statute_filter))
 
-        statute_docs = await _run_in_thread(fetch_statute_subchunks)
+        statute_docs = await run_in_thread(fetch_statute_subchunks)
         if not statute_docs:
             return RetrievePolicySubchunksResult(pairs=[], statute_subchunks_considered=0)
 
@@ -439,15 +431,14 @@ class VectorRetriever:
                 return list(policy_coll.aggregate(pipe))
 
             try:
-                policy_results = await _run_in_thread(lambda: run_search(pipeline_with_filter))
+                policy_results = await run_in_thread(lambda p=pipeline_with_filter: run_search(p))
             except Exception:
-                policy_results = await _run_in_thread(lambda: run_search(pipeline_fallback))
+                policy_results = await run_in_thread(lambda p=pipeline_fallback: run_search(p))
 
             if not policy_results:
                 continue
             best = policy_results[0]
             score = float(best.get("score", 0.0))
-            # Exclude raw vector from policy_doc for response
             policy_doc = {k: v for k, v in best.items() if k != vec_path}
             if "_id" in policy_doc:
                 policy_doc["_id"] = str(policy_doc["_id"])
@@ -495,7 +486,7 @@ class VectorRetriever:
         def fetch_statute_chunks() -> List[Dict[str, Any]]:
             return list(statute_coll.find(statute_filter))
 
-        statute_docs = await _run_in_thread(fetch_statute_chunks)
+        statute_docs = await run_in_thread(fetch_statute_chunks)
         if not statute_docs:
             return RetrievePolicyChunksResult(pairs=[], statute_chunks_considered=0)
 
@@ -530,9 +521,9 @@ class VectorRetriever:
                 return list(policy_coll.aggregate(pipe))
 
             try:
-                policy_results = await _run_in_thread(lambda: run_search(pipeline_with_filter))
+                policy_results = await run_in_thread(lambda p=pipeline_with_filter: run_search(p))
             except Exception:
-                policy_results = await _run_in_thread(lambda: run_search(pipeline_fallback))
+                policy_results = await run_in_thread(lambda p=pipeline_fallback: run_search(p))
 
             if not policy_results:
                 continue
@@ -614,7 +605,7 @@ class VectorRetriever:
                 items = items[:num_rows]
             return items
 
-        statute_docs = await _run_in_thread(fetch_statute_subchunks)
+        statute_docs = await run_in_thread(fetch_statute_subchunks)
         if not statute_docs:
             return []
 
@@ -652,9 +643,9 @@ class VectorRetriever:
                 return list(policy_coll.aggregate(pipe))
 
             try:
-                policy_results = await _run_in_thread(lambda: run_v3_search(pipeline_with_filter))
+                policy_results = await run_in_thread(lambda p=pipeline_with_filter: run_v3_search(p))
             except Exception:
-                policy_results = await _run_in_thread(lambda: run_v3_search(pipeline_fallback))
+                policy_results = await run_in_thread(lambda p=pipeline_fallback: run_v3_search(p))
 
             matches: List[PolicyMatch] = []
             above_threshold = 0
@@ -694,7 +685,7 @@ class VectorRetriever:
                             txt = (d.get(pol_chunk_text) or d.get("text") or "").strip()
                             out[str(pid)] = txt
                     return out
-                policy_parent_map = await _run_in_thread(fetch_policy_parents)
+                policy_parent_map = await run_in_thread(fetch_policy_parents)
                 for i, m in enumerate(matches):
                     pid = policy_results[i].get("parent_chunk_id") if i < len(policy_results) else None
                     if pid is not None:
@@ -712,7 +703,7 @@ class VectorRetriever:
                     if not doc:
                         return ""
                     return (doc.get(stat_chunk_text) or doc.get(emb_text) or doc.get("text") or "").strip()
-                statute_parent_context = await _run_in_thread(fetch_statute_parent)
+                statute_parent_context = await run_in_thread(fetch_statute_parent)
 
             pairs.append(
                 StatutePolicyPairV3(

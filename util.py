@@ -15,6 +15,7 @@ from db import (
     get_embedding_model_record,
     utc_now,
 )
+from security import require_api_key
 
 logger = logging.getLogger("web-gather-api")
 
@@ -66,6 +67,7 @@ def _validate_embedding_model_document(payload: Any) -> tuple[dict | None, str |
 
 
 @util_bp.get("/embedding-models")
+@require_api_key
 def list_embedding_models():
     """List embedding models."""
     logger.info("GET /embedding-models - Listing embedding models")
@@ -79,6 +81,7 @@ def list_embedding_models():
 
 
 @util_bp.post("/embedding-models")
+@require_api_key
 def add_embedding_model():
     """Add or update an embedding model document. Body must include database_name, model_name, and fields (vector index definitions)."""
     logger.info("POST /embedding-models - Adding embedding model")
@@ -108,6 +111,7 @@ def _build_filter_field(path: str) -> dict:
 
 
 @util_bp.post("/create-vector-index")
+@require_api_key
 def create_vector_index():
     """Create a vector search index on a collection using the embedding_model document from web-gather.
 

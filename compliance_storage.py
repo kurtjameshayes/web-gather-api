@@ -1,22 +1,14 @@
 """Storage for compliance suite results, alerts, and run log."""
 from __future__ import annotations
 
-import asyncio
 import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from async_utils import run_in_thread
 from compliance_config import ComplianceConfig
 from compliance_utils import utc_now
-
-
-async def _run_in_thread(func, *args, **kwargs):
-    """Run sync function in a thread (Python 3.8 compat: asyncio.to_thread added in 3.9)."""
-    if hasattr(asyncio, "to_thread"):
-        return await asyncio.to_thread(func, *args, **kwargs)
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
 
 
 def _iso(dt: Optional[datetime] = None) -> str:
@@ -56,7 +48,7 @@ class ComplianceStorage:
             self._results().insert_one(doc)
             return doc["_id"]
 
-        return await _run_in_thread(insert)
+        return await run_in_thread(insert)
 
     async def get_last_compliance_result(
         self,
@@ -77,7 +69,7 @@ class ComplianceStorage:
             )
             return next(cursor, None)
 
-        doc = await _run_in_thread(find)
+        doc = await run_in_thread(find)
         if doc and "_id" in doc:
             doc["_id"] = str(doc["_id"])
         return doc
@@ -93,7 +85,7 @@ class ComplianceStorage:
             self._alerts().insert_one(doc)
             return alert_id
 
-        return await _run_in_thread(insert)
+        return await run_in_thread(insert)
 
     async def write_compliance_run_log(self, doc: Dict[str, Any]) -> None:
         """Append an audit run log entry."""
@@ -102,7 +94,7 @@ class ComplianceStorage:
         def insert():
             self._run_log().insert_one(doc)
 
-        await _run_in_thread(insert)
+        await run_in_thread(insert)
 
     async def get_last_drift_check_at(self) -> Optional[datetime]:
         """Return the timestamp of the last drift check, or None."""
@@ -113,7 +105,7 @@ class ComplianceStorage:
             )
             return doc
 
-        doc = await _run_in_thread(find)
+        doc = await run_in_thread(find)
         if not doc or not doc.get("last_drift_check_at"):
             return None
         val = doc["last_drift_check_at"]
@@ -137,7 +129,7 @@ class ComplianceStorage:
         def insert():
             self._run_log().insert_one(doc)
 
-        await _run_in_thread(insert)
+        await run_in_thread(insert)
 
     async def list_policy_document_ids(self, database: Optional[str] = None) -> List[str]:
         """List policy document ids from the policies collection (for drift: policies to re-analyze)."""
@@ -149,7 +141,7 @@ class ComplianceStorage:
             cursor = self._client[db_name][coll_name].find({}, {id_field: 1})
             return [str(doc[id_field]) for doc in cursor if doc.get(id_field)]
 
-        return await _run_in_thread(find)
+        return await run_in_thread(find)
 
     async def list_runs(
         self,
@@ -186,7 +178,7 @@ class ComplianceStorage:
             docs = list(cursor)
             return docs, total
 
-        docs, total = await _run_in_thread(find_and_count)
+        docs, total = await run_in_thread(find_and_count)
         run_summaries: List[Dict[str, Any]] = []
         for doc in docs:
             run_id = str(doc.get("_id", ""))
@@ -218,7 +210,7 @@ class ComplianceStorage:
         def find():
             return self._results().find_one({"_id": run_id})
 
-        doc = await _run_in_thread(find)
+        doc = await run_in_thread(find)
         if not doc:
             return None
         if "_id" in doc:
@@ -257,7 +249,7 @@ class ComplianceStorage:
             )
             return list(cursor), total
 
-        docs, total = await _run_in_thread(find_and_count)
+        docs, total = await run_in_thread(find_and_count)
         out: List[Dict[str, Any]] = []
         for doc in docs:
             d = dict(doc)

@@ -1,23 +1,15 @@
 """Audit logger for compliance comparisons (hashes only)."""
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 from typing import Any, Dict, List, Optional
 
 from cryptography.fernet import Fernet
 
+from async_utils import run_in_thread
 from compliance_config import ComplianceConfig
 from compliance_utils import hash_text, utc_now
-
-
-async def _run_in_thread(func, *args, **kwargs):
-    """Run sync function in a thread (Python 3.8 compat: asyncio.to_thread added in 3.9)."""
-    if hasattr(asyncio, "to_thread"):
-        return await asyncio.to_thread(func, *args, **kwargs)
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
 
 
 class AuditLogger:
@@ -68,4 +60,4 @@ class AuditLogger:
 
         collection = self._mongo_client[database][self._collection]
 
-        await _run_in_thread(lambda: collection.insert_one(record))
+        await run_in_thread(lambda: collection.insert_one(record))

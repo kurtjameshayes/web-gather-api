@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from bson import ObjectId
 from bson.errors import InvalidId
 
+from async_utils import run_in_thread
 from compliance_config import ComplianceConfig
 from compliance_suite_schemas import (
     _score_assessment,
@@ -49,13 +50,6 @@ from llm_client import AnthropicLLMClient
 from rate_limiter import RateLimiter
 from vector_retriever import ChunkPair, StatuteCandidate, SubchunkPair, VectorRetriever
 
-
-async def _run_in_thread(func, *args, **kwargs):
-    """Run sync function in a thread (Python 3.8 compat: asyncio.to_thread added in 3.9)."""
-    if hasattr(asyncio, "to_thread"):
-        return await asyncio.to_thread(func, *args, **kwargs)
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
 
 # Re-export for typing
 from compliance_suite_schemas import (
@@ -122,9 +116,17 @@ class ComplianceSuiteService:
         self._storage = storage
         self._rate_limiter = rate_limiter
         self._gap_analysis_v4_service = gap_analysis_v4_service
-        self._semaphore = asyncio.Semaphore(config.llm_concurrency)
+        self._llm_concurrency = config.llm_concurrency
+        self.__semaphore: asyncio.Semaphore | None = None
         self._database = config.compliance_database
         self._retrieval_database = (config.statute_database or "").strip() or config.compliance_database
+
+    @property
+    def _sem(self) -> asyncio.Semaphore:
+        """Lazily create semaphore in the context of the current event loop."""
+        if self.__semaphore is None:
+            self.__semaphore = asyncio.Semaphore(self._llm_concurrency)
+        return self.__semaphore
 
     async def _load_policy_text(
         self,
@@ -151,7 +153,7 @@ class ComplianceSuiteService:
                     doc = coll.find_one({"_id": policy_document_id})
             return doc
 
-        doc = await _run_in_thread(find)
+        doc = await run_in_thread(find)
         if not doc:
             return "", None
         text = (doc.get("text") or "").strip()
@@ -187,7 +189,7 @@ class ComplianceSuiteService:
         def find():
             return list(self._mongo_client[db][coll_name].find(query).limit(limit))
 
-        all_docs = await _run_in_thread(find)
+        all_docs = await run_in_thread(find)
 
         requested_set: Dict[str, str] = {}
         for j in jurisdictions:
@@ -242,7 +244,7 @@ class ComplianceSuiteService:
                 ).sort("chunk_index", 1)
             )
 
-        chunks = await _run_in_thread(find_chunks)
+        chunks = await run_in_thread(find_chunks)
         if not chunks:
             return "", None
 
@@ -324,7 +326,7 @@ class ComplianceSuiteService:
             def _count_policy_subchunks():
                 return pol_coll.count_documents({doc_id_field: policy_document_id})
 
-            n = await _run_in_thread(_count_policy_subchunks)
+            n = await run_in_thread(_count_policy_subchunks)
             if n == 0:
                 raise ComplianceSuiteServiceError(
                     "Policy not indexed for gap analysis. Index this policy into "
@@ -361,7 +363,7 @@ class ComplianceSuiteService:
             seen.add(key)
             statute_chunk_ids_used.append(f"{statute_ref}:{subchunk_id}")
 
-            async with self._semaphore:
+            async with self._sem:
                 result = await self._llm_client.gap_check_subchunks(
                     statute_subchunk_text=statute_subchunk,
                     statute_chunk_text=statute_chunk,
@@ -509,7 +511,7 @@ class ComplianceSuiteService:
             def _count_policy_chunks():
                 return pol_coll.count_documents({doc_id_field: policy_document_id})
 
-            n = await _run_in_thread(_count_policy_chunks)
+            n = await run_in_thread(_count_policy_chunks)
             if n == 0:
                 raise ComplianceSuiteServiceError(
                     "Policy not indexed for gap analysis (v2). Index this policy into "
@@ -541,7 +543,7 @@ class ComplianceSuiteService:
             seen.add(key)
             statute_chunk_ids_used.append(f"{statute_ref}:{chunk_id}")
 
-            async with self._semaphore:
+            async with self._sem:
                 result = await self._llm_client.gap_check_chunks(
                     statute_chunk_text=statute_chunk_text,
                     policy_chunk_text=policy_chunk_text,
@@ -785,7 +787,7 @@ class ComplianceSuiteService:
                 chunk_text = self._v4_statute_text(doc)
                 if not chunk_text:
                     continue
-                async with self._semaphore:
+                async with self._sem:
                     out = await self._llm_client.requirement_extraction(chunk_text)
                 for r in out.get("requirements", [])[:3]:
                     reqs.append({"label": r.get("label", ""), "description": r.get("description", ""), "jurisdiction": j})
@@ -804,7 +806,7 @@ class ComplianceSuiteService:
                         break
             if not j_descriptions:
                 continue
-            async with self._semaphore:
+            async with self._sem:
                 out = await self._llm_client.strictness_comparison(cid, j_descriptions)
             strictest_j = out.get("strictest_jurisdiction") or (j_descriptions[0]["jurisdiction"] if j_descriptions else "")
             strictest_desc = out.get("strictest_description") or ""
@@ -856,7 +858,7 @@ class ComplianceSuiteService:
             cursor = statutes_coll.find(new_chunk_filter, {jurisdiction_field: 1, "_id": 1})
             return list(cursor)
 
-        new_chunks = await _run_in_thread(find_new_chunks)
+        new_chunks = await run_in_thread(find_new_chunks)
         affected_jurisdictions: List[str] = []
         if new_chunks:
             for d in new_chunks:
@@ -1098,7 +1100,7 @@ class ComplianceSuiteService:
                 if key in seen:
                     continue
                 seen.add(key)
-                async with self._semaphore:
+                async with self._sem:
                     out = await self._llm_client.citation_check(
                         policy_excerpt=policy_text[:3000],
                         statute_chunk_text=chunk_text,
@@ -1152,7 +1154,7 @@ class ComplianceSuiteService:
                     statute_parts.append(f"[{jurisdiction}] {chunk_text[:500]}")
         statute_summary = "\n\n".join(statute_parts)[:6000]
 
-        async with self._semaphore:
+        async with self._sem:
             assessment = await self._llm_client.risk_assessment(policy_text, statute_summary)
 
         report_md = None
@@ -1191,7 +1193,7 @@ class ComplianceSuiteService:
         if not await self._rate_limiter.allow():
             raise ComplianceSuiteServiceError("Rate limit exceeded", status_code=429)
 
-        async with self._semaphore:
+        async with self._sem:
             result = await self._llm_client.suggest_policy(
                 policy_text=req.policy_text,
                 gap_analysis_text=req.gap_analysis_text,
@@ -1273,7 +1275,7 @@ class ComplianceSuiteService:
 
         async def _call_for_type(rt: str) -> tuple:
             label = REQUEST_TYPE_LABELS.get(rt, rt)
-            async with self._semaphore:
+            async with self._sem:
                 result = await self._llm_client.consumer_rights_router(
                     request_type=rt,
                     request_type_label=label,

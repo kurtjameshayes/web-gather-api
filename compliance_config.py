@@ -299,8 +299,13 @@ def load_config() -> ComplianceConfig:
     data["allow_raw_audit"] = _to_bool(
         os.getenv("COMPLIANCE_ALLOW_RAW_AUDIT"), data["allow_raw_audit"]
     )
-    data["auth_required"] = _to_bool(os.getenv("COMPLIANCE_AUTH_REQUIRED"), data["auth_required"])
     data["api_key"] = os.getenv("COMPLIANCE_API_KEY") or os.getenv("API_KEY", data["api_key"])
+    # Auto-enable auth when an API key is configured (secure-by-default)
+    auth_env = os.getenv("COMPLIANCE_AUTH_REQUIRED")
+    if auth_env is not None:
+        data["auth_required"] = _to_bool(auth_env, data["auth_required"])
+    elif data["api_key"]:
+        data["auth_required"] = True
     data["embedding_model_name"] = os.getenv("EMBEDDING_MODEL_NAME", data["embedding_model_name"])
     data["llm_model_name"] = os.getenv("LLM_MODEL_NAME", data["llm_model_name"])
 

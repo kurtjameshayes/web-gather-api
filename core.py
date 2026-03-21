@@ -27,11 +27,13 @@ from db import (
     DOCUMENTS_COLLECTION,
     PRIVACY_COMPLIANCE_DB,
     WEB_GATHER_DB,
+    _reject_dangerous_operators,
     get_application_embedding_model,
     get_embedding_model_name,
     get_embedding_model_record,
     utc_now,
 )
+from security import require_api_key
 
 logger = logging.getLogger("web-gather-api")
 
@@ -39,6 +41,15 @@ logger = logging.getLogger("web-gather-api")
 mongo_client = None
 firecrawl_client = None
 anthropic_client = None
+
+# Allowed embedding model names. Reject unknown models to prevent unbounded memory growth.
+ALLOWED_EMBEDDING_MODELS = frozenset({
+    "all-MiniLM-L6-v2",
+    "all-MiniLM-L12-v2",
+    "all-mpnet-base-v2",
+    "multi-qa-MiniLM-L6-cos-v1",
+    "paraphrase-MiniLM-L6-v2",
+})
 
 
 def _validate_url_block_ssrf(url: str) -> tuple[bool, str | None]:
@@ -172,7 +183,8 @@ def calculate_relevance_score(query, title, description):
 
     return round(score, 3)
 
-# Model cache for sentence transformers
+# Bounded model cache (max 5 models, ~500MB)
+_MAX_MODEL_CACHE_SIZE = 5
 _model_cache = {}
 
 core_bp = Blueprint("core", __name__)
@@ -187,11 +199,24 @@ def init_core(mongo, firecrawl, anthropic):
 
 
 def get_model(model_name: str) -> SentenceTransformer:
-    """Get or create a cached sentence transformer model."""
+    """Get or create a cached sentence transformer model.
+
+    Validates model names against an allowlist when the model is not yet cached
+    and the cache is full, to prevent unbounded memory growth.
+    """
     model = _model_cache.get(model_name)
-    if model is None:
-        model = SentenceTransformer(model_name)
-        _model_cache[model_name] = model
+    if model is not None:
+        return model
+    if len(_model_cache) >= _MAX_MODEL_CACHE_SIZE and model_name not in ALLOWED_EMBEDDING_MODELS:
+        raise ValueError(
+            f"Model cache full ({_MAX_MODEL_CACHE_SIZE}) and model '{model_name}' is not in the allowlist. "
+            f"Allowed: {sorted(ALLOWED_EMBEDDING_MODELS)}"
+        )
+    model = SentenceTransformer(model_name)
+    if len(_model_cache) >= _MAX_MODEL_CACHE_SIZE:
+        oldest_key = next(iter(_model_cache))
+        del _model_cache[oldest_key]
+    _model_cache[model_name] = model
     return model
 
 
@@ -1119,6 +1144,7 @@ def serialize_search_result(result, query=None):
 
 
 @core_bp.post("/gather")
+@require_api_key
 def gather():
     """Gather web documents based on query."""
     logger.info("POST /gather - Starting web search")
@@ -1193,6 +1219,7 @@ def gather():
 
 
 @core_bp.post("/ingest")
+@require_api_key
 def ingest():
     """Load a document by crawling a URL or parsing a PDF."""
     logger.info("POST /ingest - Starting document ingestion (load only)")
@@ -1275,10 +1302,10 @@ def ingest():
 
         except requests.RequestException as exc:
             logger.error("POST /ingest - Failed to download PDF %s: %s", url, exc)
-            return jsonify({"error": f"Failed to download PDF: {exc}"}), 500
+            return jsonify({"error": "Failed to download PDF. The URL may be unreachable."}), 500
         except Exception as exc:
             logger.error("POST /ingest - Failed to parse PDF %s: %s", url, exc)
-            return jsonify({"error": f"Failed to parse PDF: {exc}"}), 500
+            return jsonify({"error": "Failed to parse PDF. The file may be corrupted or unsupported."}), 500
     else:
         # Handle web page via Firecrawl
         logger.info("POST /ingest - Crawling web URL: %s (depth=%d, breadth=%d)", url, depth, breadth)
@@ -1289,7 +1316,7 @@ def ingest():
             )
         except Exception as exc:
             logger.error("POST /ingest - Crawl failed for URL %s: %s", url, exc)
-            return jsonify({"error": f"crawl failed: {exc}"}), 500
+            return jsonify({"error": "Crawl failed. The target website may be unreachable or blocking requests."}), 500
 
         # Debug: log crawl result structure
         logger.info("POST /ingest - crawl_result type: %s", type(crawl_result))
@@ -1333,21 +1360,21 @@ def ingest():
     previous_document_count = 0
     overwritten = False
 
-    # Handle overwrite mode - clear existing data in collection
+    # Handle overwrite mode - clear existing documents from same source URL only
     if mode == "overwrite":
-        logger.info("POST /ingest - Overwrite mode: checking for existing data in %s.%s", database_name, collection_name)
-        previous_document_count = db[collection_name].count_documents({})
+        logger.info("POST /ingest - Overwrite mode: checking for existing data from %s in %s.%s", url, database_name, collection_name)
+        overwrite_filter = {"source_url": url}
+        previous_document_count = db[collection_name].count_documents(overwrite_filter)
 
         if previous_document_count > 0:
-            logger.info("POST /ingest - Overwrite mode: clearing %d existing documents", previous_document_count)
+            logger.info("POST /ingest - Overwrite mode: clearing %d existing documents for URL %s", previous_document_count, url)
 
-            # Delete documents from the main collection
-            db[collection_name].delete_many({})
+            db[collection_name].delete_many(overwrite_filter)
 
-            # Delete document metadata records for this collection
             wg_db[DOCUMENTS_COLLECTION].delete_many({
                 "database_name": database_name,
                 "collection_name": collection_name,
+                "source_url": url,
             })
 
             overwritten = True
@@ -1403,6 +1430,7 @@ def ingest():
 
 
 @core_bp.post("/create-embeddings")
+@require_api_key
 def index_document():
     """Index collection rows by embedding text from the specified column."""
     logger.info("POST /create-embeddings - Starting document indexing")
@@ -1439,6 +1467,12 @@ def index_document():
         if not isinstance(source_query, dict):
             logger.warning("POST /create-embeddings - source_query must be a JSON object")
             return jsonify({"error": "source_query must be a JSON object"}), 400
+
+        try:
+            _reject_dangerous_operators(source_query)
+        except ValueError as exc:
+            logger.warning("POST /create-embeddings - Disallowed query operator: %s", exc)
+            return jsonify({"error": str(exc)}), 400
 
     logger.info(
         "POST /create-embeddings - Parameters: source_database_name=%s, "
@@ -1632,6 +1666,7 @@ def index_document():
 
 
 @core_bp.get("/search")
+@require_api_key
 def search():
     """Search vector-indexed collection."""
     logger.info("GET /search - Starting vector search")
@@ -1879,6 +1914,7 @@ def _split_into_paragraph_chunks(text: str) -> list[str]:
 
 
 @core_bp.post("/create-paragraph-sections")
+@require_api_key
 def create_subsections():
     """Split source column into paragraph chunks and write to a new collection.
 
@@ -2171,6 +2207,7 @@ requirements, return an empty sub_topics array: {"sub_topics": []}."""
 
 
 @core_bp.post("/create-statute-subsections")
+@require_api_key
 def create_statute_subsections():
     """Split statute section column into subsections using LLM and write to destination collection.
 
@@ -2400,6 +2437,7 @@ Return only valid JSON with the subsections array. Use start_line and end_line f
 
 
 @core_bp.post("/create-statute-subtopics")
+@require_api_key
 def create_statute_subtopics():
     """Identify compliance sub_topics from statute sections using LLM and write to destination collection.
 
@@ -2862,6 +2900,7 @@ Return ONLY valid JSON with this exact structure (no surrounding text):
 
 
 @core_bp.post("/parse-policy-subsections")
+@require_api_key
 def parse_policy_subsections():
     """Parse policy section column into subsections using LLM and return in response.
 
@@ -2995,6 +3034,7 @@ def _get_index_job_storage():
 
 
 @core_bp.post("/create-sub-vector-index")
+@require_api_key
 def create_sub_vector_index():
     """Start a background job to create sub-vector indexes (subsections -> embeddings -> vector index).
 
@@ -3057,6 +3097,7 @@ def create_sub_vector_index():
 
 
 @core_bp.get("/index-jobs/<job_id>")
+@require_api_key
 def get_index_job(job_id: str):
     """Get index job status and result."""
     job_storage = _get_index_job_storage()
@@ -3067,6 +3108,7 @@ def get_index_job(job_id: str):
 
 
 @core_bp.post("/create-chunks")
+@require_api_key
 def create_chunks():
     """Chunk source column with overlap and write to destination collection.
 
@@ -3179,6 +3221,7 @@ def create_chunks():
 
 
 @core_bp.post("/parse-llm")
+@require_api_key
 def parse_llm():
     """Parse document text from a collection using LLM.
 
@@ -3489,6 +3532,7 @@ Respond with only a valid JSON object. Use these exact keys: addressed, policy_q
 
 
 @core_bp.post("/gap-check")
+@require_api_key
 def gap_check():
     """Single statute-to-policy gap check via LLM.
 
@@ -3618,6 +3662,7 @@ def gap_check():
 
 
 @core_bp.post("/crawl")
+@require_api_key
 def crawl():
     """Crawl a URL with specified depth and breadth, returning combined page text.
 

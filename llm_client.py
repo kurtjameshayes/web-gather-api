@@ -1,26 +1,20 @@
 """LLM client wrapper and prompt templating."""
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from typing import Any, Dict, List, Optional, Protocol
 
 import anthropic
 
+from async_utils import run_in_thread
 from compliance_config import ComplianceConfig
 from compliance_utils import extract_json_block
 from vector_retriever import StatuteCandidate
 
 logger = logging.getLogger("policy-compliance")
 
-
-async def _run_in_thread(func, *args, **kwargs):
-    """Run sync function in a thread (Python 3.8 compat: asyncio.to_thread added in 3.9)."""
-    if hasattr(asyncio, "to_thread"):
-        return await asyncio.to_thread(func, *args, **kwargs)
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
+LLM_TIMEOUT_SECONDS = 60
 
 
 RETRIEVAL_PROMPT_TEMPLATE = """You are a privacy law analyst. Compare the following policy section to the candidate statute excerpts. For each statute excerpt, say whether it applies and why. Then decide overall compliance for the policy section.
@@ -259,7 +253,10 @@ def build_prompt(section_text: str, candidates: List[StatuteCandidate]) -> str:
 
 class AnthropicLLMClient:
     def __init__(self, api_key: str, config: ComplianceConfig) -> None:
-        self._client = anthropic.Anthropic(api_key=api_key)
+        self._client = anthropic.Anthropic(
+            api_key=api_key,
+            timeout=LLM_TIMEOUT_SECONDS,
+        )
         self._config = config
         self._model = config.llm_model_name
         self._max_tokens = config.llm_max_tokens
@@ -284,7 +281,7 @@ class AnthropicLLMClient:
                     content.append(block.text)
             return "".join(content)
 
-        text = await _run_in_thread(run_call)
+        text = await run_in_thread(run_call)
         raw = extract_json_block(text)
         if raw:
             try:
@@ -292,7 +289,7 @@ class AnthropicLLMClient:
                 return text
             except json.JSONDecodeError:
                 pass
-        text = await _run_in_thread(lambda: run_call(reminder))
+        text = await run_in_thread(lambda: run_call(reminder))
         return text
 
     async def _call_json(self, prompt: str, retry_with_reminder: bool = True, max_tokens: Optional[int] = None) -> Optional[Dict[str, Any]]:
@@ -313,7 +310,7 @@ class AnthropicLLMClient:
                     content.append(block.text)
             return "".join(content)
 
-        text = await _run_in_thread(run_call)
+        text = await run_in_thread(run_call)
         raw = extract_json_block(text)
         if raw:
             try:
@@ -321,7 +318,7 @@ class AnthropicLLMClient:
             except json.JSONDecodeError:
                 pass
         if retry_with_reminder:
-            text = await _run_in_thread(lambda: run_call(reminder))
+            text = await run_in_thread(lambda: run_call(reminder))
             raw = extract_json_block(text)
             if raw:
                 try:
