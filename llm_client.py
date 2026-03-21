@@ -416,11 +416,12 @@ class AnthropicLLMClient:
         statutory_requirement: str,
         policy_text: str,
         prompt_path: Optional[str] = None,
+        adaptive_feedback: str = "",
     ) -> Dict[str, Any]:
         """V4 gap analysis: Returns status, policy_quote, statute_quote, requirement_summary, conflict_description, confidence.
 
         Uses REFERENCE_CONTEXT (definitions, applicability) + STATUTORY_REQUIREMENT + POLICY_TEXT.
-        Same output schema as gap_check_v3.
+        adaptive_feedback is injected from prior critic evaluations when available.
         """
         path = prompt_path or getattr(
             self._config, "gap_analysis_v4_prompt_path", "prompts/gap_analysis_v4.yaml"
@@ -430,6 +431,7 @@ class AnthropicLLMClient:
         cfg = load_prompt_yaml(path)
         prompt = render_prompt(
             cfg["prompt"],
+            ADAPTIVE_FEEDBACK=adaptive_feedback or "",
             REFERENCE_CONTEXT=reference_context or "",
             STATUTORY_REQUIREMENT=statutory_requirement or "",
             POLICY_TEXT=policy_text or "",

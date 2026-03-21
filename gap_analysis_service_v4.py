@@ -5,7 +5,8 @@ Single Python file, easy-to-follow POC.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Set
+import logging
+from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING
 
 from compliance_config import ComplianceConfig
 from compliance_suite_schemas import (
@@ -18,6 +19,11 @@ from compliance_suite_schemas import (
 from compliance_utils import truncate_at_sentence, utc_now
 from llm_client import AnthropicLLMClient
 from rate_limiter import RateLimiter
+
+if TYPE_CHECKING:
+    from adaptive_feedback_service import CriticService
+
+logger = logging.getLogger("policy-compliance")
 
 # Statute categories we analyze for compliance (not just context)
 ANALYZE_CATEGORIES = ("consumer_rights", "controller_duties")
@@ -48,11 +54,14 @@ class GapAnalysisServiceV4:
         config: ComplianceConfig,
         llm_client: AnthropicLLMClient,
         rate_limiter: RateLimiter,
+        critic: Optional["CriticService"] = None,
     ) -> None:
         self.mongo = mongo_client
         self.cfg = config
         self.llm = llm_client
         self.rate_limiter = rate_limiter
+        self.critic = critic
+        self._cfg_enabled = config.adaptive_feedback_enabled
         self.db = (config.statute_database or "").strip() or config.compliance_database
 
     def _load_policy_doc(self, policies_coll: Any, policy_id: str) -> Optional[Dict[str, Any]]:
@@ -118,6 +127,22 @@ class GapAnalysisServiceV4:
 
         jurisdictions = req.applicable_jurisdictions or self.cfg.default_jurisdictions or ["CA"]
         policy_filter = {doc_id_f: {"$in": policy_ids}} if len(policy_ids) > 1 else {doc_id_f: policy_ids[0]}
+
+        # --- STEP 1b: Retrieve adaptive feedback from prior runs ---
+        adaptive_feedback_text = ""
+        feedback_ids_used: List[str] = []
+        if self.critic and self.cfg.adaptive_feedback_enabled:
+            try:
+                feedback_docs = self.critic.get_active_feedback(policy_ids[0])
+                if feedback_docs:
+                    adaptive_feedback_text = self.critic.format_feedback_for_prompt(feedback_docs)
+                    feedback_ids_used = [d["_id"] for d in feedback_docs]
+                    logger.info(
+                        "Injecting %d adaptive feedback items into v4 gap analysis for policy %s",
+                        len(feedback_ids_used), policy_ids[0],
+                    )
+            except Exception as exc:
+                logger.warning("Failed to retrieve adaptive feedback: %s", exc)
 
         gaps: List[GapItem] = []
         seen: Set[str] = set()
@@ -189,6 +214,7 @@ class GapAnalysisServiceV4:
                     reference_context=reference_context,
                     statutory_requirement=statutory_requirement,
                     policy_text=policy_block,
+                    adaptive_feedback=adaptive_feedback_text,
                 )
 
                 analysis_failed = result.get("_analysis_failed", False)
@@ -271,13 +297,15 @@ class GapAnalysisServiceV4:
         )
 
         # --- STEP 5: Persist ---
+        run_id: Optional[str] = None
         if getattr(req, "save_results", True):
             try:
-                import uuid
+                import uuid as _uuid
+                run_id = str(_uuid.uuid4())
                 res_coll = self.mongo[db_for_policy][self.cfg.compliance_results_collection]
                 log_coll = self.mongo[db_for_policy][self.cfg.compliance_run_log_collection]
                 res_doc: Dict[str, Any] = {
-                    "_id": str(uuid.uuid4()),
+                    "_id": run_id,
                     "policy_document_id": policy_doc_id_display,
                     "company_name": company_name,
                     "applicable_jurisdictions": jurisdictions,
@@ -304,8 +332,20 @@ class GapAnalysisServiceV4:
                     log_doc["policy_document_ids"] = policy_ids
                 log_coll.insert_one(log_doc)
             except Exception as e:
-                import logging
-                logging.getLogger("policy-compliance").warning("Failed to write v4 result: %s", e)
+                logger.warning("Failed to write v4 result: %s", e)
+
+        # --- STEP 6: Record feedback usage and trigger critic evaluation ---
+        if self.critic and self._cfg_enabled and run_id:
+            try:
+                if feedback_ids_used:
+                    await self.critic.record_feedback_usage(
+                        run_id=run_id,
+                        feedback_ids=feedback_ids_used,
+                        rendered_text=adaptive_feedback_text,
+                    )
+                await self.critic.evaluate(response, run_id)
+            except Exception as exc:
+                logger.warning("Adaptive feedback step failed for run %s: %s", run_id, exc)
 
         return response
 

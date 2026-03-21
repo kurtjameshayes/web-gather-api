@@ -7,7 +7,7 @@ from flask import Blueprint, jsonify, request
 from pydantic import ValidationError
 
 from compliance_job_service import start_gap_analysis_job
-from compliance_routes import _get_config, _get_gap_analysis_v4_service, _get_job_storage, _get_suite_service
+from compliance_routes import _get_config, _get_critic_service, _get_gap_analysis_v4_service, _get_job_storage, _get_suite_service
 from compliance_suite_schemas import GapAnalysisRequest
 from gap_analysis_service_v4 import GapAnalysisServiceV4Error
 from security import AuthorizationError, authorize_request
@@ -67,3 +67,62 @@ async def gap_analysis_v4():
             return jsonify({"error": str(exc)}), exc.status_code
         logger.exception("Unhandled error in gap_analysis_v4")
         return jsonify({"error": "Internal server error"}), 500
+
+
+@compliance_v4_bp.get("/adaptive-feedback")
+def list_adaptive_feedback():
+    """List adaptive feedback history for a policy."""
+    try:
+        authorize_request(_get_config(), request)
+    except AuthorizationError as exc:
+        return jsonify({"error": exc.message}), exc.status_code
+
+    policy_document_id = request.args.get("policy_document_id")
+    if not policy_document_id:
+        return jsonify({"error": "policy_document_id query parameter is required"}), 400
+
+    active_only = request.args.get("active_only", "false").lower() in ("true", "1", "yes")
+    try:
+        limit = int(request.args.get("limit", 50))
+        limit = max(1, min(limit, 200))
+    except (TypeError, ValueError):
+        limit = 50
+    try:
+        offset = int(request.args.get("offset", 0))
+        offset = max(0, offset)
+    except (TypeError, ValueError):
+        offset = 0
+
+    critic = _get_critic_service()
+    docs = critic.get_feedback_history(
+        policy_document_id=policy_document_id,
+        active_only=active_only,
+        limit=limit,
+        offset=offset,
+    )
+    return jsonify({"feedback": docs, "limit": limit, "offset": offset})
+
+
+@compliance_v4_bp.get("/adaptive-feedback/log")
+def list_adaptive_feedback_log():
+    """List which feedback was consumed by gap analysis runs."""
+    try:
+        authorize_request(_get_config(), request)
+    except AuthorizationError as exc:
+        return jsonify({"error": exc.message}), exc.status_code
+
+    run_id = request.args.get("run_id")
+    try:
+        limit = int(request.args.get("limit", 50))
+        limit = max(1, min(limit, 200))
+    except (TypeError, ValueError):
+        limit = 50
+    try:
+        offset = int(request.args.get("offset", 0))
+        offset = max(0, offset)
+    except (TypeError, ValueError):
+        offset = 0
+
+    critic = _get_critic_service()
+    docs = critic.get_feedback_log(run_id=run_id, limit=limit, offset=offset)
+    return jsonify({"log": docs, "limit": limit, "offset": offset})

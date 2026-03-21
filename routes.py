@@ -2298,6 +2298,144 @@ def build_openapi_spec():
                     },
                 }
             },
+            f"{COMPLIANCE_V4_API_PREFIX}/adaptive-feedback": {
+                "get": {
+                    "summary": "List adaptive feedback history",
+                    "description": "Returns the adaptive feedback audit trail for a policy. Each document is an immutable critic evaluation from a completed gap analysis run. Use active_only=true to see only the latest non-superseded feedback.",
+                    "parameters": [
+                        {
+                            "name": "policy_document_id",
+                            "in": "query",
+                            "required": True,
+                            "schema": {"type": "string"},
+                            "description": "Policy document ID to list feedback for",
+                        },
+                        {
+                            "name": "active_only",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "boolean", "default": False},
+                            "description": "If true, return only non-superseded (current) feedback",
+                        },
+                        {
+                            "name": "limit",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "integer", "default": 50, "minimum": 1, "maximum": 200},
+                        },
+                        {
+                            "name": "offset",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "integer", "default": 0, "minimum": 0},
+                        },
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Feedback history",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "feedback": {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "_id": {"type": "string"},
+                                                        "run_id": {"type": "string"},
+                                                        "policy_document_id": {"type": "string"},
+                                                        "created_at": {"type": "string"},
+                                                        "version": {"type": "string"},
+                                                        "summary_evaluation": {"type": "string"},
+                                                        "suggestions": {
+                                                            "type": "array",
+                                                            "items": {
+                                                                "type": "object",
+                                                                "properties": {
+                                                                    "category": {"type": "string"},
+                                                                    "description": {"type": "string"},
+                                                                    "instruction": {"type": "string"},
+                                                                    "statute_reference": {"type": "string", "nullable": True},
+                                                                    "severity": {"type": "string"},
+                                                                },
+                                                            },
+                                                        },
+                                                        "gap_summary_snapshot": {"type": "object"},
+                                                        "superseded_by": {"type": "string", "nullable": True},
+                                                    },
+                                                },
+                                            },
+                                            "limit": {"type": "integer"},
+                                            "offset": {"type": "integer"},
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                        "400": {"description": "Missing policy_document_id", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                    },
+                    "tags": ["Compliance V4"],
+                },
+            },
+            f"{COMPLIANCE_V4_API_PREFIX}/adaptive-feedback/log": {
+                "get": {
+                    "summary": "List adaptive feedback consumption log",
+                    "description": "Returns which feedback was injected into each gap analysis run, including the exact prompt text sent to the LLM.",
+                    "parameters": [
+                        {
+                            "name": "run_id",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "string"},
+                            "description": "Filter by gap analysis run ID",
+                        },
+                        {
+                            "name": "limit",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "integer", "default": 50, "minimum": 1, "maximum": 200},
+                        },
+                        {
+                            "name": "offset",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "integer", "default": 0, "minimum": 0},
+                        },
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Feedback consumption log",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "log": {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "_id": {"type": "string"},
+                                                        "run_id": {"type": "string"},
+                                                        "feedback_ids_used": {"type": "array", "items": {"type": "string"}},
+                                                        "feedback_instructions_text": {"type": "string"},
+                                                        "created_at": {"type": "string"},
+                                                    },
+                                                },
+                                            },
+                                            "limit": {"type": "integer"},
+                                            "offset": {"type": "integer"},
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                    "tags": ["Compliance V4"],
+                },
+            },
             f"{COMPLIANCE_API_PREFIX}/multi-jurisdictional": {
                 "post": {
                     "summary": "Strictest common denominator",

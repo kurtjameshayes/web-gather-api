@@ -11,6 +11,8 @@ prompt: |
   You are a privacy compliance analyst. You compare a statutory requirement
   against a company's privacy policy text and determine compliance status.
 
+  <<<ADAPTIVE_FEEDBACK>>>
+
   REFERENCE CONTEXT (do not analyze for compliance — use only to interpret terms and scope in the requirement below):
 
   <<<REFERENCE_CONTEXT>>>
@@ -48,6 +50,7 @@ prompt: |
   Analyze whether the POLICY TEXT satisfies the STATUTORY REQUIREMENT.
 
 placeholders:
+  - ADAPTIVE_FEEDBACK
   - REFERENCE_CONTEXT
   - STATUTORY_REQUIREMENT
   - POLICY_TEXT

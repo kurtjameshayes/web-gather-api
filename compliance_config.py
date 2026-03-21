@@ -124,6 +124,12 @@ class ComplianceConfig:
     category_mapping_collection: str
     gap_analysis_v4_prompt_path: str
     consumer_rights_router_prompt_path: str
+    # Adaptive feedback loop (v4 gap analysis)
+    adaptive_feedback_collection: str
+    adaptive_feedback_log_collection: str
+    adaptive_feedback_enabled: bool
+    adaptive_feedback_max_items: int
+    adaptive_critic_prompt_path: str
 
 
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -249,6 +255,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "category_mapping_collection": "category_mapping",
     "gap_analysis_v4_prompt_path": "prompts/gap_analysis_v4.yaml",
     "consumer_rights_router_prompt_path": "prompts/consumer_rights_router.yaml",
+    # Adaptive feedback loop
+    "adaptive_feedback_collection": "adaptive_feedback",
+    "adaptive_feedback_log_collection": "adaptive_feedback_log",
+    "adaptive_feedback_enabled": True,
+    "adaptive_feedback_max_items": 5,
+    "adaptive_critic_prompt_path": "prompts/adaptive_critic.yaml",
 }
 
 
@@ -413,4 +425,9 @@ def load_config() -> ComplianceConfig:
         category_mapping_collection=data.get("category_mapping_collection", DEFAULT_CONFIG["category_mapping_collection"]),
         gap_analysis_v4_prompt_path=data.get("gap_analysis_v4_prompt_path", DEFAULT_CONFIG["gap_analysis_v4_prompt_path"]),
         consumer_rights_router_prompt_path=data.get("consumer_rights_router_prompt_path", DEFAULT_CONFIG["consumer_rights_router_prompt_path"]),
+        adaptive_feedback_collection=data.get("adaptive_feedback_collection", DEFAULT_CONFIG["adaptive_feedback_collection"]),
+        adaptive_feedback_log_collection=data.get("adaptive_feedback_log_collection", DEFAULT_CONFIG["adaptive_feedback_log_collection"]),
+        adaptive_feedback_enabled=_to_bool(os.getenv("ADAPTIVE_FEEDBACK_ENABLED"), data.get("adaptive_feedback_enabled", DEFAULT_CONFIG["adaptive_feedback_enabled"])),
+        adaptive_feedback_max_items=_to_int(os.getenv("ADAPTIVE_FEEDBACK_MAX_ITEMS"), data.get("adaptive_feedback_max_items", DEFAULT_CONFIG["adaptive_feedback_max_items"])),
+        adaptive_critic_prompt_path=data.get("adaptive_critic_prompt_path", DEFAULT_CONFIG["adaptive_critic_prompt_path"]),
     )

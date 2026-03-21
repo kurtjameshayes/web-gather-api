@@ -42,15 +42,18 @@ logger = logging.getLogger("policy-compliance")
 
 compliance_bp = Blueprint("compliance", __name__)
 
+from adaptive_feedback_service import CriticService
+
 _suite_service: ComplianceSuiteService | None = None
 _gap_analysis_v3_service: GapAnalysisServiceV3 | None = None
 _gap_analysis_v4_service: GapAnalysisServiceV4 | None = None
+_critic_service: CriticService | None = None
 _job_storage: ComplianceJobStorage | None = None
 _config: ComplianceConfig | None = None
 
 
 def init_compliance(mongo_client) -> None:
-    global _suite_service, _gap_analysis_v3_service, _gap_analysis_v4_service, _job_storage, _config
+    global _suite_service, _gap_analysis_v3_service, _gap_analysis_v4_service, _critic_service, _job_storage, _config
     _config = load_config()
 
     # Ensure MongoDB indexes on privacy-compliance collections (idempotent).
@@ -84,11 +87,19 @@ def init_compliance(mongo_client) -> None:
     rate_limiter = RateLimiter(_config.rate_limit_per_minute)
     storage = ComplianceStorage(mongo_client, _config)
 
+    _critic_service = CriticService(
+        mongo_client=mongo_client,
+        config=_config,
+        llm_client=llm_client,
+    )
+    _critic_service.ensure_indexes()
+
     _gap_analysis_v4_service = GapAnalysisServiceV4(
         mongo_client=mongo_client,
         config=_config,
         llm_client=llm_client,
         rate_limiter=rate_limiter,
+        critic=_critic_service,
     )
     _suite_service = ComplianceSuiteService(
         mongo_client=mongo_client,
@@ -184,6 +195,12 @@ def _get_gap_analysis_v4_service() -> GapAnalysisServiceV4:
     if _gap_analysis_v4_service is None:
         raise RuntimeError("Gap analysis v4 service not initialized.")
     return _gap_analysis_v4_service
+
+
+def _get_critic_service() -> CriticService:
+    if _critic_service is None:
+        raise RuntimeError("Critic service not initialized.")
+    return _critic_service
 
 
 def _get_job_storage() -> ComplianceJobStorage:
