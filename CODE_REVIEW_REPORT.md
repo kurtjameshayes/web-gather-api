@@ -6,6 +6,23 @@
 
 ---
 
+## Resolved Findings (as of 2025-03-18)
+
+The following findings have been addressed in the codebase:
+
+| Finding | Resolution |
+|---------|-------------|
+| **NoSQL injection** (`db.py`) | Added `_reject_dangerous_operators()`; rejects `$` operators except `$oid`; applied to GET and DELETE `/documents` |
+| **SSRF** (`core.py`) | Added `_validate_url_block_ssrf()`; validates scheme (http/https); blocks localhost, private IPs, link-local |
+| **Unvalidated database/collection names** (`db.py`) | Now uses `validate_collection_name` from `compliance_utils`; rejects reserved names (admin, config, local) |
+| **Unbounded `find()` in GET /documents** (`db.py`) | Added `.limit(10_000)` |
+| **Depth/breadth validation** (`core.py` ingest/crawl) | Wrapped in try/except; breadth capped at 100; depth capped at 10 for crawl |
+| **Full request body logging** (`app.py`) | Added `_safe_log_body()`; redacts sensitive keys; truncates to 500 chars |
+| **MongoDB URI in logs** (`app.py`) | Now logs only hostname via `urlparse` |
+| **Typo "SLM"** (`core.py`, `routes.py`) | Fixed to "LLM" in gap-check error message and OpenAPI spec |
+
+---
+
 ## Phase 1: Structural Analysis
 
 ### Architecture
@@ -28,13 +45,8 @@
 
 | Severity | Location | Issue | Evidence | Impact | Fix |
 |----------|----------|-------|----------|--------|-----|
-| **Critical** | `db.py` L85–97, L136–148, L183–206 | `_convert_extended_json` (GET) and raw JSON (DELETE) pass user-provided query to MongoDB; allows `$` operators | GET: query param recursively passed through; only `$oid` converted. DELETE: `json.loads(query_param)` passed directly to `delete_many` with no operator sanitization | **NoSQL injection**: Attacker can execute arbitrary JavaScript in `$where`, bypass filters with `$regex`, or wipe collections via `delete_many({"$where":"1==1"})` | Whitelist allowed query keys; reject any key starting with `$` except `$oid` in controlled context; apply same sanitization to both GET and DELETE |
-| **High** | `db.py` L152–153, L206 | Unbounded `find()` and `delete_many()` with user-controlled query | `list(db[collection_name].find(mongo_query))` with no `.limit()`; `delete_many(mongo_query)` with no limit | **DoS**: Large result set can exhaust memory; `delete_many` with broad query can wipe collections | Add `.limit()` (e.g. 10,000) or pagination for `find`; require explicit confirmation for bulk deletes |
-| **High** | `db.py` L128–129, L152 | `database_name` and `collection_name` from request used directly in `mongo_client[db][coll]` | No validation; names like `"../../../admin"` or `"$"` could cause issues | **Path traversal / injection**: Access to unintended collections or crashes | Use `validate_collection_name` from `compliance_utils`; reject `..`, `$`, and empty |
-| **Medium** | `core.py` L1162 | `int(payload.get("depth", 1))` can raise for non-numeric input | `int("x")` raises `ValueError` | 500 instead of 400 for invalid input | Wrap in try/except; return 400 with clear message |
-| **Medium** | `core.py` L1162 | `breadth` default 5; no upper bound | `breadth=999999` can cause excessive crawl | **Resource exhaustion** | Add `max(breadth, 1)` and `min(breadth, 100)` or similar cap |
+| **High** | `db.py` L206 | `delete_many()` with user-controlled query has no limit | `delete_many(mongo_query)` can wipe entire collections | **Data loss**: Broad query can delete all documents | Require explicit confirmation param for bulk deletes; or add max delete limit |
 | **Low** | `compliance_routes.py` L202, L227 | `ValidationError` details passed to `jsonify`; `exc.errors()` may contain non-serializable values | `return jsonify({"error": "Validation error", "details": exc.errors()}), 422` | **500** when Pydantic returns `ValueError` in ctx | Sanitize: `[{k: str(v) if k == "ctx" else v for k, v in e.items()} for e in exc.errors()]` |
-| **Low** | `core.py` L3554 | Typo in error message | `"Could not parse SLM response"` (should be "LLM") | Confusing logs | Fix typo |
 
 ### State Management
 
@@ -51,16 +63,6 @@
 
 | Severity | Location | Issue | Evidence | Impact | Fix |
 |----------|----------|-------|----------|--------|-----|
-| **Critical** | `db.py` L85–97, L136–148, L183–206 | NoSQL operator injection via `query` param | GET: `_convert_extended_json` passes `$where`, `$regex`, etc. to `find()`. DELETE: raw JSON passed to `delete_many()` | Arbitrary query execution; data exfiltration; collection wipe via `delete_many` | Whitelist allowed keys; reject `$`-prefixed keys from user input; apply to both endpoints |
-| **High** | `db.py` L152, L206 | `database_name` and `collection_name` from request not validated | `mongo_client[database_name]`, `db[collection_name]` | Access to unintended DBs/collections (e.g. `admin`, `config`) | Use `validate_collection_name` from `compliance_utils` (exists but unused); reject reserved names |
-| **High** | `core.py` L1161, L3579 | URL from user passed to `requests.head`, `firecrawl_client.crawl`, browser automation | No URL validation for scheme or host | **SSRF**: Crawl `http://169.254.169.254/` (metadata), `http://localhost:6379`, internal services | Validate scheme (http/https only); block private IP ranges (127.0.0.0/8, 10.0.0.0/8, 169.254.0.0/16); optionally block localhost |
-| **Medium** | `app.py` L109–121 | Full request body logged in `log_request_params` | `params["body"] = body` | **PII/secret leakage** in logs; API keys, tokens, policy text | Redact sensitive fields; truncate large bodies; or disable body logging in production |
-| **Medium** | `app.py` L54 | MongoDB URI logged | `MONGODB_URI.split("@")[-1]` | May leak credentials if URI format is unexpected | Log only hostname; avoid logging full URI |
-
-### Authentication & Authorization
-
-| Severity | Location | Issue | Evidence | Impact | Fix |
-|----------|----------|-------|----------|--------|-----|
 | **High** | `db.py`, `core.py`, `util.py` | Most endpoints have no auth | `/documents`, `/write_to_collection`, `/create-embeddings`, `/ingest`, etc. | Unauthenticated access to data and operations | Add API key or JWT auth for sensitive endpoints; document public vs. protected |
 | **Medium** | `security.py` | `authorize_request` checks `x-api-key` and `x-role` | Only compliance endpoints use it; configurable via `auth_required` | If misconfigured, compliance data may be exposed | Ensure `auth_required=True` in production for compliance |
 | **Low** | `compliance_config.py` | API key from env | `config.api_key` | Single shared key; no per-user or per-tenant auth | Consider OAuth or JWT for multi-tenant |
@@ -74,9 +76,8 @@
 
 | Severity | Location | Issue | Evidence | Impact | Fix |
 |----------|----------|-------|----------|--------|-----|
-| **High** | `db.py` L153 | Unbounded `find()` | `list(db[collection_name].find(mongo_query))` | **OOM** for large collections | Add `.limit(10000)` or pagination; document max |
-| **High** | `core.py` L3071, L3174 | Unbounded `find()` | `list(source_coll.find({}))`, `list(db[collection].find())` | Same for bulk processing | Add pagination or streaming; or require explicit `limit` param |
-| **Medium** | `core.py` L1612 | `find()` without `.limit()` | `db[chunk_collection].find({"document_id": ...})` | Large result set if document has many chunks | Add `.limit()` or document expected max |
+| **High** | `core.py` L3128, L3232 | Unbounded `find()` | `list(source_coll.find({}))`, `list(db[collection].find())` | **OOM** for large collections in create-chunks, parse-llm | Add pagination or streaming; or require explicit `limit` param |
+| **Medium** | `core.py` L1669 | `find()` without `.limit()` | `db[chunk_collection].find({"document_id": ...})` | Large result set if document has many chunks | Add `.limit()` or document expected max |
 | **Low** | `compliance_storage.py` | Some queries use `.limit()` | `find(query).limit(limit)` | Good pattern | Apply consistently |
 
 ### External Calls
@@ -84,7 +85,7 @@
 | Severity | Location | Issue | Evidence | Impact | Fix |
 |----------|----------|-------|----------|--------|-----|
 | **Medium** | `core.py` L268, L602 | `requests.head` and `requests.get` have timeout | `timeout=10`, `timeout=60` | Good | Add timeout to all external calls (Firecrawl, Anthropic) |
-| **Medium** | `core.py` L1229, L3635 | Firecrawl and Anthropic calls | No explicit timeout in `firecrawl_client.crawl()` or `anthropic_client.messages.create()` | Slow or hung requests can block workers | Set `timeout` on Anthropic client; check Firecrawl SDK for timeout |
+| **Medium** | `core.py` L1229, L3646 | Firecrawl and Anthropic calls | No explicit timeout in `firecrawl_client.crawl()` or `anthropic_client.messages.create()` | Slow or hung requests can block workers | Set `timeout` on Anthropic client; check Firecrawl SDK for timeout |
 | **Low** | `llm_client.py` | Anthropic LLM calls | No retry with backoff | Transient failures cause immediate error | Add retry with exponential backoff (e.g. 3 retries) |
 
 ### Memory & Resource Leaks
@@ -98,13 +99,6 @@
 
 ## Phase 5: Maintainability & Code Quality
 
-### Naming & Clarity
-
-| Severity | Location | Issue | Evidence | Impact | Fix |
-|----------|----------|-------|----------|--------|-----|
-| **Low** | `core.py` L3554 | Typo | "SLM" instead of "LLM" | Confusion | Fix typo |
-| **Low** | Various | `_convert_extended_json` name misleading | Suggests only conversion; actually passes through `$` operators | Misleading for future maintainers | Rename or document that it allows operators |
-
 ### Duplication
 
 | Severity | Location | Issue | Evidence | Impact | Fix |
@@ -117,7 +111,6 @@
 | Severity | Location | Issue | Evidence | Impact | Fix |
 |----------|----------|-------|----------|--------|-----|
 | **Low** | `core.py` L1946 | `old = """` block | Unused string literal | Noise | Remove or comment out |
-| **Low** | `compliance_utils.py` L98 | `validate_collection_name` defined but never used | `db.py` does not import or call it for `database_name`/`collection_name` | Validation exists but endpoints remain unvalidated | Import and use in `db.py` for document endpoints |
 
 ### Testability
 
@@ -149,7 +142,6 @@
 
 | Severity | Location | Issue | Evidence | Impact | Fix |
 |----------|----------|-------|----------|--------|-----|
-| **Medium** | `app.py` L109–121 | Request body logged | Full body in logs | Useful for debugging; risky for PII | Redact or sample in production |
 | **Low** | Various | `logger.info` at decision points | Good coverage | Logs help diagnose | Add structured logging (e.g. JSON) for production |
 | **Low** | - | No request ID or trace ID | Hard to correlate logs across services | Difficult to trace a request | Add `X-Request-ID` or similar |
 
@@ -160,20 +152,20 @@
 | Phase | Critical | High | Medium | Low |
 |-------|----------|------|--------|-----|
 | **1. Structural** | 0 | 0 | 1 | 1 |
-| **2. Correctness** | 1 | 3 | 2 | 2 |
-| **3. Security** | 1 | 4 | 2 | 2 |
-| **4. Performance** | 0 | 2 | 3 | 2 |
-| **5. Maintainability** | 0 | 0 | 2 | 5 |
+| **2. Correctness** | 0 | 1 | 1 | 1 |
+| **3. Security** | 0 | 1 | 1 | 2 |
+| **4. Performance** | 0 | 1 | 3 | 2 |
+| **5. Maintainability** | 0 | 0 | 2 | 1 |
 | **6. Failure Modes** | 0 | 0 | 3 | 2 |
-| **Total** | **2** | **9** | **13** | **14** |
+| **Total** | **0** | **4** | **11** | **9** |
 
 ---
 
 ## Priority Recommendations
 
-1. **Immediate (Critical):** Fix NoSQL injection in `db.py` by rejecting or restricting `$` operators in user-provided query JSON for both GET `/documents` and DELETE `/documents`.
-2. **Immediate (Critical):** Add SSRF protection for URL parameters in ingest/crawl (validate scheme, block private IP ranges).
-3. **Short-term (High):** Add `.limit()` to unbounded `find()` calls; use `validate_collection_name` from `compliance_utils` for `database_name` and `collection_name`.
-4. **Short-term (High):** Add authentication to sensitive DB and core endpoints.
-5. **Medium-term:** Add timeouts to external API calls (Firecrawl, Anthropic); add retry with backoff for critical paths.
-6. **Medium-term:** Redact or disable full request body logging in production; avoid returning `str(exc)` in API error responses.
+1. **Short-term (High):** Add authentication to sensitive DB and core endpoints.
+2. **Short-term (High):** Add confirmation or limit for bulk `delete_many` operations.
+3. **Short-term (High):** Add `.limit()` or pagination to unbounded `find()` in create-chunks and parse-llm.
+4. **Medium-term:** Add timeouts to external API calls (Firecrawl, Anthropic); add retry with backoff for critical paths.
+5. **Medium-term:** Avoid returning `str(exc)` in API error responses.
+6. **Medium-term:** Document concurrency limits for background jobs; consider per-request retries for MongoDB writes.

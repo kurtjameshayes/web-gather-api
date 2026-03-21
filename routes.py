@@ -1949,7 +1949,7 @@ def build_openapi_spec():
                             },
                         },
                         "500": {
-                            "description": "LLM parsing failed or could not parse SLM response",
+                            "description": "LLM parsing failed or could not parse LLM response",
                             "content": {
                                 "application/json": {
                                     "schema": {"$ref": "#/components/schemas/ErrorResponse"},
@@ -2410,14 +2410,14 @@ def build_openapi_spec():
                         },
                         "400": {"description": "Missing policy_document_id", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
                         "404": {"description": "Policy not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
-                        "502": {"description": "Upstream or SLM failed", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "502": {"description": "Upstream or LLM failed", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
                     },
                 }
             },
             f"{COMPLIANCE_API_PREFIX}/risk-assessment": {
                 "post": {
                     "summary": "Risk assessment (DPIA/PIA-style)",
-                    "description": "Generate a pre-populated risk assessment from policy and applicable statute chunks via SLM.",
+                    "description": "Generate a pre-populated risk assessment from policy and applicable statute chunks via LLM.",
                     "requestBody": {
                         "required": True,
                         "content": {
@@ -2433,7 +2433,7 @@ def build_openapi_spec():
                         },
                         "400": {"description": "Missing or invalid request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
                         "404": {"description": "Policy or template not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
-                        "502": {"description": "Upstream or SLM failed", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                        "502": {"description": "Upstream or LLM failed", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
                     },
                 }
             },
