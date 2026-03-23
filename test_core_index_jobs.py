@@ -1,7 +1,7 @@
 """Tests for core index-jobs and create-sub-vector-index endpoints."""
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 from flask import Flask
@@ -111,3 +111,53 @@ def test_create_sub_vector_index_invalid_body_json(client) -> None:
         content_type="application/json",
     )
     assert response.status_code == 400
+
+
+def test_create_sub_vector_index_accepts_single_quoted_payload(client) -> None:
+    """POST /create-sub-vector-index accepts single-quoted payload fallback parser."""
+    mock_storage = MagicMock()
+    mock_storage.create_job.return_value = "job-quoted-123"
+    with patch("core._get_index_job_storage", return_value=mock_storage), patch(
+        "index_job_service.start_sub_vector_index_job", return_value="job-quoted-123"
+    ) as start_job:
+        response = client.post(
+            "/create-sub-vector-index",
+            data="{'document_type': 'Policy', 'source_query': {'document_id': 'doc-1'}}",
+            content_type="application/json",
+        )
+
+    assert response.status_code == 202
+    assert response.get_json()["job_id"] == "job-quoted-123"
+    start_job.assert_called_once_with(
+        request_dict={"document_type": "policy", "source_query": {"document_id": "doc-1"}},
+        job_storage=mock_storage,
+        flask_app=ANY,
+    )
+
+
+def test_create_sub_vector_index_requires_api_key_when_configured(client, monkeypatch) -> None:
+    """POST /create-sub-vector-index returns 401 when APP_API_KEY is configured but missing."""
+    monkeypatch.setattr("security._app_api_key", "secret-key")
+    response = client.post("/create-sub-vector-index", json={"document_type": "policy"})
+    assert response.status_code == 401
+    assert response.get_json()["error"] == "Missing API key."
+
+
+def test_create_sub_vector_index_rejects_invalid_api_key_when_configured(client, monkeypatch) -> None:
+    """POST /create-sub-vector-index returns 403 for wrong API key when configured."""
+    monkeypatch.setattr("security._app_api_key", "secret-key")
+    response = client.post(
+        "/create-sub-vector-index",
+        json={"document_type": "policy"},
+        headers={"x-api-key": "wrong"},
+    )
+    assert response.status_code == 403
+    assert response.get_json()["error"] == "Invalid API key."
+
+
+def test_get_index_job_requires_api_key_when_configured(client, monkeypatch) -> None:
+    """GET /index-jobs/<job_id> returns 401 when APP_API_KEY is configured but missing."""
+    monkeypatch.setattr("security._app_api_key", "secret-key")
+    response = client.get("/index-jobs/job-123")
+    assert response.status_code == 401
+    assert response.get_json()["error"] == "Missing API key."
