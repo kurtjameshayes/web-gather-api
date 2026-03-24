@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from flask import Flask
 
 from cache import SimpleLRUCache
 from compliance_config import load_config
@@ -18,9 +19,10 @@ from compliance_utils import (
     slugify,
     validate_collection_name,
 )
+import security
 from rate_limiter import RateLimiter
 from redactor import Redactor
-from security import AuthorizationError, authorize_request
+from security import AuthorizationError, authorize_request, require_api_key, require_api_key_async
 
 
 def test_authorize_request_missing_key() -> None:
@@ -62,6 +64,89 @@ def test_authorize_request_role_allowed() -> None:
     request = SimpleNamespace(headers={"x-api-key": "secret", "x-role": "admin"})
     authorize_request(config, request)
 
+
+def test_init_app_api_key_reads_and_trims_env(monkeypatch: Any) -> None:
+    monkeypatch.setenv("APP_API_KEY", "  top-secret  ")
+    security.init_app_api_key()
+    assert security._app_api_key == "top-secret"
+
+
+def test_init_app_api_key_unset_results_in_none(monkeypatch: Any) -> None:
+    monkeypatch.delenv("APP_API_KEY", raising=False)
+    security.init_app_api_key()
+    assert security._app_api_key is None
+
+
+def test_require_api_key_decorator_enforces_missing_and_invalid_key(monkeypatch: Any) -> None:
+    app = Flask(__name__)
+
+    @require_api_key
+    def protected():
+        return "ok"
+
+    monkeypatch.setattr(security, "_app_api_key", "expected")
+
+    with app.test_request_context("/", headers={}):
+        resp, status = protected()
+        assert status == 401
+        assert resp.get_json()["error"] == "Missing API key."
+
+    with app.test_request_context("/", headers={"x-api-key": "wrong"}):
+        resp, status = protected()
+        assert status == 403
+        assert resp.get_json()["error"] == "Invalid API key."
+
+
+def test_require_api_key_decorator_passthrough_when_key_unconfigured(monkeypatch: Any) -> None:
+    app = Flask(__name__)
+
+    @require_api_key
+    def protected():
+        return "ok"
+
+    monkeypatch.setattr(security, "_app_api_key", None)
+    with app.test_request_context("/", headers={}):
+        assert protected() == "ok"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_require_api_key_async_allows_valid_key(monkeypatch: Any, anyio_backend: str) -> None:
+    app = Flask(__name__)
+
+    @require_api_key_async
+    async def protected_async():
+        return "ok"
+
+    monkeypatch.setattr(security, "_app_api_key", "expected")
+
+    with app.test_request_context("/", headers={"x-api-key": "expected"}):
+        result = await protected_async()
+        assert result == "ok"
+
+
+def test_require_api_key_real_endpoint_blocks_without_header(
+    monkeypatch: Any,
+) -> None:
+    from util import init_util, util_bp
+
+    from unittest.mock import MagicMock
+    mongo = MagicMock()
+    wg_db = MagicMock()
+    coll = MagicMock()
+    coll.find.return_value = []
+    wg_db.__getitem__.return_value = coll
+    mongo.__getitem__.return_value = wg_db
+    init_util(mongo)
+
+    app = Flask(__name__)
+    app.register_blueprint(util_bp)
+    client = app.test_client()
+
+    monkeypatch.setattr(security, "_app_api_key", "expected")
+    response = client.get("/embedding-models")
+    assert response.status_code == 401
+    assert response.get_json()["error"] == "Missing API key."
 
 def test_redactor_masks_common_pii() -> None:
     redactor = Redactor()
