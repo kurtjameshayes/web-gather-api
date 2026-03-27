@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import urllib.parse
 from typing import Any, Dict
 from unittest.mock import MagicMock
 
@@ -72,6 +73,57 @@ def test_list_documents_invalid_query_json(client, mock_mongo_client) -> None:
     assert "Invalid JSON" in payload["error"]
 
 
+def test_list_documents_double_encoded_query_json(client, mock_mongo_client) -> None:
+    """A JSON-encoded JSON object query should be parsed and applied."""
+    dbs = _wire_mongo(mock_mongo_client)
+    cursor_mock = MagicMock()
+    cursor_mock.skip.return_value = cursor_mock
+    cursor_mock.limit.return_value = []
+    dbs["user_db"].__getitem__.return_value.find.return_value = cursor_mock
+
+    query = urllib.parse.quote(json.dumps(json.dumps({"status": "active"})))
+    response = client.get(
+        f"/documents?database_name=test_db&collection_name=test_collection&query={query}"
+    )
+
+    assert response.status_code == 200
+    dbs["user_db"].__getitem__.return_value.find.assert_called_once_with(
+        {"status": "active"}
+    )
+
+
+def test_list_documents_rejects_double_encoded_dangerous_operators(
+    client, mock_mongo_client
+) -> None:
+    """NoSQL operators remain blocked after decoding nested JSON strings."""
+    query = urllib.parse.quote(json.dumps(json.dumps({"$where": "1==1"})))
+    response = client.get(
+        f"/documents?database_name=test_db&collection_name=test_collection&query={query}"
+    )
+
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert "not allowed" in payload["error"].lower() or "operator" in payload["error"].lower()
+
+
+def test_list_documents_double_encoded_oid_query(client, mock_mongo_client) -> None:
+    """Extended JSON ObjectId should still convert when nested in a JSON string."""
+    dbs = _wire_mongo(mock_mongo_client)
+    cursor_mock = MagicMock()
+    cursor_mock.skip.return_value = cursor_mock
+    cursor_mock.limit.return_value = []
+    dbs["user_db"].__getitem__.return_value.find.return_value = cursor_mock
+
+    oid = ObjectId()
+    query = urllib.parse.quote(json.dumps(json.dumps({"_id": {"$oid": str(oid)}})))
+    response = client.get(
+        f"/documents?database_name=test_db&collection_name=test_collection&query={query}"
+    )
+
+    assert response.status_code == 200
+    dbs["user_db"].__getitem__.return_value.find.assert_called_once_with({"_id": oid})
+
+
 def test_list_documents_rejects_dangerous_operators(client, mock_mongo_client) -> None:
     """NoSQL injection: $where, $regex, etc. must be rejected."""
     import urllib.parse
@@ -128,6 +180,24 @@ def test_delete_documents_invalid_query_json(client, mock_mongo_client) -> None:
     assert response.status_code == 400
     payload = response.get_json()
     assert "Invalid JSON" in payload["error"]
+
+
+def test_delete_documents_double_encoded_query_json(client, mock_mongo_client) -> None:
+    """DELETE /documents accepts nested JSON-string queries."""
+    dbs = _wire_mongo(mock_mongo_client)
+    delete_result = MagicMock()
+    delete_result.deleted_count = 1
+    dbs["user_db"].__getitem__.return_value.delete_many.return_value = delete_result
+
+    query = urllib.parse.quote(json.dumps(json.dumps({"status": "inactive"})))
+    response = client.delete(
+        f"/documents?database_name=test_db&collection_name=test_collection&query={query}"
+    )
+
+    assert response.status_code == 200
+    dbs["user_db"].__getitem__.return_value.delete_many.assert_called_once_with(
+        {"status": "inactive"}
+    )
 
 
 def test_delete_documents_rejects_dangerous_operators(client, mock_mongo_client) -> None:
