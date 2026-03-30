@@ -2,8 +2,12 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
+
+# Keep test import deterministic when optional SDK deps are absent.
+sys.modules.setdefault("anthropic", MagicMock())
 
 import llm_client
 from compliance_config import load_config
