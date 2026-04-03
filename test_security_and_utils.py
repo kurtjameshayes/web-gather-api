@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from flask import Flask, jsonify
 
 from cache import SimpleLRUCache
 from compliance_config import load_config
@@ -21,6 +22,31 @@ from compliance_utils import (
 from rate_limiter import RateLimiter
 from redactor import Redactor
 from security import AuthorizationError, authorize_request
+
+
+@pytest.fixture
+def app_security() -> Flask:
+    """Minimal app with sync/async routes protected by API-key decorators."""
+    from security import require_api_key, require_api_key_async
+
+    app = Flask(__name__)
+
+    @app.get("/protected-sync")
+    @require_api_key
+    def protected_sync():
+        return jsonify({"ok": True})
+
+    @app.get("/protected-async")
+    @require_api_key_async
+    async def protected_async():
+        return jsonify({"ok": True})
+
+    return app
+
+
+@pytest.fixture
+def client_security(app_security: Flask):
+    return app_security.test_client()
 
 
 def test_authorize_request_missing_key() -> None:
@@ -61,6 +87,59 @@ def test_authorize_request_role_allowed() -> None:
     config.allowed_roles = ["admin"]
     request = SimpleNamespace(headers={"x-api-key": "secret", "x-role": "admin"})
     authorize_request(config, request)
+
+
+def test_init_app_api_key_trims_and_handles_empty(monkeypatch: Any) -> None:
+    import security
+
+    monkeypatch.setenv("APP_API_KEY", "  abc123  ")
+    security.init_app_api_key()
+    assert security._app_api_key == "abc123"  # noqa: SLF001
+
+    monkeypatch.setenv("APP_API_KEY", "   ")
+    security.init_app_api_key()
+    assert security._app_api_key is None  # noqa: SLF001
+
+
+def test_require_api_key_sync_enforcement(client_security, monkeypatch: Any) -> None:
+    import security
+
+    monkeypatch.setattr(security, "_app_api_key", "secret")
+
+    missing = client_security.get("/protected-sync")
+    assert missing.status_code == 401
+    assert "Missing API key" in missing.get_json()["error"]
+
+    invalid = client_security.get("/protected-sync", headers={"x-api-key": "wrong"})
+    assert invalid.status_code == 403
+    assert "Invalid API key" in invalid.get_json()["error"]
+
+    valid = client_security.get("/protected-sync", headers={"x-api-key": "secret"})
+    assert valid.status_code == 200
+    assert valid.get_json()["ok"] is True
+
+
+def test_require_api_key_sync_bypasses_when_unset(client_security, monkeypatch: Any) -> None:
+    import security
+
+    monkeypatch.setattr(security, "_app_api_key", None)
+    response = client_security.get("/protected-sync")
+    assert response.status_code == 200
+    assert response.get_json()["ok"] is True
+
+
+def test_require_api_key_async_enforcement(client_security, monkeypatch: Any) -> None:
+    import security
+
+    monkeypatch.setattr(security, "_app_api_key", "secret")
+
+    missing = client_security.get("/protected-async")
+    assert missing.status_code == 401
+    assert "Missing API key" in missing.get_json()["error"]
+
+    valid = client_security.get("/protected-async", headers={"x-api-key": "secret"})
+    assert valid.status_code == 200
+    assert valid.get_json()["ok"] is True
 
 
 def test_redactor_masks_common_pii() -> None:
