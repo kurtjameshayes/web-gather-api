@@ -130,24 +130,24 @@ async def test_require_api_key_async_enforces_auth(monkeypatch: Any, anyio_backe
     monkeypatch.setattr("security._app_api_key", "secret", raising=False)
     app = Flask(__name__)
 
-    @app.get("/protected-async")
     @require_api_key_async
     async def protected_async():
         return {"ok": True}, 200
 
-    client = app.test_client()
+    with app.test_request_context("/protected-async"):
+        missing = await protected_async()
+        assert missing[1] == 401
+        assert missing[0].get_json() == {"error": "Missing API key."}
 
-    missing = client.get("/protected-async")
-    assert missing.status_code == 401
-    assert missing.get_json() == {"error": "Missing API key."}
+    with app.test_request_context("/protected-async", headers={"x-api-key": "wrong"}):
+        invalid = await protected_async()
+        assert invalid[1] == 403
+        assert invalid[0].get_json() == {"error": "Invalid API key."}
 
-    invalid = client.get("/protected-async", headers={"x-api-key": "wrong"})
-    assert invalid.status_code == 403
-    assert invalid.get_json() == {"error": "Invalid API key."}
-
-    valid = client.get("/protected-async", headers={"x-api-key": "secret"})
-    assert valid.status_code == 200
-    assert valid.get_json() == {"ok": True}
+    with app.test_request_context("/protected-async", headers={"x-api-key": "secret"}):
+        valid = await protected_async()
+        assert valid[1] == 200
+        assert valid[0] == {"ok": True}
 
 
 def test_redactor_masks_common_pii() -> None:
