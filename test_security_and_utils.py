@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from flask import Flask
 
 from cache import SimpleLRUCache
 from compliance_config import load_config
@@ -20,7 +21,7 @@ from compliance_utils import (
 )
 from rate_limiter import RateLimiter
 from redactor import Redactor
-from security import AuthorizationError, authorize_request
+from security import AuthorizationError, authorize_request, require_api_key, require_api_key_async
 
 
 def test_authorize_request_missing_key() -> None:
@@ -61,6 +62,92 @@ def test_authorize_request_role_allowed() -> None:
     config.allowed_roles = ["admin"]
     request = SimpleNamespace(headers={"x-api-key": "secret", "x-role": "admin"})
     authorize_request(config, request)
+
+
+def test_require_api_key_allows_when_unconfigured(monkeypatch: Any) -> None:
+    monkeypatch.setattr("security._app_api_key", None, raising=False)
+    app = Flask(__name__)
+
+    @app.get("/protected")
+    @require_api_key
+    def protected():
+        return {"ok": True}, 200
+
+    client = app.test_client()
+    response = client.get("/protected")
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True}
+
+
+def test_require_api_key_rejects_missing_key_when_configured(monkeypatch: Any) -> None:
+    monkeypatch.setattr("security._app_api_key", "secret", raising=False)
+    app = Flask(__name__)
+
+    @app.get("/protected")
+    @require_api_key
+    def protected():
+        return {"ok": True}, 200
+
+    client = app.test_client()
+    response = client.get("/protected")
+    assert response.status_code == 401
+    assert response.get_json() == {"error": "Missing API key."}
+
+
+def test_require_api_key_rejects_invalid_key_when_configured(monkeypatch: Any) -> None:
+    monkeypatch.setattr("security._app_api_key", "secret", raising=False)
+    app = Flask(__name__)
+
+    @app.get("/protected")
+    @require_api_key
+    def protected():
+        return {"ok": True}, 200
+
+    client = app.test_client()
+    response = client.get("/protected", headers={"x-api-key": "wrong"})
+    assert response.status_code == 403
+    assert response.get_json() == {"error": "Invalid API key."}
+
+
+def test_require_api_key_accepts_valid_trimmed_key(monkeypatch: Any) -> None:
+    monkeypatch.setattr("security._app_api_key", "secret", raising=False)
+    app = Flask(__name__)
+
+    @app.get("/protected")
+    @require_api_key
+    def protected():
+        return {"ok": True}, 200
+
+    client = app.test_client()
+    response = client.get("/protected", headers={"x-api-key": " secret "})
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_require_api_key_async_enforces_auth(monkeypatch: Any, anyio_backend: str) -> None:
+    monkeypatch.setattr("security._app_api_key", "secret", raising=False)
+    app = Flask(__name__)
+
+    @app.get("/protected-async")
+    @require_api_key_async
+    async def protected_async():
+        return {"ok": True}, 200
+
+    client = app.test_client()
+
+    missing = client.get("/protected-async")
+    assert missing.status_code == 401
+    assert missing.get_json() == {"error": "Missing API key."}
+
+    invalid = client.get("/protected-async", headers={"x-api-key": "wrong"})
+    assert invalid.status_code == 403
+    assert invalid.get_json() == {"error": "Invalid API key."}
+
+    valid = client.get("/protected-async", headers={"x-api-key": "secret"})
+    assert valid.status_code == 200
+    assert valid.get_json() == {"ok": True}
 
 
 def test_redactor_masks_common_pii() -> None:
