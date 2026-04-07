@@ -13,12 +13,14 @@ from compliance_routes import compliance_bp
 from compliance_routes_v4 import compliance_v4_bp
 from compliance_config import load_config
 from compliance_suite_schemas import (
+    GapAnalysisRequest,
     GapAnalysisResponse,
     GapItem,
     GapSummary,
     RetrievalMetadata,
 )
 from adaptive_feedback_service import CriticService, VALID_CATEGORIES, VALID_SEVERITIES
+from gap_analysis_service_v4 import GapAnalysisServiceV4
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +372,168 @@ class TestEnsureIndexes:
         mock_mongo.__getitem__.return_value.__getitem__.return_value = coll_mock
         critic.ensure_indexes()
         assert coll_mock.create_index.call_count >= 2
+
+
+# ---------------------------------------------------------------------------
+# GapAnalysisServiceV4 adaptive feedback lifecycle
+# ---------------------------------------------------------------------------
+
+class TestGapAnalysisServiceV4AdaptiveFeedback:
+    @staticmethod
+    def _build_service(mock_config, critic):
+        mock_mongo = MagicMock()
+        db = MagicMock()
+
+        policies_coll = MagicMock()
+        policy_legal_coll = MagicMock()
+        category_map_coll = MagicMock()
+        statute_coll = MagicMock()
+        results_coll = MagicMock()
+        run_log_coll = MagicMock()
+
+        policy_text = "Consumers may request access to their personal data."
+        policies_coll.find_one.return_value = {
+            mock_config.policy_document_id_field: "pol-1",
+            "text": policy_text,
+            "company_name": "Acme",
+        }
+
+        policy_legal_coll.count_documents.return_value = 1
+        policy_legal_coll.find.return_value = [{"chunk_text": policy_text}]
+
+        category_map_coll.find.return_value = [
+            {
+                "statute_category": "consumer_rights",
+                "policy_categories": ["consumer_rights"],
+                "sub_topic": "access",
+            }
+        ]
+
+        def _statute_find(query, projection=None):
+            if query.get("document_id") == "statute-doc-1":
+                return [
+                    {
+                        "category": "definitions",
+                        "header_text": "Definitions",
+                        "subtopic_text": "Personal information includes identifiers.",
+                    }
+                ]
+            return [
+                {
+                    "_id": "stat-1",
+                    "document_id": "statute-doc-1",
+                    "header_text": "§ 1798.100",
+                    "subtopic_text": "Consumers have the right to know.",
+                    "requirement_summary": "Right to know",
+                    "jurisdiction": "CA",
+                }
+            ]
+
+        statute_coll.find.side_effect = _statute_find
+
+        collections = {
+            mock_config.policies_collection: policies_coll,
+            mock_config.policy_legal_embeddings_collection: policy_legal_coll,
+            mock_config.category_mapping_collection: category_map_coll,
+            mock_config.statute_sub_topic_embeddings_collection: statute_coll,
+            mock_config.compliance_results_collection: results_coll,
+            mock_config.compliance_run_log_collection: run_log_coll,
+            "category_mappings": MagicMock(),
+        }
+        db.__getitem__.side_effect = lambda name: collections[name]
+        mock_mongo.__getitem__.side_effect = lambda _db_name: db
+
+        llm = MagicMock()
+        llm.gap_check_v4 = AsyncMock(
+            return_value={
+                "status": "addressed",
+                "policy_quote": policy_text,
+                "statute_quote": "Consumers have the right to know.",
+                "requirement_summary": "Right to know",
+                "confidence": "high",
+            }
+        )
+
+        rate_limiter = MagicMock()
+        rate_limiter.allow = AsyncMock(return_value=True)
+
+        service = GapAnalysisServiceV4(
+            mongo_client=mock_mongo,
+            config=mock_config,
+            llm_client=llm,
+            rate_limiter=rate_limiter,
+            critic=critic,
+        )
+        return service, llm, results_coll, run_log_coll
+
+    def test_run_injects_feedback_and_records_usage(self, mock_config):
+        critic = MagicMock()
+        critic.get_active_feedback.return_value = [
+            {"_id": "fb-1", "suggestions": [{"instruction": "Require specific citations"}]}
+        ]
+        critic.format_feedback_for_prompt.return_value = "- Require specific citations"
+        critic.record_feedback_usage = AsyncMock()
+        critic.evaluate = AsyncMock(return_value="fb-2")
+
+        service, llm, results_coll, run_log_coll = self._build_service(mock_config, critic)
+        request = GapAnalysisRequest(
+            policy_document_id="pol-1",
+            applicable_jurisdictions=["CA"],
+            save_results=True,
+            run_async=False,
+        )
+
+        response = asyncio.run(service.run(request))
+
+        assert response.summary.total_requirements == 1
+        critic.get_active_feedback.assert_called_once_with("pol-1")
+        critic.format_feedback_for_prompt.assert_called_once()
+        llm.gap_check_v4.assert_awaited_once()
+        assert llm.gap_check_v4.await_args.kwargs["adaptive_feedback"] == "- Require specific citations"
+
+        critic.record_feedback_usage.assert_awaited_once()
+        record_kwargs = critic.record_feedback_usage.await_args.kwargs
+        run_id = record_kwargs["run_id"]
+        assert isinstance(run_id, str) and run_id
+        assert record_kwargs["feedback_ids"] == ["fb-1"]
+        assert record_kwargs["rendered_text"] == "- Require specific citations"
+
+        critic.evaluate.assert_awaited_once()
+        assert critic.evaluate.await_args.args[1] == run_id
+        assert critic.evaluate.await_args.args[0].policy_document_id == "pol-1"
+
+        results_coll.insert_one.assert_called_once()
+        run_log_coll.insert_one.assert_called_once()
+        persisted = results_coll.insert_one.call_args[0][0]
+        assert persisted["_id"] == run_id
+        assert persisted["run_type"] == "gap_analysis_v4"
+
+    def test_run_with_save_results_false_skips_post_run_critic_hooks(self, mock_config):
+        critic = MagicMock()
+        critic.get_active_feedback.return_value = [
+            {"_id": "fb-1", "suggestions": [{"instruction": "Require specific citations"}]}
+        ]
+        critic.format_feedback_for_prompt.return_value = "- Require specific citations"
+        critic.record_feedback_usage = AsyncMock()
+        critic.evaluate = AsyncMock(return_value="fb-2")
+
+        service, llm, results_coll, run_log_coll = self._build_service(mock_config, critic)
+        request = GapAnalysisRequest(
+            policy_document_id="pol-1",
+            applicable_jurisdictions=["CA"],
+            save_results=False,
+            run_async=False,
+        )
+
+        response = asyncio.run(service.run(request))
+
+        assert response.summary.total_requirements == 1
+        llm.gap_check_v4.assert_awaited_once()
+        assert llm.gap_check_v4.await_args.kwargs["adaptive_feedback"] == "- Require specific citations"
+        critic.record_feedback_usage.assert_not_awaited()
+        critic.evaluate.assert_not_awaited()
+        results_coll.insert_one.assert_not_called()
+        run_log_coll.insert_one.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
