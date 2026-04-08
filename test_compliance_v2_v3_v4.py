@@ -172,7 +172,7 @@ def test_v4_gap_analysis_async_returns_job_id(mock_config, mock_v4_service, mock
         "compliance_routes_v4._get_gap_analysis_v4_service", return_value=mock_v4_service
     ), patch("compliance_routes_v4._get_job_storage", return_value=mock_job_storage), patch(
         "compliance_routes_v4._get_suite_service", return_value=mock_suite
-    ), patch("compliance_routes_v4.start_gap_analysis_job", return_value="job-123"):
+    ), patch("compliance_routes_v4.start_gap_analysis_job", return_value="job-123") as start_job_mock:
         app = Flask(__name__)
         app.register_blueprint(compliance_v4_bp, url_prefix="/api/v4/compliance")
         client = app.test_client()
@@ -184,3 +184,8 @@ def test_v4_gap_analysis_async_returns_job_id(mock_config, mock_v4_service, mock
     data = response.get_json()
     assert "job_id" in data
     assert data["status"] == "pending"
+    start_job_mock.assert_called_once()
+    request_dict = start_job_mock.call_args.args[0]
+    assert request_dict["save_results"] is False
+    assert "run_async" not in request_dict
+    assert start_job_mock.call_args.kwargs["compliance_storage"] is mock_suite._storage
