@@ -342,6 +342,46 @@ class TestAdaptiveFeedbackEndpoints:
             offset=0,
         )
 
+    def test_list_feedback_sanitizes_limit_and_offset(self, client, mock_config):
+        mock_critic = MagicMock()
+        mock_critic.get_feedback_history.return_value = []
+        with patch.object(compliance_routes, "_config", mock_config):
+            with patch.object(compliance_routes, "_critic_service", mock_critic):
+                resp = client.get(
+                    "/api/v4/compliance/adaptive-feedback"
+                    "?policy_document_id=pol-1&limit=not-a-number&offset=-10"
+                )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["limit"] == 50
+        assert data["offset"] == 0
+        mock_critic.get_feedback_history.assert_called_once_with(
+            policy_document_id="pol-1",
+            active_only=False,
+            limit=50,
+            offset=0,
+        )
+
+    def test_list_feedback_clamps_limit_to_max(self, client, mock_config):
+        mock_critic = MagicMock()
+        mock_critic.get_feedback_history.return_value = []
+        with patch.object(compliance_routes, "_config", mock_config):
+            with patch.object(compliance_routes, "_critic_service", mock_critic):
+                resp = client.get(
+                    "/api/v4/compliance/adaptive-feedback"
+                    "?policy_document_id=pol-1&limit=9999&offset=3"
+                )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["limit"] == 200
+        assert data["offset"] == 3
+        mock_critic.get_feedback_history.assert_called_once_with(
+            policy_document_id="pol-1",
+            active_only=False,
+            limit=200,
+            offset=3,
+        )
+
     def test_list_feedback_log(self, client, mock_config):
         mock_critic = MagicMock()
         mock_critic.get_feedback_log.return_value = [
@@ -357,6 +397,44 @@ class TestAdaptiveFeedbackEndpoints:
         assert len(data["log"]) == 1
         mock_critic.get_feedback_log.assert_called_once_with(
             run_id="run-1", limit=50, offset=0,
+        )
+
+    def test_list_feedback_log_sanitizes_limit_and_offset(self, client, mock_config):
+        mock_critic = MagicMock()
+        mock_critic.get_feedback_log.return_value = []
+        with patch.object(compliance_routes, "_config", mock_config):
+            with patch.object(compliance_routes, "_critic_service", mock_critic):
+                resp = client.get(
+                    "/api/v4/compliance/adaptive-feedback/log"
+                    "?run_id=run-1&limit=oops&offset=-7"
+                )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["limit"] == 50
+        assert data["offset"] == 0
+        mock_critic.get_feedback_log.assert_called_once_with(
+            run_id="run-1",
+            limit=50,
+            offset=0,
+        )
+
+    def test_list_feedback_log_clamps_limit_to_max(self, client, mock_config):
+        mock_critic = MagicMock()
+        mock_critic.get_feedback_log.return_value = []
+        with patch.object(compliance_routes, "_config", mock_config):
+            with patch.object(compliance_routes, "_critic_service", mock_critic):
+                resp = client.get(
+                    "/api/v4/compliance/adaptive-feedback/log"
+                    "?limit=1000&offset=2"
+                )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["limit"] == 200
+        assert data["offset"] == 2
+        mock_critic.get_feedback_log.assert_called_once_with(
+            run_id=None,
+            limit=200,
+            offset=2,
         )
 
 
