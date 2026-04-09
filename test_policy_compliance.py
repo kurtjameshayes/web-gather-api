@@ -17,6 +17,8 @@ from compliance_config import load_config
 from compliance_evaluator import ComplianceEvaluator
 import compliance_routes
 from compliance_routes import compliance_bp
+from compliance_suite_schemas import ConsumerRightsRouterRequest
+from compliance_suite_service import ComplianceSuiteService
 from llm_client import build_prompt
 from redactor import Redactor
 from segmenter import PolicySegmenter
@@ -260,3 +262,129 @@ def test_precision_recall_f1_on_labeled_dataset():
     assert precision == 1.0
     assert recall == 1.0
     assert f1 == 1.0
+
+
+def test_consumer_rights_router_endpoint_validation_error_details_are_json_safe():
+    app = Flask(__name__)
+    app.register_blueprint(compliance_bp)
+    client = app.test_client()
+
+    response = client.post(
+        "/consumer-rights-router",
+        json={
+            "text": "Privacy policy text",
+            "request_types": ["invalid-type"],
+        },
+    )
+
+    assert response.status_code == 422
+    body = response.get_json()
+    assert body["error"] == "Validation error"
+    assert isinstance(body["details"], list) and body["details"]
+    assert "Invalid request_types" in body["details"][0]["msg"]
+    if "ctx" in body["details"][0]:
+        assert isinstance(body["details"][0]["ctx"], str)
+
+
+def _build_service_for_consumer_router_tests():
+    config = load_config()
+    config.default_jurisdictions = ["CA"]
+    config.llm_concurrency = 4
+    config.consumer_rights_router_prompt_path = "prompts/consumer_rights_router.yaml"
+
+    rate_limiter = MagicMock()
+    rate_limiter.allow = AsyncMock(return_value=True)
+
+    llm_client = MagicMock()
+    llm_client.consumer_rights_router = AsyncMock()
+
+    storage = MagicMock()
+    storage.write_compliance_result = AsyncMock()
+
+    service = ComplianceSuiteService(
+        mongo_client=MagicMock(),
+        config=config,
+        retriever=MagicMock(),
+        llm_client=llm_client,
+        storage=storage,
+        rate_limiter=rate_limiter,
+    )
+    return service, llm_client, storage
+
+
+def test_consumer_rights_router_service_handles_none_results_and_fallback_jurisdictions():
+    service, llm_client, storage = _build_service_for_consumer_router_tests()
+    service._fetch_v4_statute_docs = AsyncMock(
+        return_value={
+            "CA": [{"header_text": "CCPA", "subtopic_text": "Delete requests"}],
+            "NY": [],
+        }
+    )
+
+    llm_client.consumer_rights_router.side_effect = [
+        {
+            "trees": {"california": {"id": "ca-del-1", "action": "DELETE"}},
+            "policy_gaps": {"california": {"covered": True, "gap": None}},
+        },
+        None,
+    ]
+
+    req = ConsumerRightsRouterRequest(
+        text="Sample policy text",
+        applicable_jurisdictions=["CA", "NY"],
+        request_types=["deletion", "access"],
+        save_results=True,
+    )
+    response = asyncio.run(service.consumer_rights_router(req))
+
+    assert response.policy_document_id is None
+    assert response.company_name is None
+    assert response.states["california"].abbr == "CA"
+    assert response.states["ny"].abbr == "NY"
+    assert response.request_types["deletion"] == "Right to Delete"
+    assert response.request_types["access"] == "Right to Access / Know"
+    assert response.trees["deletion"]["california"]["id"] == "ca-del-1"
+    assert response.trees["access"] == {}
+    assert response.policy_gaps["access"] == {}
+    assert storage.write_compliance_result.await_count == 0
+    assert llm_client.consumer_rights_router.await_count == 2
+    first_call = llm_client.consumer_rights_router.await_args_list[0]
+    assert first_call.kwargs["request_type_label"] == "Right to Delete"
+    assert first_call.kwargs["prompt_path"] == "prompts/consumer_rights_router.yaml"
+
+
+def test_consumer_rights_router_service_persists_for_document_id_and_skips_failed_type():
+    service, llm_client, storage = _build_service_for_consumer_router_tests()
+    service._load_policy_from_chunks = AsyncMock(return_value=("Policy text from chunks", "Acme"))
+    service._fetch_v4_statute_docs = AsyncMock(return_value={"CA": []})
+
+    llm_client.consumer_rights_router.side_effect = [
+        RuntimeError("llm failed"),
+        {
+            "trees": {"california": {"id": "ca-opt-1", "action": "HANDLE_OPT_OUT"}},
+            "policy_gaps": {
+                "california": {"covered": 1, "gap": "Missing explicit deadline"},
+                "ignore_me": "not-a-dict",
+            },
+        },
+    ]
+
+    req = ConsumerRightsRouterRequest(
+        policy_document_id="doc-9",
+        applicable_jurisdictions=["CA"],
+        request_types=["deletion", "optout"],
+        save_results=True,
+    )
+    response = asyncio.run(service.consumer_rights_router(req))
+
+    assert response.policy_document_id == "doc-9"
+    assert response.company_name == "Acme"
+    assert "deletion" not in response.trees
+    assert response.trees["optout"]["california"]["id"] == "ca-opt-1"
+    assert response.policy_gaps["optout"]["california"].covered is True
+    assert response.policy_gaps["optout"]["california"].gap == "Missing explicit deadline"
+
+    assert storage.write_compliance_result.await_count == 1
+    saved_doc = storage.write_compliance_result.await_args.args[0]
+    assert saved_doc["result_type"] == "consumer_rights_router"
+    assert saved_doc["policy_document_id"] == "doc-9"

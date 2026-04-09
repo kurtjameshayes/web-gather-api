@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import uuid
 from datetime import datetime, timezone
@@ -49,6 +50,8 @@ from compliance_utils import jurisdiction_filter_values, normalize_jurisdiction,
 from llm_client import AnthropicLLMClient
 from rate_limiter import RateLimiter
 from vector_retriever import ChunkPair, StatuteCandidate, SubchunkPair, VectorRetriever
+
+logger = logging.getLogger("policy-compliance")
 
 
 # Re-export for typing
