@@ -1,6 +1,7 @@
 """Tests for db blueprint category-mapping endpoints."""
 from __future__ import annotations
 
+import security
 from bson import ObjectId
 from flask import Flask
 from unittest.mock import MagicMock
@@ -83,6 +84,13 @@ def test_get_category_mapping_invalid_query_json(client, mock_coll) -> None:
     response = client.get("/category-mapping?query={bad}")
     assert response.status_code == 400
     assert "JSON" in response.get_json()["error"]
+
+
+def test_get_category_mapping_rejects_dangerous_query_operator(client, mock_coll) -> None:
+    """GET /category-mapping rejects dangerous MongoDB operators in query."""
+    response = client.get('/category-mapping?query={"$where":"1==1"}')
+    assert response.status_code == 400
+    assert "not allowed" in response.get_json()["error"].lower()
 
 
 def test_post_category_mapping_success(client, mock_coll) -> None:
@@ -173,3 +181,17 @@ def test_delete_category_mapping_invalid_id(client) -> None:
     response = client.delete("/category-mapping?_id=not-valid-oid")
     assert response.status_code == 400
     assert "Invalid" in response.get_json()["error"]
+
+
+def test_delete_category_mapping_rejects_dangerous_query_operator(client, mock_coll) -> None:
+    """DELETE /category-mapping rejects dangerous MongoDB operators in query."""
+    response = client.delete('/category-mapping?query={"$where":"1==1"}')
+    assert response.status_code == 400
+    assert "not allowed" in response.get_json()["error"].lower()
+
+
+def test_category_mapping_requires_api_key_when_configured(client, monkeypatch) -> None:
+    monkeypatch.setattr(security, "_app_api_key", "secret")
+    response = client.get("/category-mapping")
+    assert response.status_code == 401
+    assert response.get_json()["error"] == "Missing API key."
