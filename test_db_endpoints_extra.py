@@ -9,6 +9,7 @@ import pytest
 from bson import ObjectId
 from flask import Flask
 
+import security
 from db import DOCUMENTS_COLLECTION, WEB_GATHER_DB, db_bp, init_db
 
 
@@ -178,6 +179,20 @@ def test_list_all_databases_success(client, mock_mongo_client) -> None:
     assert payload["databases"] == ["db1", "db2"]
 
 
+def test_list_all_databases_filters_reserved_names(client, mock_mongo_client) -> None:
+    mock_mongo_client.list_database_names.return_value = [
+        "db1",
+        "admin",
+        "config",
+        "local",
+        "db2",
+    ]
+    response = client.get("/all-databases")
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["databases"] == ["db1", "db2"]
+
+
 def test_list_all_collections_success(client, mock_mongo_client) -> None:
     dbs = _wire_mongo(mock_mongo_client)
     dbs["user_db"].list_collection_names.return_value = ["a", "b"]
@@ -185,6 +200,13 @@ def test_list_all_collections_success(client, mock_mongo_client) -> None:
     assert response.status_code == 200
     payload = response.get_json()
     assert payload["collections"] == ["a", "b"]
+
+
+def test_list_all_collections_rejects_reserved_database(client, mock_mongo_client) -> None:
+    response = client.get("/all-collections?database_name=admin")
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert "reserved" in payload["error"].lower()
 
 
 def test_write_to_collection_append_success(client, mock_mongo_client) -> None:
@@ -202,6 +224,69 @@ def test_write_to_collection_append_success(client, mock_mongo_client) -> None:
     assert response.status_code == 200
     payload = response.get_json()
     assert payload["mode"] == "append"
+
+
+def test_write_to_collection_document_must_be_object(client, mock_mongo_client) -> None:
+    response = client.post(
+        "/write_to_collection",
+        json={
+            "database_name": "test_db",
+            "collection_name": "docs",
+            "mode": "append",
+            "document": ["not", "an", "object"],
+        },
+    )
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert "json object" in payload["error"].lower()
+
+
+def test_write_to_collection_rejects_reserved_database(client, mock_mongo_client) -> None:
+    response = client.post(
+        "/write_to_collection",
+        json={
+            "database_name": "admin",
+            "collection_name": "docs",
+            "mode": "append",
+            "document": {"name": "doc1"},
+        },
+    )
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert "reserved" in payload["error"].lower()
+
+
+def test_documents_requires_api_key_when_configured(client, mock_mongo_client, monkeypatch) -> None:
+    monkeypatch.setattr(security, "_app_api_key", "secret")
+    response = client.get("/documents?database_name=test_db&collection_name=test_collection")
+    assert response.status_code == 401
+    payload = response.get_json()
+    assert payload["error"] == "Missing API key."
+
+
+def test_documents_rejects_wrong_api_key_when_configured(client, mock_mongo_client, monkeypatch) -> None:
+    monkeypatch.setattr(security, "_app_api_key", "secret")
+    response = client.get(
+        "/documents?database_name=test_db&collection_name=test_collection",
+        headers={"x-api-key": "wrong"},
+    )
+    assert response.status_code == 403
+    payload = response.get_json()
+    assert payload["error"] == "Invalid API key."
+
+
+def test_documents_allows_valid_api_key_when_configured(client, mock_mongo_client, monkeypatch) -> None:
+    monkeypatch.setattr(security, "_app_api_key", "secret")
+    dbs = _wire_mongo(mock_mongo_client)
+    cursor_mock = MagicMock()
+    cursor_mock.skip.return_value = cursor_mock
+    cursor_mock.limit.return_value = []
+    dbs["user_db"].__getitem__.return_value.find.return_value = cursor_mock
+    response = client.get(
+        "/documents?database_name=test_db&collection_name=test_collection",
+        headers={"x-api-key": "secret"},
+    )
+    assert response.status_code == 200
 
 
 def test_write_to_collection_replace_invalid_id(client, mock_mongo_client) -> None:
