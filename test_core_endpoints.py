@@ -75,6 +75,15 @@ def test_gather_missing_query(client, mock_clients) -> None:
     assert "query" in payload["error"]
 
 
+def test_gather_requires_app_api_key_when_configured(client, mock_clients, monkeypatch) -> None:
+    """When APP_API_KEY is configured, missing x-api-key is rejected."""
+    monkeypatch.setattr("security._app_api_key", "top-secret", raising=False)
+    response = client.post("/gather", json={"query": "privacy policy"})
+    assert response.status_code == 401
+    payload = response.get_json()
+    assert "Missing API key" in payload["error"]
+
+
 def test_ingest_web_success(client, mock_clients) -> None:
     _wire_mongo(mock_clients["mongo"])
     mock_clients["firecrawl"].crawl.return_value = [
