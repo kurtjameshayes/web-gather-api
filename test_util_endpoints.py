@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from flask import Flask
 
+import security
 from util import init_util, util_bp
 
 
@@ -132,6 +133,21 @@ def test_post_embedding_models_invalid_fields() -> None:
     )
     assert response.status_code == 400
     assert "fields" in response.get_json()["error"]
+
+
+def test_embedding_models_invalid_api_key_rejected(monkeypatch) -> None:
+    """Configured APP_API_KEY rejects invalid x-api-key on util endpoints."""
+    monkeypatch.setattr(security, "_app_api_key", "expected-key")
+    from util import init_util
+    init_util(MagicMock())
+
+    app = Flask(__name__)
+    app.register_blueprint(util_bp)
+    c = app.test_client()
+
+    response = c.get("/embedding-models", headers={"x-api-key": "wrong"})
+    assert response.status_code == 403
+    assert "Invalid API key" in response.get_json()["error"]
 
 
 def test_create_vector_index_missing_database_name() -> None:

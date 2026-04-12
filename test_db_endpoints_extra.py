@@ -44,6 +44,45 @@ def _wire_mongo(mock_mongo: MagicMock) -> Dict[str, Any]:
     return {"wg_db": wg_db, "user_db": user_db}
 
 
+def test_list_documents_requires_api_key_when_configured(client, mock_mongo_client, monkeypatch) -> None:
+    monkeypatch.setattr("security._app_api_key", "top-secret", raising=False)
+    response = client.get(
+        "/documents?database_name=test_db&collection_name=test_collection"
+    )
+    assert response.status_code == 401
+    payload = response.get_json()
+    assert "Missing API key" in payload["error"]
+
+
+def test_list_documents_rejects_invalid_api_key_when_configured(client, mock_mongo_client, monkeypatch) -> None:
+    monkeypatch.setattr("security._app_api_key", "top-secret", raising=False)
+    response = client.get(
+        "/documents?database_name=test_db&collection_name=test_collection",
+        headers={"x-api-key": "wrong"},
+    )
+    assert response.status_code == 403
+    payload = response.get_json()
+    assert "Invalid API key" in payload["error"]
+
+
+def test_list_documents_allows_valid_api_key_when_configured(client, mock_mongo_client, monkeypatch) -> None:
+    dbs = _wire_mongo(mock_mongo_client)
+    first_id = ObjectId()
+    cursor_mock = MagicMock()
+    cursor_mock.skip.return_value = cursor_mock
+    cursor_mock.limit.return_value = [{"_id": first_id, "name": "doc1"}]
+    dbs["user_db"].__getitem__.return_value.find.return_value = cursor_mock
+
+    monkeypatch.setattr("security._app_api_key", "top-secret", raising=False)
+    response = client.get(
+        "/documents?database_name=test_db&collection_name=test_collection",
+        headers={"x-api-key": "top-secret"},
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["documents"][0]["_id"] == str(first_id)
+
+
 def test_list_documents_success(client, mock_mongo_client) -> None:
     dbs = _wire_mongo(mock_mongo_client)
     first_id = ObjectId()
