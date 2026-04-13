@@ -72,6 +72,28 @@ def test_list_documents_invalid_query_json(client, mock_mongo_client) -> None:
     assert "Invalid JSON" in payload["error"]
 
 
+def test_list_documents_accepts_double_encoded_query_json(client, mock_mongo_client) -> None:
+    dbs = _wire_mongo(mock_mongo_client)
+    docs = [{"_id": ObjectId(), "name": "doc1"}]
+    cursor_mock = MagicMock()
+    cursor_mock.skip.return_value = cursor_mock
+    cursor_mock.limit.return_value = docs
+    dbs["user_db"].__getitem__.return_value.find.return_value = cursor_mock
+
+    query = json.dumps(json.dumps({"status": "active"}))
+    response = client.get(
+        "/documents?database_name=test_db&collection_name=test_collection"
+        f"&query={query}"
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["documents"][0]["name"] == "doc1"
+    dbs["user_db"].__getitem__.return_value.find.assert_called_once_with(
+        {"status": "active"}
+    )
+
+
 def test_list_documents_rejects_dangerous_operators(client, mock_mongo_client) -> None:
     """NoSQL injection: $where, $regex, etc. must be rejected."""
     import urllib.parse
@@ -128,6 +150,26 @@ def test_delete_documents_invalid_query_json(client, mock_mongo_client) -> None:
     assert response.status_code == 400
     payload = response.get_json()
     assert "Invalid JSON" in payload["error"]
+
+
+def test_delete_documents_accepts_double_encoded_query_json(client, mock_mongo_client) -> None:
+    dbs = _wire_mongo(mock_mongo_client)
+    delete_result = MagicMock()
+    delete_result.deleted_count = 2
+    dbs["user_db"].__getitem__.return_value.delete_many.return_value = delete_result
+
+    query = json.dumps(json.dumps({"status": "inactive"}))
+    response = client.delete(
+        "/documents?database_name=test_db&collection_name=test_collection"
+        f"&query={query}"
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["deleted_count"] == 2
+    dbs["user_db"].__getitem__.return_value.delete_many.assert_called_once_with(
+        {"status": "inactive"}
+    )
 
 
 def test_delete_documents_rejects_dangerous_operators(client, mock_mongo_client) -> None:
