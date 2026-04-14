@@ -17,7 +17,7 @@ from compliance_config import load_config
 from compliance_evaluator import ComplianceEvaluator
 import compliance_routes
 from compliance_routes import compliance_bp
-from llm_client import build_prompt
+from llm_client import AnthropicLLMClient, build_prompt
 from redactor import Redactor
 from segmenter import PolicySegmenter
 from vector_retriever import StatuteCandidate, VectorRetriever
@@ -260,3 +260,115 @@ def test_precision_recall_f1_on_labeled_dataset():
     assert precision == 1.0
     assert recall == 1.0
     assert f1 == 1.0
+
+
+def test_gap_check_v4_injects_adaptive_feedback_and_parses_output():
+    config = load_config()
+    client = object.__new__(AnthropicLLMClient)
+    client._config = config
+    client._call_json = AsyncMock(
+        return_value={
+            "status": "partial",
+            "policy_quote": "We retain data only as needed.",
+            "statute_quote": "Retention must be limited.",
+            "requirement_summary": "Retention limits",
+            "gap_description": "Policy should define concrete retention period.",
+            "confidence": "high",
+        }
+    )
+
+    captured_kwargs = {}
+
+    def _fake_render(template, **kwargs):
+        captured_kwargs.update(kwargs)
+        return "rendered-gap-v4-prompt"
+
+    with patch(
+        "prompt_loader.load_prompt_yaml",
+        return_value={"prompt": "<<<ADAPTIVE_FEEDBACK>>> <<<REFERENCE_CONTEXT>>> <<<STATUTORY_REQUIREMENT>>> <<<POLICY_TEXT>>>"},
+    ):
+        with patch("prompt_loader.render_prompt", side_effect=_fake_render):
+            result = asyncio.run(
+                client.gap_check_v4(
+                    reference_context="Reference context",
+                    statutory_requirement="Statutory requirement",
+                    policy_text="Policy text",
+                    adaptive_feedback="- Prior lesson",
+                )
+            )
+
+    assert captured_kwargs["ADAPTIVE_FEEDBACK"] == "- Prior lesson"
+    assert captured_kwargs["REFERENCE_CONTEXT"] == "Reference context"
+    assert captured_kwargs["STATUTORY_REQUIREMENT"] == "Statutory requirement"
+    assert captured_kwargs["POLICY_TEXT"] == "Policy text"
+    client._call_json.assert_awaited_once_with("rendered-gap-v4-prompt")
+    assert result["status"] == "partial"
+    assert result["confidence"] == "high"
+    assert result["conflict_description"] == "Policy should define concrete retention period."
+    assert result["_analysis_failed"] is False
+
+
+def test_gap_check_v4_defaults_when_llm_returns_none():
+    config = load_config()
+    client = object.__new__(AnthropicLLMClient)
+    client._config = config
+    client._call_json = AsyncMock(return_value=None)
+
+    with patch(
+        "prompt_loader.load_prompt_yaml",
+        return_value={"prompt": "<<<ADAPTIVE_FEEDBACK>>> <<<REFERENCE_CONTEXT>>> <<<STATUTORY_REQUIREMENT>>> <<<POLICY_TEXT>>>"},
+    ):
+        result = asyncio.run(
+            client.gap_check_v4(
+                reference_context="Reference context",
+                statutory_requirement="Statutory requirement",
+                policy_text="Policy text",
+                adaptive_feedback="- Prior lesson",
+            )
+        )
+
+    assert result == {
+        "status": "missing",
+        "policy_quote": None,
+        "statute_quote": None,
+        "requirement_summary": "Requirement",
+        "conflict_description": None,
+        "confidence": "low",
+        "_analysis_failed": True,
+    }
+
+
+def test_gap_check_v4_normalizes_invalid_status_and_confidence():
+    config = load_config()
+    client = object.__new__(AnthropicLLMClient)
+    client._config = config
+    client._call_json = AsyncMock(
+        return_value={
+            "status": "NOT_A_REAL_STATUS",
+            "policy_quote": "",
+            "statute_quote": None,
+            "requirement_summary": "  ",
+            "conflict_description": "LLM conflict text",
+            "confidence": "extreme",
+        }
+    )
+
+    with patch(
+        "prompt_loader.load_prompt_yaml",
+        return_value={"prompt": "<<<ADAPTIVE_FEEDBACK>>> <<<REFERENCE_CONTEXT>>> <<<STATUTORY_REQUIREMENT>>> <<<POLICY_TEXT>>>"},
+    ):
+        result = asyncio.run(
+            client.gap_check_v4(
+                reference_context="Reference context",
+                statutory_requirement="Statutory requirement",
+                policy_text="Policy text",
+            )
+        )
+
+    assert result["status"] == "missing"
+    assert result["policy_quote"] is None
+    assert result["statute_quote"] == ""
+    assert result["requirement_summary"] == "Requirement"
+    assert result["conflict_description"] == "LLM conflict text"
+    assert result["confidence"] == "low"
+    assert result["_analysis_failed"] is False
