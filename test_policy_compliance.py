@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from flask import Flask
