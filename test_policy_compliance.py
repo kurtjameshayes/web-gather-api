@@ -368,7 +368,7 @@ def test_gap_check_v4_normalizes_invalid_status_and_confidence():
     assert result["status"] == "missing"
     assert result["policy_quote"] is None
     assert result["statute_quote"] == ""
-    assert result["requirement_summary"] == "Requirement"
+    assert result["requirement_summary"] == ""
     assert result["conflict_description"] == "LLM conflict text"
     assert result["confidence"] == "low"
     assert result["_analysis_failed"] is False
