@@ -1,6 +1,7 @@
 """Tests for security, utilities, cache, and redaction helpers."""
 from __future__ import annotations
 
+import asyncio
 import time
 from types import SimpleNamespace
 from typing import Any
@@ -82,17 +83,6 @@ def _build_sync_keyed_app() -> Flask:
     return app
 
 
-def _build_async_keyed_app() -> Flask:
-    app = Flask(__name__)
-
-    @app.get("/async-protected")
-    @require_api_key_async
-    async def async_protected():
-        return jsonify({"ok": True})
-
-    return app
-
-
 def test_require_api_key_allows_when_unconfigured(monkeypatch: Any) -> None:
     monkeypatch.setattr(security, "_app_api_key", None)
     client = _build_sync_keyed_app().test_client()
@@ -135,18 +125,24 @@ def test_require_api_key_allows_valid_key_with_whitespace(monkeypatch: Any) -> N
 
 def test_require_api_key_async_enforces_and_allows(monkeypatch: Any) -> None:
     monkeypatch.setattr(security, "_app_api_key", "top-secret")
-    client = _build_async_keyed_app().test_client()
+    app = Flask(__name__)
 
-    missing = client.get("/async-protected")
-    invalid = client.get("/async-protected", headers={"x-api-key": "wrong"})
-    valid = client.get("/async-protected", headers={"x-api-key": "top-secret"})
+    @require_api_key_async
+    async def protected():
+        return {"ok": True}
 
-    assert missing.status_code == 401
-    assert missing.get_json()["error"] == "Missing API key."
-    assert invalid.status_code == 403
-    assert invalid.get_json()["error"] == "Invalid API key."
-    assert valid.status_code == 200
-    assert valid.get_json()["ok"] is True
+    with app.test_request_context("/async-protected", headers={}):
+        missing = asyncio.run(protected())
+    with app.test_request_context("/async-protected", headers={"x-api-key": "wrong"}):
+        invalid = asyncio.run(protected())
+    with app.test_request_context("/async-protected", headers={"x-api-key": "top-secret"}):
+        valid = asyncio.run(protected())
+
+    assert missing[1] == 401
+    assert missing[0].get_json()["error"] == "Missing API key."
+    assert invalid[1] == 403
+    assert invalid[0].get_json()["error"] == "Invalid API key."
+    assert valid["ok"] is True
 
 
 def test_init_app_api_key_reads_and_strips_env(monkeypatch: Any) -> None:
