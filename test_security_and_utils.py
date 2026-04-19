@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from flask import Flask, jsonify
 
 from cache import SimpleLRUCache
 from compliance_config import load_config
@@ -20,7 +21,14 @@ from compliance_utils import (
 )
 from rate_limiter import RateLimiter
 from redactor import Redactor
-from security import AuthorizationError, authorize_request
+import security
+from security import (
+    AuthorizationError,
+    authorize_request,
+    init_app_api_key,
+    require_api_key,
+    require_api_key_async,
+)
 
 
 def test_authorize_request_missing_key() -> None:
@@ -116,3 +124,101 @@ def test_compliance_utils_helpers() -> None:
     assert extract_json_block("x {\"a\":1} y") == '{"a":1}'
     assert validate_collection_name("valid_name-1") is True
     assert validate_collection_name("bad name") is False
+
+
+def test_init_app_api_key_trims_and_sets_value(monkeypatch: Any) -> None:
+    monkeypatch.setenv("APP_API_KEY", "  top-secret  ")
+    init_app_api_key()
+    assert security._app_api_key == "top-secret"
+
+
+def test_require_api_key_passes_through_when_unconfigured(monkeypatch: Any) -> None:
+    monkeypatch.setattr(security, "_app_api_key", None)
+    app = Flask(__name__)
+
+    @require_api_key
+    def protected():
+        return jsonify({"ok": True}), 200
+
+    with app.test_request_context("/", headers={}):
+        response, status = protected()
+        assert status == 200
+        assert response.get_json() == {"ok": True}
+
+
+def test_require_api_key_rejects_missing_header_when_configured(monkeypatch: Any) -> None:
+    monkeypatch.setattr(security, "_app_api_key", "secret")
+    app = Flask(__name__)
+
+    @require_api_key
+    def protected():
+        return jsonify({"ok": True}), 200
+
+    with app.test_request_context("/", headers={}):
+        response, status = protected()
+        assert status == 401
+        assert response.get_json() == {"error": "Missing API key."}
+
+
+def test_require_api_key_rejects_invalid_header_when_configured(monkeypatch: Any) -> None:
+    monkeypatch.setattr(security, "_app_api_key", "secret")
+    app = Flask(__name__)
+
+    @require_api_key
+    def protected():
+        return jsonify({"ok": True}), 200
+
+    with app.test_request_context("/", headers={"x-api-key": "wrong"}):
+        response, status = protected()
+        assert status == 403
+        assert response.get_json() == {"error": "Invalid API key."}
+
+
+def test_require_api_key_allows_valid_header_when_configured(monkeypatch: Any) -> None:
+    monkeypatch.setattr(security, "_app_api_key", "secret")
+    app = Flask(__name__)
+
+    @require_api_key
+    def protected():
+        return jsonify({"ok": True}), 200
+
+    with app.test_request_context("/", headers={"x-api-key": "secret"}):
+        response, status = protected()
+        assert status == 200
+        assert response.get_json() == {"ok": True}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_require_api_key_async_rejects_missing_header_when_configured(
+    monkeypatch: Any, anyio_backend: str
+) -> None:
+    monkeypatch.setattr(security, "_app_api_key", "secret")
+    app = Flask(__name__)
+
+    @require_api_key_async
+    async def protected():
+        return jsonify({"ok": True}), 200
+
+    with app.test_request_context("/", headers={}):
+        response, status = await protected()
+        assert status == 401
+        assert response.get_json() == {"error": "Missing API key."}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_require_api_key_async_allows_valid_header_when_configured(
+    monkeypatch: Any, anyio_backend: str
+) -> None:
+    monkeypatch.setattr(security, "_app_api_key", "secret")
+    app = Flask(__name__)
+
+    @require_api_key_async
+    async def protected():
+        return jsonify({"ok": True}), 200
+
+    with app.test_request_context("/", headers={"x-api-key": "secret"}):
+        response, status = await protected()
+        assert status == 200
+        assert response.get_json() == {"ok": True}
