@@ -1,7 +1,9 @@
 """Unit tests for compliance_job_service, index_job_service, embedder."""
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from contextlib import nullcontext
+from types import SimpleNamespace
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -13,7 +15,36 @@ from compliance_job_service import (
     JOB_STATUS_RUNNING,
     start_gap_analysis_job,
 )
-from index_job_service import IndexJobStorage, JOB_STATUS_PENDING
+from index_job_service import (
+    DOCUMENT_TYPE_POLICY,
+    DOCUMENT_TYPE_STATUTE,
+    JOB_STATUS_COMPLETED as INDEX_JOB_STATUS_COMPLETED,
+    JOB_STATUS_FAILED as INDEX_JOB_STATUS_FAILED,
+    JOB_STATUS_RUNNING as INDEX_JOB_STATUS_RUNNING,
+    IndexJobStorage,
+    JOB_STATUS_PENDING,
+    _run_pipeline_step,
+    build_sub_vector_index_graph,
+)
+
+
+def _mock_response(status_code: int, json_body=None, text_body: str = "") -> MagicMock:
+    response = MagicMock()
+    response.status_code = status_code
+    response.get_json.return_value = json_body
+    response.get_data.return_value = text_body
+    return response
+
+
+class _FakeFlaskApp:
+    def __init__(self, client: MagicMock) -> None:
+        self._client = client
+
+    def app_context(self):
+        return nullcontext()
+
+    def test_client(self) -> MagicMock:
+        return self._client
 
 
 def test_compliance_job_storage_create_and_get() -> None:
@@ -119,6 +150,150 @@ def test_index_job_storage_get_not_found() -> None:
     storage = IndexJobStorage(mock_mongo, config)
 
     assert storage.get_job("nonexistent") is None
+
+
+def test_run_pipeline_step_raises_on_json_error_response() -> None:
+    """_run_pipeline_step raises RuntimeError with JSON error details."""
+    client = MagicMock()
+    client.post.return_value = _mock_response(422, json_body={"error": "invalid payload"})
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"create-embeddings /create-embeddings failed \(422\): invalid payload",
+    ):
+        _run_pipeline_step(client, "create-embeddings", "/create-embeddings", {"x": 1})
+
+
+@pytest.mark.anyio
+async def test_build_sub_vector_index_graph_policy_success_sequence() -> None:
+    """Policy workflow runs embeddings then vector index and marks completed."""
+    client = MagicMock()
+    client.post.side_effect = [
+        _mock_response(200, json_body={}),
+        _mock_response(200, json_body={}),
+    ]
+    job_storage = MagicMock()
+    job_storage._config = SimpleNamespace(
+        compliance_database="privacy-compliance",
+        policy_chunks_collection="policy_chunks_custom",
+        policy_legal_embeddings_collection="policy_legal_embeddings_custom",
+    )
+    graph = build_sub_vector_index_graph(_FakeFlaskApp(client), job_storage)
+
+    final_state = await graph.ainvoke(
+        {
+            "job_id": "job-policy-1",
+            "status": JOB_STATUS_PENDING,
+            "request": {
+                "document_type": DOCUMENT_TYPE_POLICY,
+                "source_query": {"document_id": "doc-123"},
+            },
+        }
+    )
+
+    assert final_state["status"] == INDEX_JOB_STATUS_COMPLETED
+    assert final_state["result"]["document_type"] == DOCUMENT_TYPE_POLICY
+    assert final_state["result"]["source_query"] == {"document_id": "doc-123"}
+    assert client.post.call_args_list == [
+        call(
+            "/create-embeddings",
+            json={
+                "source_database_name": "privacy-compliance",
+                "source_collection_name": "policy_chunks_custom",
+                "index_database_name": "privacy-compliance",
+                "index_collection_name": "policy_legal_embeddings_custom",
+                "source_query": {"document_id": "doc-123"},
+                "text_column": "chunk_text",
+            },
+        ),
+        call(
+            "/create-vector-index",
+            json={
+                "collection_name": "policy_legal_embeddings_custom",
+                "database_name": "privacy-compliance",
+                "filter_fields": ["document_id"],
+                "index_name": "vector_index",
+            },
+        ),
+    ]
+    assert job_storage.update_job_status.call_args_list[0] == call(
+        "job-policy-1",
+        INDEX_JOB_STATUS_RUNNING,
+    )
+    completed_call = job_storage.update_job_status.call_args_list[1]
+    assert completed_call.args == ("job-policy-1", INDEX_JOB_STATUS_COMPLETED)
+    assert completed_call.kwargs["result"]["document_type"] == DOCUMENT_TYPE_POLICY
+
+
+@pytest.mark.anyio
+async def test_build_sub_vector_index_graph_statute_success_sequence() -> None:
+    """Statute workflow runs all expected endpoints in order."""
+    client = MagicMock()
+    client.post.side_effect = [
+        _mock_response(200, json_body={}),
+        _mock_response(200, json_body={}),
+        _mock_response(200, json_body={}),
+        _mock_response(200, json_body={}),
+    ]
+    job_storage = MagicMock()
+    job_storage._config = SimpleNamespace(compliance_database="privacy-compliance")
+    graph = build_sub_vector_index_graph(_FakeFlaskApp(client), job_storage)
+
+    final_state = await graph.ainvoke(
+        {
+            "job_id": "job-statute-1",
+            "status": JOB_STATUS_PENDING,
+            "request": {
+                "document_type": DOCUMENT_TYPE_STATUTE,
+                "source_query": {"document_id": "stat-42"},
+            },
+        }
+    )
+
+    assert final_state["status"] == INDEX_JOB_STATUS_COMPLETED
+    assert [c.args[0] for c in client.post.call_args_list] == [
+        "/create-statute-subsections",
+        "/create-statute-subtopics",
+        "/create-embeddings",
+        "/create-vector-index",
+    ]
+    first_payload = client.post.call_args_list[0].kwargs["json"]
+    assert first_payload["source_query"] == {"document_id": "stat-42"}
+    assert first_payload["destination_collection"] == "statute_sub_chunks"
+    second_payload = client.post.call_args_list[1].kwargs["json"]
+    assert second_payload["destination_collection"] == "statute_subtopics"
+    third_payload = client.post.call_args_list[2].kwargs["json"]
+    assert third_payload["source_collection_name"] == "statute_sub_chunks"
+    fourth_payload = client.post.call_args_list[3].kwargs["json"]
+    assert fourth_payload["filter_fields"] == ["jurisdiction", "document_id"]
+
+
+@pytest.mark.anyio
+async def test_build_sub_vector_index_graph_invalid_document_type_fails_job() -> None:
+    """Invalid document_type marks the job as failed without endpoint calls."""
+    client = MagicMock()
+    job_storage = MagicMock()
+    job_storage._config = SimpleNamespace(compliance_database="privacy-compliance")
+    graph = build_sub_vector_index_graph(_FakeFlaskApp(client), job_storage)
+
+    final_state = await graph.ainvoke(
+        {
+            "job_id": "job-invalid-1",
+            "status": JOB_STATUS_PENDING,
+            "request": {"document_type": "unknown"},
+        }
+    )
+
+    assert final_state["status"] == INDEX_JOB_STATUS_FAILED
+    assert "Invalid document_type: unknown" in final_state["error"]
+    client.post.assert_not_called()
+    assert job_storage.update_job_status.call_args_list[0] == call(
+        "job-invalid-1",
+        INDEX_JOB_STATUS_RUNNING,
+    )
+    failed_call = job_storage.update_job_status.call_args_list[1]
+    assert failed_call.args == ("job-invalid-1", INDEX_JOB_STATUS_FAILED)
+    assert "Invalid document_type: unknown" in failed_call.kwargs["error"]
 
 
 @pytest.mark.anyio
