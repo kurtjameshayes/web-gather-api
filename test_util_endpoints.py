@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from flask import Flask
 
+import security
 from util import init_util, util_bp
 
 
@@ -30,6 +31,40 @@ def test_get_embedding_models_success_all() -> None:
     data = response.get_json()
     assert "models" in data
     assert len(data["models"]) == 2
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected_status"),
+    [
+        ({}, 401),
+        ({"x-api-key": "wrong"}, 403),
+        ({"x-api-key": "app-secret"}, 200),
+    ],
+)
+def test_get_embedding_models_respects_app_api_key(
+    monkeypatch: pytest.MonkeyPatch, headers: dict[str, str], expected_status: int
+) -> None:
+    """GET /embedding-models enforces APP_API_KEY when configured."""
+    wg_db = MagicMock()
+    wg_db.__getitem__.return_value.find.return_value = []
+    mock_mongo = MagicMock()
+    mock_mongo.__getitem__.return_value = wg_db
+    init_util(mock_mongo)
+
+    app = Flask(__name__)
+    app.register_blueprint(util_bp)
+    client = app.test_client()
+
+    monkeypatch.setattr(security, "_app_api_key", "app-secret")
+    response = client.get("/embedding-models", headers=headers)
+
+    assert response.status_code == expected_status
+    if expected_status == 200:
+        assert response.get_json() == {"models": []}
+    elif expected_status == 401:
+        assert response.get_json() == {"error": "Missing API key."}
+    else:
+        assert response.get_json() == {"error": "Invalid API key."}
 
 
 def test_get_embedding_models_filtered() -> None:
