@@ -105,7 +105,7 @@ def test_get_last_compliance_result_filters_and_normalizes_id(storage_harness) -
             "statute_index_version": "idx-2026",
         }
     )
-    assert cursor.sort_calls == [(("analyzed_at", -1),)]
+    assert cursor.sort_calls == [("analyzed_at", -1)]
     assert cursor.limit_calls == [(1,)]
 
 
@@ -193,6 +193,6 @@ def test_list_runs_builds_filters_and_infers_summary_types(storage_harness) -> N
     ]
     storage_harness.results.count_documents.assert_called_once_with(expected_query)
     storage_harness.results.find.assert_called_once_with(expected_query)
-    assert cursor.sort_calls == [(("analyzed_at", -1),)]
+    assert cursor.sort_calls == [("analyzed_at", -1)]
     assert cursor.skip_calls == [(5,)]
     assert cursor.limit_calls == [(10,)]
