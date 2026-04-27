@@ -1,11 +1,13 @@
 """Tests for security, utilities, cache, and redaction helpers."""
 from __future__ import annotations
 
+import asyncio
 import time
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from flask import Flask
 
 from cache import SimpleLRUCache
 from compliance_config import load_config
@@ -20,7 +22,12 @@ from compliance_utils import (
 )
 from rate_limiter import RateLimiter
 from redactor import Redactor
-from security import AuthorizationError, authorize_request
+from security import (
+    AuthorizationError,
+    authorize_request,
+    require_api_key,
+    require_api_key_async,
+)
 
 
 def test_authorize_request_missing_key() -> None:
@@ -61,6 +68,108 @@ def test_authorize_request_role_allowed() -> None:
     config.allowed_roles = ["admin"]
     request = SimpleNamespace(headers={"x-api-key": "secret", "x-role": "admin"})
     authorize_request(config, request)
+
+
+def test_require_api_key_allows_unconfigured_requests(monkeypatch: Any) -> None:
+    monkeypatch.setattr("security._app_api_key", None)
+    app = Flask(__name__)
+
+    @require_api_key
+    def handler() -> str:
+        return "ok"
+
+    with app.test_request_context("/core"):
+        assert handler() == "ok"
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected_status", "expected_error"),
+    [
+        ({}, 401, "Missing API key."),
+        ({"x-api-key": "wrong"}, 403, "Invalid API key."),
+    ],
+)
+def test_require_api_key_rejects_bad_requests(
+    monkeypatch: Any,
+    headers: dict[str, str],
+    expected_status: int,
+    expected_error: str,
+) -> None:
+    monkeypatch.setattr("security._app_api_key", "secret")
+    app = Flask(__name__)
+
+    @require_api_key
+    def handler() -> str:
+        return "ok"
+
+    with app.test_request_context("/core", headers=headers):
+        response, status = handler()
+
+    assert status == expected_status
+    assert response.get_json() == {"error": expected_error}
+
+
+def test_require_api_key_allows_valid_key(monkeypatch: Any) -> None:
+    monkeypatch.setattr("security._app_api_key", "secret")
+    app = Flask(__name__)
+
+    @require_api_key
+    def handler() -> str:
+        return "ok"
+
+    with app.test_request_context("/core", headers={"x-api-key": "secret"}):
+        assert handler() == "ok"
+
+
+def test_require_api_key_async_allows_unconfigured_requests(monkeypatch: Any) -> None:
+    monkeypatch.setattr("security._app_api_key", None)
+    app = Flask(__name__)
+
+    @require_api_key_async
+    async def handler() -> str:
+        return "ok"
+
+    with app.test_request_context("/core"):
+        assert asyncio.run(handler()) == "ok"
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected_status", "expected_error"),
+    [
+        ({}, 401, "Missing API key."),
+        ({"x-api-key": "wrong"}, 403, "Invalid API key."),
+    ],
+)
+def test_require_api_key_async_rejects_bad_requests(
+    monkeypatch: Any,
+    headers: dict[str, str],
+    expected_status: int,
+    expected_error: str,
+) -> None:
+    monkeypatch.setattr("security._app_api_key", "secret")
+    app = Flask(__name__)
+
+    @require_api_key_async
+    async def handler() -> str:
+        return "ok"
+
+    with app.test_request_context("/core", headers=headers):
+        response, status = asyncio.run(handler())
+
+    assert status == expected_status
+    assert response.get_json() == {"error": expected_error}
+
+
+def test_require_api_key_async_allows_valid_key(monkeypatch: Any) -> None:
+    monkeypatch.setattr("security._app_api_key", "secret")
+    app = Flask(__name__)
+
+    @require_api_key_async
+    async def handler() -> str:
+        return "ok"
+
+    with app.test_request_context("/core", headers={"x-api-key": "secret"}):
+        assert asyncio.run(handler()) == "ok"
 
 
 def test_redactor_masks_common_pii() -> None:
