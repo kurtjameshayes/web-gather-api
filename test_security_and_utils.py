@@ -1,17 +1,24 @@
 """Tests for security, utilities, cache, and redaction helpers."""
 from __future__ import annotations
 
+import asyncio
+import json
 import time
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
+from cryptography.fernet import Fernet
 
+from async_utils import run_in_thread
+from audit_logger import AuditLogger
 from cache import SimpleLRUCache
 from compliance_config import load_config
 from compliance_utils import (
     clamp,
     extract_json_block,
+    hash_text,
     jurisdiction_filter_values,
     normalize_jurisdiction,
     safe_truncate,
@@ -90,6 +97,18 @@ def test_cache_eviction_and_expiry(monkeypatch: Any) -> None:
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_run_in_thread_falls_back_to_executor(
+    monkeypatch: Any, anyio_backend: str
+) -> None:
+    monkeypatch.delattr(asyncio, "to_thread", raising=False)
+
+    result = await run_in_thread(lambda prefix, value: f"{prefix}-{value}", "case", value=7)
+
+    assert result == "case-7"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
 async def test_rate_limiter_blocks_then_allows(monkeypatch: Any, anyio_backend: str) -> None:
     now = 1000.0
 
@@ -102,6 +121,111 @@ async def test_rate_limiter_blocks_then_allows(monkeypatch: Any, anyio_backend: 
     assert await limiter.allow() is False
     now = 1060.0
     assert await limiter.allow() is True
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_audit_logger_disabled_skips_storage(
+    monkeypatch: Any, anyio_backend: str
+) -> None:
+    monkeypatch.delenv("AUDIT_LOG_KEY", raising=False)
+    config = load_config()
+    config.enable_audit_logging = False
+    mongo = MagicMock()
+
+    logger = AuditLogger(mongo, config)
+    await logger.log(
+        database="privacy",
+        policy_id="policy-1",
+        jurisdiction="CA",
+        policy_text="raw policy text",
+        sections=[{"section_text": "raw section text"}],
+        summary={"status": "ok"},
+    )
+
+    mongo.__getitem__.assert_not_called()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_audit_logger_stores_hash_only_record_without_key(
+    monkeypatch: Any, anyio_backend: str
+) -> None:
+    monkeypatch.delenv("AUDIT_LOG_KEY", raising=False)
+    config = load_config()
+    config.enable_audit_logging = True
+    config.allow_raw_audit = False
+    collection = MagicMock()
+    db = MagicMock()
+    db.__getitem__.return_value = collection
+    mongo = MagicMock()
+    mongo.__getitem__.return_value = db
+
+    logger = AuditLogger(mongo, config)
+    await logger.log(
+        database="privacy",
+        policy_id="policy-1",
+        jurisdiction="CA",
+        policy_text="raw policy text",
+        sections=[{"section_text": "raw section text"}],
+        summary={"status": "ok"},
+    )
+
+    collection.insert_one.assert_called_once()
+    record = collection.insert_one.call_args.args[0]
+    assert record["policy_hash"] == hash_text("raw policy text")
+    assert record["section_hashes"] == [hash_text("raw section text")]
+    assert "encrypted_record" not in record
+    assert "encrypted_payload" not in record
+    assert "raw policy text" not in json.dumps(record, default=str)
+    assert "raw section text" not in json.dumps(record, default=str)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_audit_logger_encrypts_record_and_allowed_raw_payload(
+    monkeypatch: Any, anyio_backend: str
+) -> None:
+    key = Fernet.generate_key()
+    monkeypatch.setenv("AUDIT_LOG_KEY", key.decode("utf-8"))
+    config = load_config()
+    config.enable_audit_logging = True
+    config.allow_raw_audit = True
+    collection = MagicMock()
+    db = MagicMock()
+    db.__getitem__.return_value = collection
+    mongo = MagicMock()
+    mongo.__getitem__.return_value = db
+
+    logger = AuditLogger(mongo, config)
+    await logger.log(
+        database="privacy",
+        policy_id="policy-1",
+        jurisdiction="CA",
+        policy_text="raw policy text",
+        sections=[{"section_text": "raw section text"}],
+        summary={"status": "ok"},
+    )
+
+    record = collection.insert_one.call_args.args[0]
+    fernet = Fernet(key)
+    encrypted_record = json.loads(
+        fernet.decrypt(record["encrypted_record"].encode("utf-8")).decode("utf-8")
+    )
+    encrypted_payload = json.loads(
+        fernet.decrypt(record["encrypted_payload"].encode("utf-8")).decode("utf-8")
+    )
+
+    assert encrypted_record["policy_hash"] == hash_text("raw policy text")
+    assert "policy_text" not in encrypted_record
+    assert encrypted_payload == {
+        "policy_text": "raw policy text",
+        "sections": [{"section_text": "raw section text"}],
+    }
+    assert "raw policy text" not in json.dumps(
+        {key: value for key, value in record.items() if key != "encrypted_payload"},
+        default=str,
+    )
 
 
 def test_compliance_utils_helpers() -> None:
