@@ -1,12 +1,16 @@
 """Tests for security, utilities, cache, and redaction helpers."""
 from __future__ import annotations
 
+import asyncio
 import time
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from flask import Flask, jsonify
 
+import security
+from async_utils import run_in_thread
 from cache import SimpleLRUCache
 from compliance_config import load_config
 from compliance_utils import (
@@ -20,7 +24,23 @@ from compliance_utils import (
 )
 from rate_limiter import RateLimiter
 from redactor import Redactor
-from security import AuthorizationError, authorize_request
+from security import (
+    AuthorizationError,
+    authorize_request,
+    init_app_api_key,
+    require_api_key,
+    require_api_key_async,
+)
+
+
+@pytest.fixture(autouse=True)
+def reset_app_api_key(monkeypatch: Any):
+    """Keep APP_API_KEY state isolated across tests."""
+    monkeypatch.delenv("APP_API_KEY", raising=False)
+    security._app_api_key = None
+    yield
+    monkeypatch.delenv("APP_API_KEY", raising=False)
+    security._app_api_key = None
 
 
 def test_authorize_request_missing_key() -> None:
@@ -63,6 +83,71 @@ def test_authorize_request_role_allowed() -> None:
     authorize_request(config, request)
 
 
+def test_require_api_key_allows_requests_when_unconfigured() -> None:
+    app = Flask(__name__)
+    init_app_api_key()
+
+    @require_api_key
+    def handler():
+        return jsonify({"ok": True})
+
+    with app.test_request_context("/protected"):
+        response = handler()
+
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True}
+
+
+def test_require_api_key_enforces_configured_app_key(monkeypatch: Any) -> None:
+    app = Flask(__name__)
+    monkeypatch.setenv("APP_API_KEY", "secret")
+    init_app_api_key()
+
+    @require_api_key
+    def handler():
+        return jsonify({"ok": True})
+
+    with app.test_request_context("/protected"):
+        response, status = handler()
+    assert status == 401
+    assert response.get_json() == {"error": "Missing API key."}
+
+    with app.test_request_context("/protected", headers={"x-api-key": "wrong"}):
+        response, status = handler()
+    assert status == 403
+    assert response.get_json() == {"error": "Invalid API key."}
+
+    with app.test_request_context("/protected", headers={"x-api-key": "secret"}):
+        response = handler()
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True}
+
+
+def test_require_api_key_async_enforces_configured_app_key(monkeypatch: Any) -> None:
+    app = Flask(__name__)
+    monkeypatch.setenv("APP_API_KEY", "secret")
+    init_app_api_key()
+
+    @require_api_key_async
+    async def handler():
+        return jsonify({"ok": True})
+
+    with app.test_request_context("/protected"):
+        response, status = asyncio.run(handler())
+    assert status == 401
+    assert response.get_json() == {"error": "Missing API key."}
+
+    with app.test_request_context("/protected", headers={"x-api-key": "wrong"}):
+        response, status = asyncio.run(handler())
+    assert status == 403
+    assert response.get_json() == {"error": "Invalid API key."}
+
+    with app.test_request_context("/protected", headers={"x-api-key": "secret"}):
+        response = asyncio.run(handler())
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True}
+
+
 def test_redactor_masks_common_pii() -> None:
     redactor = Redactor()
     result = redactor.redact("Email me at a@example.com or call 555-123-4567.")
@@ -102,6 +187,21 @@ async def test_rate_limiter_blocks_then_allows(monkeypatch: Any, anyio_backend: 
     assert await limiter.allow() is False
     now = 1060.0
     assert await limiter.allow() is True
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_run_in_thread_executes_callable_with_arguments(anyio_backend: str) -> None:
+    calls: list[tuple[int, int]] = []
+
+    def add(left: int, right: int) -> int:
+        calls.append((left, right))
+        return left + right
+
+    result = await run_in_thread(add, 2, right=3)
+
+    assert result == 5
+    assert calls == [(2, 3)]
 
 
 def test_compliance_utils_helpers() -> None:
