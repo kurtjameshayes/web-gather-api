@@ -13,12 +13,14 @@ from compliance_routes import compliance_bp
 from compliance_routes_v4 import compliance_v4_bp
 from compliance_config import load_config
 from compliance_suite_schemas import (
+    GapAnalysisRequest,
     GapAnalysisResponse,
     GapItem,
     GapSummary,
     RetrievalMetadata,
 )
 from adaptive_feedback_service import CriticService, VALID_CATEGORIES, VALID_SEVERITIES
+from gap_analysis_service_v4 import GapAnalysisServiceV4
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +292,68 @@ class TestRecordFeedbackUsage:
 
 
 # ---------------------------------------------------------------------------
+# GapAnalysisServiceV4 adaptive feedback lifecycle
+# ---------------------------------------------------------------------------
+
+class TestGapAnalysisV4AdaptiveFeedbackLifecycle:
+    def test_injects_feedback_and_records_usage_after_persist(self, mock_config):
+        service, collections, llm, critic = _build_v4_service(mock_config)
+        feedback_text = "PRIOR ANALYSIS FEEDBACK:\n- Require verbatim access quotes."
+        critic.get_active_feedback.return_value = [
+            {"_id": "fb-1", "suggestions": [{"instruction": "Require verbatim access quotes."}]}
+        ]
+        critic.format_feedback_for_prompt.return_value = feedback_text
+
+        response = asyncio.get_event_loop().run_until_complete(
+            service.run(
+                GapAnalysisRequest(
+                    policy_document_id="pol-1",
+                    applicable_jurisdictions=["CA"],
+                    save_results=True,
+                    run_async=False,
+                )
+            )
+        )
+
+        assert response.summary.addressed == 1
+        llm.gap_check_v4.assert_awaited_once()
+        assert llm.gap_check_v4.await_args.kwargs["adaptive_feedback"] == feedback_text
+        result_doc = collections["compliance_results"].insert_one.call_args[0][0]
+        run_id = result_doc["_id"]
+        critic.record_feedback_usage.assert_awaited_once_with(
+            run_id=run_id,
+            feedback_ids=["fb-1"],
+            rendered_text=feedback_text,
+        )
+        critic.evaluate.assert_awaited_once_with(response, run_id)
+
+    def test_does_not_record_feedback_or_evaluate_when_results_not_saved(self, mock_config):
+        service, collections, llm, critic = _build_v4_service(mock_config)
+        feedback_text = "PRIOR ANALYSIS FEEDBACK:\n- Treat vague access language as partial."
+        critic.get_active_feedback.return_value = [
+            {"_id": "fb-2", "suggestions": [{"instruction": "Treat vague access language as partial."}]}
+        ]
+        critic.format_feedback_for_prompt.return_value = feedback_text
+
+        response = asyncio.get_event_loop().run_until_complete(
+            service.run(
+                GapAnalysisRequest(
+                    policy_document_id="pol-1",
+                    applicable_jurisdictions=["CA"],
+                    save_results=False,
+                    run_async=False,
+                )
+            )
+        )
+
+        assert response.summary.total_requirements == 1
+        assert llm.gap_check_v4.await_args.kwargs["adaptive_feedback"] == feedback_text
+        collections["compliance_results"].insert_one.assert_not_called()
+        critic.record_feedback_usage.assert_not_awaited()
+        critic.evaluate.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
 # V4 endpoint: GET /adaptive-feedback
 # ---------------------------------------------------------------------------
 
@@ -379,3 +443,90 @@ class TestEnsureIndexes:
 async def _sync_run(func, *args, **kwargs):
     """Replacement for run_in_thread that runs synchronously."""
     return func(*args, **kwargs)
+
+
+def _build_v4_service(mock_config):
+    """Construct a V4 service with deterministic Mongo and async dependency mocks."""
+    mock_config.adaptive_feedback_enabled = True
+    mock_config.default_jurisdictions = ["CA"]
+
+    collections = {
+        "policies": MagicMock(),
+        "statute_sub_topic_embeddings": MagicMock(),
+        "policy_legal_embeddings": MagicMock(),
+        "category_mapping": MagicMock(),
+        "compliance_results": MagicMock(),
+        "compliance_run_log": MagicMock(),
+    }
+    db = MagicMock()
+    db.__getitem__.side_effect = lambda name: collections[name]
+    mongo = MagicMock()
+    mongo.__getitem__.return_value = db
+
+    collections["policies"].find_one.return_value = {
+        "document_id": "pol-1",
+        "company_name": "Acme",
+        "text": "You can access and delete your information.",
+    }
+    collections["policy_legal_embeddings"].count_documents.return_value = 1
+    collections["policy_legal_embeddings"].find.return_value = [
+        {"chunk_text": "You can access and delete your information."}
+    ]
+    collections["category_mapping"].find.return_value = [
+        {
+            "statute_category": "consumer_rights",
+            "policy_categories": ["consumer_rights"],
+            "sub_topic": "access",
+        }
+    ]
+
+    def _find_statutes(query, projection=None):
+        if query.get("category") == "consumer_rights":
+            return [
+                {
+                    "_id": "stat-1",
+                    "document_id": "law-1",
+                    "category": "consumer_rights",
+                    "sub_topic": "access",
+                    "header_text": "Section 1",
+                    "subtopic_text": "Consumers may request access.",
+                    "requirement_summary": "Access right",
+                    "jurisdiction": "CA",
+                }
+            ]
+        if query.get("document_id") == "law-1":
+            return [
+                {
+                    "category": "definitions",
+                    "header_text": "Definitions",
+                    "subtopic_text": "Consumer means a resident.",
+                }
+            ]
+        return []
+
+    collections["statute_sub_topic_embeddings"].find.side_effect = _find_statutes
+
+    llm = MagicMock()
+    llm.gap_check_v4 = AsyncMock(
+        return_value={
+            "status": "addressed",
+            "policy_quote": "access and delete",
+            "confidence": "high",
+            "requirement_summary": "Access right",
+            "statute_quote": "Consumers may request access.",
+        }
+    )
+    rate_limiter = MagicMock()
+    rate_limiter.allow = AsyncMock(return_value=True)
+    critic = MagicMock()
+    critic.record_feedback_usage = AsyncMock()
+    critic.evaluate = AsyncMock()
+
+    service = GapAnalysisServiceV4(
+        mongo_client=mongo,
+        config=mock_config,
+        llm_client=llm,
+        rate_limiter=rate_limiter,
+        critic=critic,
+    )
+    return service, collections, llm, critic
