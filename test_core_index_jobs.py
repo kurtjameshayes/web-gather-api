@@ -1,12 +1,20 @@
 """Tests for core index-jobs and create-sub-vector-index endpoints."""
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 from flask import Flask
 
+from compliance_config import load_config
 from core import core_bp, init_core
+from index_job_service import (
+    JOB_STATUS_COMPLETED,
+    JOB_STATUS_FAILED,
+    JOB_STATUS_RUNNING,
+    build_sub_vector_index_graph,
+)
 
 
 @pytest.fixture
@@ -111,3 +119,111 @@ def test_create_sub_vector_index_invalid_body_json(client) -> None:
         content_type="application/json",
     )
     assert response.status_code == 400
+
+
+@pytest.mark.anyio
+async def test_sub_vector_index_graph_policy_uses_legal_embedding_pipeline() -> None:
+    """Policy indexing should skip statute subchunking and use configured legal embedding collections."""
+    app = Flask(__name__)
+    config = load_config()
+    job_storage = MagicMock()
+    job_storage._config = config
+    calls = []
+
+    with patch("index_job_service._run_pipeline_step", side_effect=lambda *args: calls.append(args[1:])):
+        graph = build_sub_vector_index_graph(app, job_storage)
+        result = await graph.ainvoke({
+            "job_id": "idx-policy-1",
+            "request": {
+                "document_type": "policy",
+                "source_query": {"document_id": "policy-1"},
+            },
+        })
+
+    assert result["status"] == JOB_STATUS_COMPLETED
+    assert [call[0] for call in calls] == ["create-embeddings", "create-vector-index"]
+    assert [call[1] for call in calls] == ["/create-embeddings", "/create-vector-index"]
+    assert calls[0][2] == {
+        "source_database_name": config.compliance_database,
+        "source_collection_name": config.policy_chunks_collection,
+        "index_database_name": config.compliance_database,
+        "index_collection_name": config.policy_legal_embeddings_collection,
+        "source_query": {"document_id": "policy-1"},
+        "text_column": "chunk_text",
+    }
+    assert calls[1][2] == {
+        "collection_name": config.policy_legal_embeddings_collection,
+        "database_name": config.compliance_database,
+        "filter_fields": ["document_id"],
+        "index_name": "vector_index",
+    }
+    job_storage.update_job_status.assert_any_call("idx-policy-1", JOB_STATUS_RUNNING)
+    job_storage.update_job_status.assert_any_call(
+        "idx-policy-1",
+        JOB_STATUS_COMPLETED,
+        result={
+            "document_type": "policy",
+            "source_query": {"document_id": "policy-1"},
+            "status": "completed",
+        },
+    )
+
+
+@pytest.mark.anyio
+async def test_sub_vector_index_graph_statute_runs_full_subchunk_pipeline() -> None:
+    """Statute indexing should execute all four pipeline steps in the required order."""
+    app = Flask(__name__)
+    config = load_config()
+    job_storage = MagicMock()
+    job_storage._config = config
+    calls = []
+
+    with patch("index_job_service._run_pipeline_step", side_effect=lambda *args: calls.append(args[1:])):
+        graph = build_sub_vector_index_graph(app, job_storage)
+        result = await graph.ainvoke({
+            "job_id": "idx-statute-1",
+            "request": {
+                "document_type": "statute",
+                "source_query": {"jurisdiction": "CA"},
+            },
+        })
+
+    assert result["status"] == JOB_STATUS_COMPLETED
+    assert [call[0] for call in calls] == [
+        "create-statute-subsections",
+        "create-statute-subtopics",
+        "create-embeddings",
+        "create-vector-index",
+    ]
+    assert calls[0][1] == "/create-statute-subsections"
+    assert calls[0][2]["destination_collection"] == "statute_sub_chunks"
+    assert calls[0][2]["source_collection"] == "statute_chunks"
+    assert calls[1][1] == "/create-statute-subtopics"
+    assert calls[1][2]["destination_collection"] == "statute_subtopics"
+    assert calls[1][2]["source_collection"] == "statute_sub_chunks"
+    assert calls[2][1] == "/create-embeddings"
+    assert calls[2][2]["source_collection_name"] == "statute_sub_chunks"
+    assert calls[2][2]["index_collection_name"] == "statute_sub_embeddings"
+    assert calls[2][2]["text_column"] == "sub_chunk_text"
+    assert calls[3][1] == "/create-vector-index"
+    assert calls[3][2]["collection_name"] == "statute_sub_embeddings"
+    assert calls[3][2]["filter_fields"] == ["jurisdiction", "document_id"]
+
+
+def test_run_pipeline_step_reports_json_error_body() -> None:
+    """Pipeline failures should expose endpoint error details in the job error."""
+    from index_job_service import _run_pipeline_step
+
+    response = SimpleNamespace(
+        status_code=422,
+        get_json=lambda: {"error": "bad source query"},
+        get_data=lambda as_text=False: "fallback body",
+    )
+    client = MagicMock()
+    client.post.return_value = response
+
+    with pytest.raises(RuntimeError) as exc:
+        _run_pipeline_step(client, "create-embeddings", "/create-embeddings", {"source_query": {}})
+
+    assert str(exc.value) == "create-embeddings /create-embeddings failed (422): bad source query"
+    client.post.assert_called_once_with("/create-embeddings", json={"source_query": {}})
