@@ -1,18 +1,20 @@
 """Tests for compliance API v2, v3, v4 gap-analysis endpoints."""
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from flask import Flask
 
 import compliance_routes
-import compliance_routes
+import compliance_routes_v3
+import compliance_routes_v4
 from compliance_routes_v2 import compliance_v2_bp
 from compliance_routes_v3 import compliance_v3_bp
 from compliance_routes_v4 import compliance_v4_bp
 from compliance_config import load_config
-from compliance_suite_schemas import GapAnalysisResponse, GapSummary
+from compliance_suite_schemas import GapAnalysisRequest, GapAnalysisResponse, GapSummary
 
 
 @pytest.fixture
@@ -133,7 +135,7 @@ def test_v3_gap_analysis_async_returns_job_id(mock_config, mock_v3_service, mock
         "compliance_routes_v3._get_gap_analysis_v3_service", return_value=mock_v3_service
     ), patch("compliance_routes_v3._get_job_storage", return_value=mock_job_storage), patch(
         "compliance_routes_v3._get_suite_service", return_value=mock_suite
-    ), patch("compliance_routes_v3.start_gap_analysis_job", return_value="job-123"):
+    ), patch("compliance_routes_v3.start_gap_analysis_job", return_value="job-123") as mock_start:
         app = Flask(__name__)
         app.register_blueprint(compliance_v3_bp, url_prefix="/api/v3/compliance")
         client = app.test_client()
@@ -145,6 +147,14 @@ def test_v3_gap_analysis_async_returns_job_id(mock_config, mock_v3_service, mock
     data = response.get_json()
     assert "job_id" in data
     assert data["status"] == "pending"
+    request_arg, storage_arg, run_fn_arg = mock_start.call_args.args
+    assert "run_async" not in request_arg
+    assert request_arg["save_results"] is False
+    assert request_arg["policy_document_id"] == "pol-1"
+    assert request_arg["applicable_jurisdictions"] == ["CA"]
+    assert storage_arg is mock_job_storage
+    assert callable(run_fn_arg)
+    assert mock_start.call_args.kwargs["compliance_storage"] is mock_suite._storage
 
 
 def test_v4_gap_analysis_sync_success(mock_config, mock_v4_service, mock_job_storage) -> None:
@@ -172,7 +182,7 @@ def test_v4_gap_analysis_async_returns_job_id(mock_config, mock_v4_service, mock
         "compliance_routes_v4._get_gap_analysis_v4_service", return_value=mock_v4_service
     ), patch("compliance_routes_v4._get_job_storage", return_value=mock_job_storage), patch(
         "compliance_routes_v4._get_suite_service", return_value=mock_suite
-    ), patch("compliance_routes_v4.start_gap_analysis_job", return_value="job-123"):
+    ), patch("compliance_routes_v4.start_gap_analysis_job", return_value="job-123") as mock_start:
         app = Flask(__name__)
         app.register_blueprint(compliance_v4_bp, url_prefix="/api/v4/compliance")
         client = app.test_client()
@@ -184,3 +194,53 @@ def test_v4_gap_analysis_async_returns_job_id(mock_config, mock_v4_service, mock
     data = response.get_json()
     assert "job_id" in data
     assert data["status"] == "pending"
+    request_arg, storage_arg, run_fn_arg = mock_start.call_args.args
+    assert "run_async" not in request_arg
+    assert request_arg["save_results"] is False
+    assert request_arg["policy_document_id"] == "pol-1"
+    assert request_arg["applicable_jurisdictions"] == ["CA"]
+    assert storage_arg is mock_job_storage
+    assert callable(run_fn_arg)
+    assert mock_start.call_args.kwargs["compliance_storage"] is mock_suite._storage
+
+
+def test_v3_gap_analysis_job_runner_uses_v3_service(mock_v3_service, mock_job_storage) -> None:
+    """Background v3 jobs should run through the v3 service implementation."""
+    mock_suite = MagicMock()
+    mock_suite._storage = MagicMock()
+    with patch(
+        "compliance_routes_v3._get_gap_analysis_v3_service", return_value=mock_v3_service
+    ), patch("compliance_routes_v3._get_job_storage", return_value=mock_job_storage), patch(
+        "compliance_routes_v3._get_suite_service", return_value=mock_suite
+    ), patch("compliance_routes_v3.start_gap_analysis_job", return_value="job-123") as mock_start:
+        job_id = compliance_routes_v3._start_v3_gap_analysis_job(
+            {"policy_document_id": "pol-1", "applicable_jurisdictions": ["CA"]}
+        )
+
+    assert job_id == "job-123"
+    run_fn_arg = mock_start.call_args.args[2]
+    request_model = GapAnalysisRequest(policy_document_id="pol-1")
+    result = asyncio.run(run_fn_arg(request_model))
+    assert result.policy_document_id == "pol-1"
+    mock_v3_service.run.assert_awaited_once_with(request_model)
+
+
+def test_v4_gap_analysis_job_runner_uses_v4_service(mock_v4_service, mock_job_storage) -> None:
+    """Background v4 jobs should run through the v4 service implementation."""
+    mock_suite = MagicMock()
+    mock_suite._storage = MagicMock()
+    with patch(
+        "compliance_routes_v4._get_gap_analysis_v4_service", return_value=mock_v4_service
+    ), patch("compliance_routes_v4._get_job_storage", return_value=mock_job_storage), patch(
+        "compliance_routes_v4._get_suite_service", return_value=mock_suite
+    ), patch("compliance_routes_v4.start_gap_analysis_job", return_value="job-123") as mock_start:
+        job_id = compliance_routes_v4._start_v4_gap_analysis_job(
+            {"policy_document_id": "pol-1", "applicable_jurisdictions": ["CA"]}
+        )
+
+    assert job_id == "job-123"
+    run_fn_arg = mock_start.call_args.args[2]
+    request_model = GapAnalysisRequest(policy_document_id="pol-1")
+    result = asyncio.run(run_fn_arg(request_model))
+    assert result.policy_document_id == "pol-1"
+    mock_v4_service.run.assert_awaited_once_with(request_model)
