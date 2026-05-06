@@ -13,12 +13,14 @@ from compliance_routes import compliance_bp
 from compliance_routes_v4 import compliance_v4_bp
 from compliance_config import load_config
 from compliance_suite_schemas import (
+    GapAnalysisRequest,
     GapAnalysisResponse,
     GapItem,
     GapSummary,
     RetrievalMetadata,
 )
 from adaptive_feedback_service import CriticService, VALID_CATEGORIES, VALID_SEVERITIES
+from gap_analysis_service_v4 import GapAnalysisServiceV4
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +292,101 @@ class TestRecordFeedbackUsage:
 
 
 # ---------------------------------------------------------------------------
+# GapAnalysisServiceV4 adaptive feedback integration
+# ---------------------------------------------------------------------------
+
+class TestGapAnalysisServiceV4AdaptiveFeedback:
+    def test_injects_feedback_and_records_usage_after_persist(self, mock_config):
+        mongo = _build_v4_mongo(mock_config)
+        llm = MagicMock()
+        llm.gap_check_v4 = AsyncMock(
+            return_value={
+                "status": "addressed",
+                "policy_quote": "We honor deletion rights within 45 days.",
+                "requirement_summary": "Right to delete",
+                "statute_quote": "Consumers may request deletion.",
+                "confidence": "high",
+            }
+        )
+        critic = MagicMock()
+        critic.get_active_feedback.return_value = [
+            {"_id": "fb-1", "suggestions": [{"instruction": "Require exact policy quotes"}]}
+        ]
+        critic.format_feedback_for_prompt.return_value = (
+            "PRIOR ANALYSIS FEEDBACK\n- Require exact policy quotes"
+        )
+        critic.record_feedback_usage = AsyncMock()
+        critic.evaluate = AsyncMock()
+
+        service = GapAnalysisServiceV4(
+            mongo_client=mongo,
+            config=mock_config,
+            llm_client=llm,
+            rate_limiter=AsyncMock(allow=AsyncMock(return_value=True)),
+            critic=critic,
+        )
+        req = GapAnalysisRequest(
+            policy_document_id="pol-1",
+            applicable_jurisdictions=["CA"],
+            save_results=True,
+            run_async=False,
+        )
+
+        response = asyncio.get_event_loop().run_until_complete(service.run(req))
+
+        assert response.summary.addressed == 1
+        llm.gap_check_v4.assert_awaited_once()
+        assert (
+            llm.gap_check_v4.await_args.kwargs["adaptive_feedback"]
+            == "PRIOR ANALYSIS FEEDBACK\n- Require exact policy quotes"
+        )
+
+        results_coll = mongo[mock_config.compliance_database][mock_config.compliance_results_collection]
+        assert len(results_coll.inserted) == 1
+        run_id = results_coll.inserted[0]["_id"]
+        critic.record_feedback_usage.assert_awaited_once_with(
+            run_id=run_id,
+            feedback_ids=["fb-1"],
+            rendered_text="PRIOR ANALYSIS FEEDBACK\n- Require exact policy quotes",
+        )
+        critic.evaluate.assert_awaited_once_with(response, run_id)
+
+    def test_unbound_addressed_quote_is_downgraded_to_missing(self, mock_config):
+        mongo = _build_v4_mongo(mock_config)
+        llm = MagicMock()
+        llm.gap_check_v4 = AsyncMock(
+            return_value={
+                "status": "addressed",
+                "policy_quote": "This quote is not present in the policy.",
+                "requirement_summary": "Right to delete",
+                "statute_quote": "Consumers may request deletion.",
+                "confidence": "high",
+            }
+        )
+        service = GapAnalysisServiceV4(
+            mongo_client=mongo,
+            config=mock_config,
+            llm_client=llm,
+            rate_limiter=AsyncMock(allow=AsyncMock(return_value=True)),
+        )
+        req = GapAnalysisRequest(
+            policy_document_id="pol-1",
+            applicable_jurisdictions=["CA"],
+            save_results=False,
+            run_async=False,
+        )
+
+        response = asyncio.get_event_loop().run_until_complete(service.run(req))
+
+        assert response.summary.missing == 1
+        assert response.summary.addressed == 0
+        gap = response.gaps[0]
+        assert gap.status == "missing"
+        assert gap.policy_quote is None
+        assert gap.citation_binding_failed is True
+
+
+# ---------------------------------------------------------------------------
 # V4 endpoint: GET /adaptive-feedback
 # ---------------------------------------------------------------------------
 
@@ -379,3 +476,128 @@ class TestEnsureIndexes:
 async def _sync_run(func, *args, **kwargs):
     """Replacement for run_in_thread that runs synchronously."""
     return func(*args, **kwargs)
+
+
+class _FakeCursor(list):
+    def sort(self, *_args, **_kwargs):
+        return self
+
+    def skip(self, n):
+        return _FakeCursor(self[n:])
+
+    def limit(self, n):
+        return _FakeCursor(self[:n])
+
+
+class _FakeCollection:
+    def __init__(self, docs=None):
+        self.docs = list(docs or [])
+        self.inserted = []
+
+    def find_one(self, query):
+        for doc in self.docs:
+            if _matches(doc, query):
+                return doc
+        return None
+
+    def find(self, query=None, *_args, **_kwargs):
+        query = query or {}
+        return _FakeCursor([doc for doc in self.docs if _matches(doc, query)])
+
+    def count_documents(self, query):
+        return len(self.find(query))
+
+    def insert_one(self, doc):
+        self.inserted.append(doc)
+        self.docs.append(doc)
+
+
+class _FakeDatabase:
+    def __init__(self, collections):
+        self.collections = collections
+
+    def __getitem__(self, name):
+        if name not in self.collections:
+            self.collections[name] = _FakeCollection()
+        return self.collections[name]
+
+
+class _FakeMongo:
+    def __init__(self, databases):
+        self.databases = databases
+
+    def __getitem__(self, name):
+        if name not in self.databases:
+            self.databases[name] = _FakeDatabase({})
+        return self.databases[name]
+
+
+def _matches(doc, query):
+    for key, expected in query.items():
+        actual = doc.get(key)
+        if isinstance(expected, dict) and "$in" in expected:
+            if actual not in expected["$in"]:
+                return False
+        elif actual != expected:
+            return False
+    return True
+
+
+def _build_v4_mongo(config):
+    collections = {
+        config.policies_collection: _FakeCollection(
+            [
+                {
+                    config.policy_document_id_field: "pol-1",
+                    "company_name": "Acme",
+                    "text": "Our policy says: We honor deletion rights within 45 days.",
+                }
+            ]
+        ),
+        config.policy_legal_embeddings_collection: _FakeCollection(
+            [
+                {
+                    config.policy_document_id_field: "pol-1",
+                    "category": "consumer_rights",
+                    "chunk_text": "We honor deletion rights within 45 days.",
+                }
+            ]
+        ),
+        config.category_mapping_collection: _FakeCollection(
+            [
+                {
+                    "statute_category": "consumer_rights",
+                    "policy_categories": ["consumer_rights"],
+                    "sub_topic": "deletion",
+                }
+            ]
+        ),
+        config.statute_sub_topic_embeddings_collection: _FakeCollection(
+            [
+                {
+                    "_id": "stat-1",
+                    "category": "consumer_rights",
+                    "sub_topic": "deletion",
+                    "document_id": "ccpa",
+                    "header_text": "Cal. Civ. Code 1798.105",
+                    "subtopic_text": "Consumers may request deletion.",
+                    "requirement_summary": "Right to delete",
+                    "jurisdiction": "CA",
+                },
+                {
+                    "_id": "ctx-1",
+                    "category": "definitions",
+                    "document_id": "ccpa",
+                    "header_text": "Definitions",
+                    "subtopic_text": "Consumer means a natural person.",
+                },
+            ]
+        ),
+        config.compliance_results_collection: _FakeCollection(),
+        config.compliance_run_log_collection: _FakeCollection(),
+    }
+    db_name = config.compliance_database
+    statute_db_name = (config.statute_database or "").strip() or db_name
+    databases = {db_name: _FakeDatabase(collections)}
+    databases[statute_db_name] = databases[db_name]
+    return _FakeMongo(databases)
