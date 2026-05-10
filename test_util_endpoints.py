@@ -226,9 +226,155 @@ def test_create_vector_index_success() -> None:
         )
 
     # createSearchIndexes may raise on drop; util catches and continues
-    if response.status_code == 200:
-        data = response.get_json()
-        assert data["database_name"] == "test_db"
-        assert data["collection_name"] == "coll"
-        assert "index_name" in data
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["database_name"] == "test_db"
+    assert data["collection_name"] == "coll"
+    assert data["filter_fields_added"] == 0
+    assert data["definition"]["fields"] == [
+        {"type": "vector", "path": "embedding", "numDimensions": 384, "similarity": "cosine"}
+    ]
+
+
+def test_create_vector_index_request_filter_fields_override_record_defaults() -> None:
+    """Request filter_fields are parsed into filter definitions and override stored defaults."""
+    from util import init_util
+
+    target_db = MagicMock()
+    target_db.command.side_effect = [
+        Exception("Index does not exist"),
+        {"ok": 1},
+    ]
+    wg_db = MagicMock()
+    mock_mongo = MagicMock()
+
+    def get_db(name):
+        return target_db if name == "test_db" else wg_db
+
+    mock_mongo.__getitem__.side_effect = get_db
+    init_util(mock_mongo)
+
+    record = {
+        "database_name": "test_db",
+        "model_name": "m",
+        "fields": [{"type": "vector", "path": "embedding", "numDimensions": 384, "similarity": "dotProduct"}],
+        "filter_fields": ["tenant_id"],
+    }
+    with patch("util.get_embedding_model_record", return_value=record):
+        app = Flask(__name__)
+        app.register_blueprint(util_bp)
+        c = app.test_client()
+
+        response = c.post(
+            "/create-vector-index",
+            json={
+                "database_name": "test_db",
+                "collection_name": "coll",
+                "index_name": "policy_vectors",
+                "filter_fields": [
+                    "document_id",
+                    {"path": " jurisdiction "},
+                    {"path": "source.type"},
+                    "",
+                    {"path": ""},
+                    {"name": "ignored"},
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["filter_fields_added"] == 3
+    assert data["definition"]["fields"] == [
+        {"type": "vector", "path": "embedding", "numDimensions": 384, "similarity": "cosine"},
+        {"type": "filter", "path": "document_id"},
+        {"type": "filter", "path": "jurisdiction"},
+        {"type": "filter", "path": "source.type"},
+    ]
+    create_command = target_db.command.call_args_list[1].args[0]
+    assert create_command["createSearchIndexes"] == "coll"
+    assert create_command["indexes"][0]["name"] == "policy_vectors"
+    assert create_command["indexes"][0]["definition"] == data["definition"]
+
+
+def test_create_vector_index_uses_record_filter_fields_when_request_omits_them() -> None:
+    """Stored embedding_model filter_fields are used when the request does not override them."""
+    from util import init_util
+
+    target_db = MagicMock()
+    target_db.command.side_effect = [
+        Exception("Index does not exist"),
+        {"ok": 1},
+    ]
+    wg_db = MagicMock()
+    mock_mongo = MagicMock()
+
+    def get_db(name):
+        return target_db if name == "test_db" else wg_db
+
+    mock_mongo.__getitem__.side_effect = get_db
+    init_util(mock_mongo)
+
+    record = {
+        "database_name": "test_db",
+        "model_name": "m",
+        "fields": [{"type": "vector", "path": "embedding", "numDimensions": 384, "similarity": "cosine"}],
+        "filter_fields": ["tenant_id", {"path": "jurisdiction"}],
+    }
+    with patch("util.get_embedding_model_record", return_value=record):
+        app = Flask(__name__)
+        app.register_blueprint(util_bp)
+        c = app.test_client()
+
+        response = c.post(
+            "/create-vector-index",
+            json={"database_name": "test_db", "collection_name": "coll"},
+        )
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["filter_fields_added"] == 2
+    assert data["definition"]["fields"] == [
+        {"type": "vector", "path": "embedding", "numDimensions": 384, "similarity": "cosine"},
+        {"type": "filter", "path": "tenant_id"},
+        {"type": "filter", "path": "jurisdiction"},
+    ]
+
+
+def test_create_vector_index_rejects_non_array_filter_fields() -> None:
+    """filter_fields must stay an array so malformed index definitions are not silently accepted."""
+    from util import init_util
+
+    target_db = MagicMock()
+    wg_db = MagicMock()
+    mock_mongo = MagicMock()
+
+    def get_db(name):
+        return target_db if name == "test_db" else wg_db
+
+    mock_mongo.__getitem__.side_effect = get_db
+    init_util(mock_mongo)
+
+    record = {
+        "database_name": "test_db",
+        "model_name": "m",
+        "fields": [{"type": "vector", "path": "embedding", "numDimensions": 384, "similarity": "cosine"}],
+    }
+    with patch("util.get_embedding_model_record", return_value=record):
+        app = Flask(__name__)
+        app.register_blueprint(util_bp)
+        c = app.test_client()
+
+        response = c.post(
+            "/create-vector-index",
+            json={
+                "database_name": "test_db",
+                "collection_name": "coll",
+                "filter_fields": "tenant_id",
+            },
+        )
+
+    assert response.status_code == 400
+    assert "filter_fields must be an array" in response.get_json()["error"]
+    target_db.command.assert_not_called()
 
