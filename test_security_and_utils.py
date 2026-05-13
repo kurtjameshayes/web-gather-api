@@ -1,11 +1,13 @@
 """Tests for security, utilities, cache, and redaction helpers."""
 from __future__ import annotations
 
+import asyncio
 import time
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from flask import Flask, jsonify
 
 from cache import SimpleLRUCache
 from compliance_config import load_config
@@ -16,11 +18,28 @@ from compliance_utils import (
     normalize_jurisdiction,
     safe_truncate,
     slugify,
+    truncate_at_sentence,
     validate_collection_name,
 )
 from rate_limiter import RateLimiter
 from redactor import Redactor
-from security import AuthorizationError, authorize_request
+from security import (
+    AuthorizationError,
+    authorize_request,
+    init_app_api_key,
+    require_api_key,
+    require_api_key_async,
+)
+
+
+@pytest.fixture(autouse=True)
+def reset_app_api_key(monkeypatch: Any):
+    """Keep APP_API_KEY decorator state isolated between tests."""
+    monkeypatch.delenv("APP_API_KEY", raising=False)
+    init_app_api_key()
+    yield
+    monkeypatch.delenv("APP_API_KEY", raising=False)
+    init_app_api_key()
 
 
 def test_authorize_request_missing_key() -> None:
@@ -61,6 +80,90 @@ def test_authorize_request_role_allowed() -> None:
     config.allowed_roles = ["admin"]
     request = SimpleNamespace(headers={"x-api-key": "secret", "x-role": "admin"})
     authorize_request(config, request)
+
+
+def test_authorize_request_uses_custom_role_header() -> None:
+    config = load_config()
+    config.auth_required = True
+    config.api_key = "secret"
+    config.allowed_roles = ["admin"]
+    config.default_role_header = "x-tenant-role"
+
+    request = SimpleNamespace(
+        headers={"x-api-key": "secret", "x-tenant-role": "Admin"}
+    )
+    authorize_request(config, request)
+
+    default_header_request = SimpleNamespace(
+        headers={"x-api-key": "secret", "x-role": "admin"}
+    )
+    with pytest.raises(AuthorizationError) as exc:
+        authorize_request(config, default_header_request)
+    assert exc.value.status_code == 403
+
+
+def test_require_api_key_allows_when_unconfigured() -> None:
+    app = Flask(__name__)
+
+    @require_api_key
+    def protected():
+        return jsonify({"ok": True})
+
+    with app.test_request_context("/"):
+        response = protected()
+
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True}
+
+
+def test_require_api_key_sync_enforces_configured_app_key(monkeypatch: Any) -> None:
+    monkeypatch.setenv("APP_API_KEY", "app-secret")
+    init_app_api_key()
+    app = Flask(__name__)
+
+    @require_api_key
+    def protected():
+        return jsonify({"ok": True})
+
+    with app.test_request_context("/"):
+        response, status = protected()
+    assert status == 401
+    assert response.get_json() == {"error": "Missing API key."}
+
+    with app.test_request_context("/", headers={"x-api-key": "wrong"}):
+        response, status = protected()
+    assert status == 403
+    assert response.get_json() == {"error": "Invalid API key."}
+
+    with app.test_request_context("/", headers={"x-api-key": "app-secret"}):
+        response = protected()
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True}
+
+
+def test_require_api_key_async_enforces_configured_app_key(monkeypatch: Any) -> None:
+    monkeypatch.setenv("APP_API_KEY", "app-secret")
+    init_app_api_key()
+    app = Flask(__name__)
+
+    @require_api_key_async
+    async def protected():
+        return jsonify({"ok": True})
+
+    with app.test_request_context("/"):
+        response, status = asyncio.run(protected())
+    assert status == 401
+    assert response.get_json() == {"error": "Missing API key."}
+
+    with app.test_request_context("/", headers={"x-api-key": "wrong"}):
+        response, status = asyncio.run(protected())
+    assert status == 403
+    assert response.get_json() == {"error": "Invalid API key."}
+
+    with app.test_request_context("/", headers={"x-api-key": "app-secret"}):
+        response = asyncio.run(protected())
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True}
 
 
 def test_redactor_masks_common_pii() -> None:
@@ -116,3 +219,19 @@ def test_compliance_utils_helpers() -> None:
     assert extract_json_block("x {\"a\":1} y") == '{"a":1}'
     assert validate_collection_name("valid_name-1") is True
     assert validate_collection_name("bad name") is False
+
+
+@pytest.mark.parametrize(
+    ("text", "max_chars", "expected"),
+    [
+        ("Alpha. Beta continues beyond limit", 12, "Alpha."),
+        ("Alpha! Beta continues beyond limit", 12, "Alpha!"),
+        ("Alpha? Beta continues beyond limit", 12, "Alpha?"),
+        ("No boundary here   and more", 16, "No boundary here"),
+        ("Short text", 50, "Short text"),
+        ("", 10, ""),
+        ("Keep original", 0, "Keep original"),
+    ],
+)
+def test_truncate_at_sentence_edges(text: str, max_chars: int, expected: str) -> None:
+    assert truncate_at_sentence(text, max_chars) == expected
