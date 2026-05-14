@@ -178,6 +178,19 @@ def test_list_all_databases_success(client, mock_mongo_client) -> None:
     assert payload["databases"] == ["db1", "db2"]
 
 
+def test_list_all_databases_filters_reserved_names(client, mock_mongo_client) -> None:
+    mock_mongo_client.list_database_names.return_value = [
+        "admin",
+        "customer_data",
+        "config",
+        "LOCAL",
+    ]
+    response = client.get("/all-databases")
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["databases"] == ["customer_data"]
+
+
 def test_list_all_collections_success(client, mock_mongo_client) -> None:
     dbs = _wire_mongo(mock_mongo_client)
     dbs["user_db"].list_collection_names.return_value = ["a", "b"]
