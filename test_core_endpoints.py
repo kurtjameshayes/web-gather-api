@@ -119,6 +119,51 @@ def test_ingest_pdf_success(client, mock_clients) -> None:
     assert payload["pages"] == 1
 
 
+def test_ingest_overwrite_deletes_only_matching_source_url(client, mock_clients) -> None:
+    """Overwrite mode must not clear unrelated documents in the same collection."""
+    url = "https://example.com/privacy"
+    target_db = MagicMock()
+    web_gather_db = MagicMock()
+    target_collection = MagicMock()
+    documents_collection = MagicMock()
+
+    def _get_db(name: str) -> MagicMock:
+        return web_gather_db if name == WEB_GATHER_DB else target_db
+
+    mock_clients["mongo"].__getitem__.side_effect = _get_db
+    target_db.__getitem__.return_value = target_collection
+    web_gather_db.__getitem__.return_value = documents_collection
+    target_collection.count_documents.return_value = 2
+    mock_clients["firecrawl"].crawl.return_value = [
+        {"url": url, "title": "Privacy", "markdown": "Privacy policy text"}
+    ]
+
+    with patch("core.detect_content_type", return_value=""):
+        response = client.post(
+            "/ingest",
+            json={
+                "url": url,
+                "database": "test_db",
+                "collection": "docs",
+                "mode": "overwrite",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["overwritten"] is True
+    assert payload["previous_document_count"] == 2
+    target_collection.count_documents.assert_called_once_with({"source_url": url})
+    target_collection.delete_many.assert_called_once_with({"source_url": url})
+    documents_collection.delete_many.assert_called_once_with(
+        {
+            "database_name": "test_db",
+            "collection_name": "docs",
+            "source_url": url,
+        }
+    )
+
+
 def test_ingest_rejects_ssrf_localhost(client, mock_clients) -> None:
     """SSRF protection: localhost URLs must be rejected."""
     response = client.post(
