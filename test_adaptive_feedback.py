@@ -97,6 +97,88 @@ def sample_response():
 
 
 # ---------------------------------------------------------------------------
+# compliance_routes.init_compliance adaptive feedback wiring
+# ---------------------------------------------------------------------------
+
+def test_init_compliance_wires_critic_into_v4_service(monkeypatch, mock_config):
+    """Startup must attach CriticService so V4 runs can consume and create feedback."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-api-key")
+
+    old_globals = (
+        compliance_routes._suite_service,
+        compliance_routes._gap_analysis_v3_service,
+        compliance_routes._gap_analysis_v4_service,
+        compliance_routes._critic_service,
+        compliance_routes._job_storage,
+        compliance_routes._config,
+    )
+
+    fake_mongo = MagicMock()
+    fake_critic = MagicMock()
+    fake_v4_service = MagicMock()
+    fake_storage = MagicMock()
+
+    try:
+        with patch.object(compliance_routes, "load_config", return_value=mock_config), patch.object(
+            compliance_routes, "ensure_privacy_compliance_indexes"
+        ) as ensure_indexes, patch.object(
+            compliance_routes, "get_embedding_model_name", return_value="test-embedding-model"
+        ), patch.object(
+            compliance_routes, "set_application_embedding_model"
+        ) as set_embedding_model, patch.object(
+            compliance_routes, "Embedder"
+        ) as embedder_cls, patch.object(
+            compliance_routes, "VectorRetriever"
+        ) as retriever_cls, patch.object(
+            compliance_routes, "AnthropicLLMClient"
+        ) as llm_cls, patch.object(
+            compliance_routes, "RateLimiter"
+        ) as rate_limiter_cls, patch.object(
+            compliance_routes, "ComplianceStorage", return_value=fake_storage
+        ) as storage_cls, patch.object(
+            compliance_routes, "CriticService", return_value=fake_critic
+        ) as critic_cls, patch.object(
+            compliance_routes, "GapAnalysisServiceV4", return_value=fake_v4_service
+        ) as v4_cls, patch.object(
+            compliance_routes, "ComplianceSuiteService"
+        ) as suite_cls, patch.object(
+            compliance_routes, "GapAnalysisServiceV3"
+        ) as v3_cls, patch.object(
+            compliance_routes, "ComplianceJobStorage"
+        ) as job_storage_cls:
+            compliance_routes.init_compliance(fake_mongo)
+
+        ensure_indexes.assert_called_once_with(fake_mongo, mock_config.compliance_database)
+        set_embedding_model.assert_called_once_with("test-embedding-model")
+        embedder_cls.assert_called_once()
+        retriever_cls.assert_called_once()
+        llm_cls.assert_called_once_with("test-api-key", mock_config)
+        rate_limiter_cls.assert_called_once_with(mock_config.rate_limit_per_minute)
+        storage_cls.assert_called_once_with(fake_mongo, mock_config)
+        critic_cls.assert_called_once_with(
+            mongo_client=fake_mongo,
+            config=mock_config,
+            llm_client=llm_cls.return_value,
+        )
+        fake_critic.ensure_indexes.assert_called_once()
+        assert v4_cls.call_args.kwargs["critic"] is fake_critic
+        assert suite_cls.call_args.kwargs["gap_analysis_v4_service"] is fake_v4_service
+        assert v3_cls.call_args.kwargs["storage"] is fake_storage
+        job_storage_cls.assert_called_once_with(fake_mongo, mock_config)
+        assert compliance_routes._critic_service is fake_critic
+        assert compliance_routes._gap_analysis_v4_service is fake_v4_service
+    finally:
+        (
+            compliance_routes._suite_service,
+            compliance_routes._gap_analysis_v3_service,
+            compliance_routes._gap_analysis_v4_service,
+            compliance_routes._critic_service,
+            compliance_routes._job_storage,
+            compliance_routes._config,
+        ) = old_globals
+
+
+# ---------------------------------------------------------------------------
 # CriticService._validate_suggestions
 # ---------------------------------------------------------------------------
 
