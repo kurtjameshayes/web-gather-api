@@ -136,6 +136,81 @@ def test_retriever_returns_statute_candidates():
     assert results[0].score == 0.77
 
 
+def test_retriever_subchunk_search_falls_back_when_filtered_vector_search_fails():
+    """Policy subchunk retrieval should retry without $vectorSearch filter support."""
+    config = load_config()
+
+    statute_collection = MagicMock()
+    statute_collection.find.return_value = [
+        {
+            "_id": "stat-sub-1",
+            config.embedding_vector_field: [0.1, 0.2],
+            config.statute_jurisdiction_field: "California",
+            "document_id": "statute-1",
+        }
+    ]
+
+    policy_collection = MagicMock()
+    aggregate_pipelines = []
+
+    def aggregate_with_filter_failure(pipeline):
+        aggregate_pipelines.append(pipeline)
+        if len(aggregate_pipelines) == 1:
+            raise RuntimeError("filtered vector search is not supported")
+        return [
+            {
+                config.policy_document_id_field: "policy-1",
+                config.policy_subchunk_text_field: "We honor verified deletion requests.",
+                config.embedding_vector_field: [9.9, 9.8],
+                "score": 0.91,
+            }
+        ]
+
+    policy_collection.aggregate.side_effect = aggregate_with_filter_failure
+
+    class FakeDb:
+        def __getitem__(self, collection_name):
+            return {
+                config.statute_sub_embeddings_collection: statute_collection,
+                config.policy_sub_embeddings_collection: policy_collection,
+            }[collection_name]
+
+    class FakeMongoClient:
+        def __getitem__(self, _database_name):
+            return FakeDb()
+
+    retriever = VectorRetriever(
+        FakeMongoClient(),
+        MagicMock(),
+        config,
+        SimpleLRUCache(10, 60),
+    )
+
+    result = asyncio.run(
+        retriever.retrieve_policy_subchunks_for_statute_subchunks(
+            database="privacy_db",
+            policy_document_id="policy-1",
+            applicable_jurisdictions=["CA"],
+            top_k_per_statute=1,
+        )
+    )
+
+    assert result.statute_subchunks_considered == 1
+    assert len(result.pairs) == 1
+    assert result.pairs[0].policy_doc[config.policy_subchunk_text_field] == (
+        "We honor verified deletion requests."
+    )
+    assert config.embedding_vector_field not in result.pairs[0].policy_doc
+    assert policy_collection.aggregate.call_count == 2
+    assert aggregate_pipelines[0][0]["$vectorSearch"]["filter"] == {
+        config.policy_document_id_field: "policy-1"
+    }
+    assert "filter" not in aggregate_pipelines[1][0]["$vectorSearch"]
+    assert aggregate_pipelines[1][2] == {
+        "$match": {config.policy_document_id_field: "policy-1"}
+    }
+
+
 def test_statute_policy_compliance_endpoint_delegates_to_v4():
     """Verify the statute-policy endpoint delegates to GapAnalysisServiceV4 and returns gap items."""
     from compliance_suite_schemas import GapAnalysisResponse, GapItem, GapSummary, RetrievalMetadata
