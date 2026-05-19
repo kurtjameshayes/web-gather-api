@@ -242,6 +242,14 @@ class TestEvaluate:
         assert inserted["policy_document_id"] == "pol-1"
         assert len(inserted["suggestions"]) == 1
         assert inserted["gap_summary_snapshot"]["total_requirements"] == 2
+        coll_mock.update_many.assert_called_once_with(
+            {
+                "policy_document_id": "pol-1",
+                "superseded_by": None,
+                "_id": {"$ne": feedback_id},
+            },
+            {"$set": {"superseded_by": feedback_id}},
+        )
 
     def test_evaluate_disabled(self, critic, mock_config, sample_response):
         mock_config.adaptive_feedback_enabled = False
@@ -342,6 +350,25 @@ class TestAdaptiveFeedbackEndpoints:
             offset=0,
         )
 
+    def test_list_feedback_clamps_pagination(self, client, mock_config):
+        mock_critic = MagicMock()
+        mock_critic.get_feedback_history.return_value = []
+        with patch.object(compliance_routes, "_config", mock_config):
+            with patch.object(compliance_routes, "_critic_service", mock_critic):
+                resp = client.get(
+                    "/api/v4/compliance/adaptive-feedback"
+                    "?policy_document_id=pol-1&active_only=yes&limit=999&offset=-5"
+                )
+        assert resp.status_code == 200
+        assert resp.get_json()["limit"] == 200
+        assert resp.get_json()["offset"] == 0
+        mock_critic.get_feedback_history.assert_called_once_with(
+            policy_document_id="pol-1",
+            active_only=True,
+            limit=200,
+            offset=0,
+        )
+
     def test_list_feedback_log(self, client, mock_config):
         mock_critic = MagicMock()
         mock_critic.get_feedback_log.return_value = [
@@ -358,6 +385,17 @@ class TestAdaptiveFeedbackEndpoints:
         mock_critic.get_feedback_log.assert_called_once_with(
             run_id="run-1", limit=50, offset=0,
         )
+
+    def test_list_feedback_log_enforces_auth_before_db_access(self, client, mock_config):
+        mock_config.auth_required = True
+        mock_config.api_key = "secret"
+        mock_critic = MagicMock()
+        with patch.object(compliance_routes, "_config", mock_config):
+            with patch.object(compliance_routes, "_critic_service", mock_critic):
+                resp = client.get("/api/v4/compliance/adaptive-feedback/log")
+        assert resp.status_code == 401
+        assert resp.get_json()["error"] == "Missing API key."
+        mock_critic.get_feedback_log.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
