@@ -13,12 +13,14 @@ from compliance_routes import compliance_bp
 from compliance_routes_v4 import compliance_v4_bp
 from compliance_config import load_config
 from compliance_suite_schemas import (
+    GapAnalysisRequest,
     GapAnalysisResponse,
     GapItem,
     GapSummary,
     RetrievalMetadata,
 )
 from adaptive_feedback_service import CriticService, VALID_CATEGORIES, VALID_SEVERITIES
+from gap_analysis_service_v4 import GapAnalysisServiceV4
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +96,32 @@ def sample_response():
         run_type="gap_analysis_v4",
         version="v4",
     )
+
+
+class _FakeMongo:
+    def __init__(self, collections):
+        self._collections = collections
+
+    def __getitem__(self, _database):
+        return _FakeDatabase(self._collections)
+
+
+class _FakeDatabase:
+    def __init__(self, collections):
+        self._collections = collections
+
+    def __getitem__(self, collection_name):
+        return self._collections[collection_name]
+
+
+def _run_async(coro):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+        asyncio.set_event_loop(asyncio.new_event_loop())
 
 
 # ---------------------------------------------------------------------------
@@ -231,9 +259,7 @@ class TestEvaluate:
         })
 
         with patch("adaptive_feedback_service.run_in_thread", side_effect=_sync_run):
-            feedback_id = asyncio.get_event_loop().run_until_complete(
-                critic.evaluate(sample_response, "run-123")
-            )
+            feedback_id = _run_async(critic.evaluate(sample_response, "run-123"))
 
         assert feedback_id is not None
         coll_mock.insert_one.assert_called_once()
@@ -242,6 +268,38 @@ class TestEvaluate:
         assert inserted["policy_document_id"] == "pol-1"
         assert len(inserted["suggestions"]) == 1
         assert inserted["gap_summary_snapshot"]["total_requirements"] == 2
+
+    def test_evaluate_supersedes_prior_feedback_for_same_policy(
+        self, critic, mock_mongo, sample_response
+    ):
+        coll_mock = MagicMock()
+        mock_mongo.__getitem__.return_value.__getitem__.return_value = coll_mock
+
+        critic._llm._call_json = AsyncMock(return_value={
+            "summary_evaluation": "Updated guidance.",
+            "suggestions": [
+                {
+                    "category": "prompt_guidance",
+                    "instruction": "Prefer explicit deletion-right citations.",
+                    "severity": "medium",
+                },
+            ],
+        })
+
+        with patch("adaptive_feedback_service.run_in_thread", side_effect=_sync_run):
+            feedback_id = asyncio.get_event_loop().run_until_complete(
+                critic.evaluate(sample_response, "run-123")
+            )
+
+        assert feedback_id is not None
+        coll_mock.update_many.assert_called_once_with(
+            {
+                "policy_document_id": "pol-1",
+                "superseded_by": None,
+                "_id": {"$ne": feedback_id},
+            },
+            {"$set": {"superseded_by": feedback_id}},
+        )
 
     def test_evaluate_disabled(self, critic, mock_config, sample_response):
         mock_config.adaptive_feedback_enabled = False
@@ -262,6 +320,145 @@ class TestEvaluate:
         )
         assert result is None
         coll_mock.insert_one.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# GapAnalysisServiceV4 adaptive feedback integration
+# ---------------------------------------------------------------------------
+
+class TestGapAnalysisV4AdaptiveFeedback:
+    def test_run_injects_feedback_records_usage_and_evaluates(self, mock_config):
+        mock_config.adaptive_feedback_enabled = True
+        mock_config.default_jurisdictions = ["CA"]
+
+        policies_coll = MagicMock()
+        policies_coll.find_one.side_effect = lambda query: (
+            {
+                "document_id": "pol-1",
+                "company_name": "Acme",
+                "text": "Users can delete data.",
+            }
+            if query == {"document_id": "pol-1"}
+            else None
+        )
+
+        policy_legal_coll = MagicMock()
+        policy_legal_coll.count_documents.return_value = 1
+        policy_legal_coll.find.return_value = [{"chunk_text": "Users can delete data."}]
+
+        statute_coll = MagicMock()
+
+        def _find_statutes(query, projection=None):
+            category = query.get("category")
+            if category == "consumer_rights":
+                return [
+                    {
+                        "_id": "stat-1",
+                        "document_id": "ccpa",
+                        "category": "consumer_rights",
+                        "sub_topic": "delete",
+                        "header_text": "CCPA § 1798.105",
+                        "subtopic_text": "Consumers have a right to delete.",
+                        "requirement_summary": "Deletion right",
+                        "jurisdiction": "CA",
+                    }
+                ]
+            if isinstance(category, dict) and "$in" in category:
+                return [
+                    {
+                        "category": "definitions",
+                        "header_text": "Definitions",
+                        "subtopic_text": "Consumer means a California resident.",
+                    }
+                ]
+            return []
+
+        statute_coll.find.side_effect = _find_statutes
+
+        cat_map_coll = MagicMock()
+        cat_map_coll.find.return_value = [
+            {
+                "statute_category": "consumer_rights",
+                "policy_categories": ["privacy_rights"],
+                "sub_topic": "delete",
+            }
+        ]
+
+        results_coll = MagicMock()
+        run_log_coll = MagicMock()
+        mongo = _FakeMongo(
+            {
+                mock_config.policies_collection: policies_coll,
+                mock_config.policy_legal_embeddings_collection: policy_legal_coll,
+                mock_config.statute_sub_topic_embeddings_collection: statute_coll,
+                mock_config.category_mapping_collection: cat_map_coll,
+                mock_config.compliance_results_collection: results_coll,
+                mock_config.compliance_run_log_collection: run_log_coll,
+            }
+        )
+
+        llm = MagicMock()
+        llm.gap_check_v4 = AsyncMock(return_value={
+            "status": "addressed",
+            "policy_quote": "Users can delete data.",
+            "confidence": "high",
+            "requirement_summary": "Deletion right",
+            "statute_quote": "Consumers have a right to delete.",
+        })
+
+        rate_limiter = MagicMock()
+        rate_limiter.allow = AsyncMock(return_value=True)
+
+        feedback_text = "PRIOR ANALYSIS FEEDBACK:\n- Prefer explicit deletion-right citations."
+        critic = MagicMock()
+        critic.get_active_feedback.return_value = [
+            {
+                "_id": "fb-1",
+                "suggestions": [
+                    {"instruction": "Prefer explicit deletion-right citations."},
+                ],
+            }
+        ]
+        critic.format_feedback_for_prompt.return_value = feedback_text
+        critic.record_feedback_usage = AsyncMock()
+        critic.evaluate = AsyncMock(return_value="fb-new")
+
+        service = GapAnalysisServiceV4(
+            mongo_client=mongo,
+            config=mock_config,
+            llm_client=llm,
+            rate_limiter=rate_limiter,
+            critic=critic,
+        )
+
+        response = _run_async(
+            service.run(
+                GapAnalysisRequest(
+                    policy_document_id="pol-1",
+                    applicable_jurisdictions=["CA"],
+                    save_results=True,
+                )
+            )
+        )
+
+        llm.gap_check_v4.assert_awaited_once()
+        assert llm.gap_check_v4.await_args.kwargs["adaptive_feedback"] == feedback_text
+        assert response.summary.addressed == 1
+
+        results_coll.insert_one.assert_called_once()
+        persisted_run = results_coll.insert_one.call_args[0][0]
+        run_id = persisted_run["_id"]
+
+        critic.get_active_feedback.assert_called_once_with("pol-1")
+        critic.record_feedback_usage.assert_awaited_once_with(
+            run_id=run_id,
+            feedback_ids=["fb-1"],
+            rendered_text=feedback_text,
+        )
+        critic.evaluate.assert_awaited_once()
+        evaluated_response, evaluated_run_id = critic.evaluate.await_args.args
+        assert evaluated_response is response
+        assert evaluated_run_id == run_id
 
 
 # ---------------------------------------------------------------------------
