@@ -36,6 +36,15 @@ def app_api_key_disabled(monkeypatch: Any) -> None:
     monkeypatch.setattr(security, "_app_api_key", None)
 
 
+def _run_async(coro: Any) -> Any:
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.run_until_complete(coro)
+
+
 def test_authorize_request_missing_key() -> None:
     config = load_config()
     config.auth_required = True
@@ -137,12 +146,12 @@ def test_require_api_key_async_enforces_configured_key(monkeypatch: Any) -> None
         return jsonify({"ok": True})
 
     with app.test_request_context("/", headers={"x-api-key": "wrong"}):
-        invalid_response, invalid_status = asyncio.run(handler())
+        invalid_response, invalid_status = _run_async(handler())
     assert invalid_status == 403
     assert invalid_response.get_json()["error"] == "Invalid API key."
 
     with app.test_request_context("/", headers={"x-api-key": "secret-key"}):
-        response = asyncio.run(handler())
+        response = _run_async(handler())
     assert response.get_json() == {"ok": True}
 
 

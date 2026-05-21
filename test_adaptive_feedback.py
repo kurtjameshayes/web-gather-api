@@ -114,6 +114,15 @@ class _FakeDatabase:
         return self._collections[collection_name]
 
 
+def _run_async(coro):
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.run_until_complete(coro)
+
+
 # ---------------------------------------------------------------------------
 # CriticService._validate_suggestions
 # ---------------------------------------------------------------------------
@@ -249,9 +258,7 @@ class TestEvaluate:
         })
 
         with patch("adaptive_feedback_service.run_in_thread", side_effect=_sync_run):
-            feedback_id = asyncio.get_event_loop().run_until_complete(
-                critic.evaluate(sample_response, "run-123")
-            )
+            feedback_id = _run_async(critic.evaluate(sample_response, "run-123"))
 
         assert feedback_id is not None
         coll_mock.insert_one.assert_called_once()
@@ -423,7 +430,7 @@ class TestGapAnalysisV4AdaptiveFeedback:
             critic=critic,
         )
 
-        response = asyncio.get_event_loop().run_until_complete(
+        response = _run_async(
             service.run(
                 GapAnalysisRequest(
                     policy_document_id="pol-1",
