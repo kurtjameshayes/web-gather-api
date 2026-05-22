@@ -1,6 +1,8 @@
 """Tests for db blueprint category-mapping endpoints."""
 from __future__ import annotations
 
+import urllib.parse
+
 from bson import ObjectId
 from flask import Flask
 from unittest.mock import MagicMock
@@ -85,6 +87,16 @@ def test_get_category_mapping_invalid_query_json(client, mock_coll) -> None:
     assert "JSON" in response.get_json()["error"]
 
 
+def test_get_category_mapping_rejects_dangerous_query_operators(client, mock_coll) -> None:
+    """NoSQL injection operators must be rejected before category mappings are read."""
+    query = urllib.parse.quote('{"$where": "1==1"}')
+    response = client.get(f"/category-mapping?query={query}")
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert "not allowed" in payload["error"].lower() or "operator" in payload["error"].lower()
+    mock_coll.find.assert_not_called()
+
+
 def test_post_category_mapping_success(client, mock_coll) -> None:
     """POST /category-mapping creates a new mapping."""
     mock_coll.insert_one.return_value.inserted_id = ObjectId()
@@ -152,6 +164,16 @@ def test_delete_category_mapping_by_query(client, mock_coll) -> None:
     data = response.get_json()
     assert data["deleted_count"] == 3
     mock_coll.delete_many.assert_called_once_with({"statute_category": "old"})
+
+
+def test_delete_category_mapping_rejects_dangerous_query_operators(client, mock_coll) -> None:
+    """NoSQL injection operators must be rejected before category mappings are deleted."""
+    query = urllib.parse.quote('{"$where": "1==1"}')
+    response = client.delete(f"/category-mapping?query={query}")
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert "not allowed" in payload["error"].lower() or "operator" in payload["error"].lower()
+    mock_coll.delete_many.assert_not_called()
 
 
 def test_delete_category_mapping_both_id_and_query(client) -> None:
