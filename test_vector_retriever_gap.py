@@ -16,7 +16,7 @@ async def _sync_run(func, *args, **kwargs):
     return func(*args, **kwargs)
 
 
-def _build_retriever(statute_docs: list[dict], policy_results) -> tuple[VectorRetriever, MagicMock, MagicMock]:
+def _build_retriever(statute_docs: list[dict], policy_results) -> tuple[VectorRetriever, MagicMock, MagicMock, str]:
     config = load_config()
     statute_coll = MagicMock(name="statute_sub_embeddings")
     statute_coll.find.return_value = statute_docs
@@ -38,19 +38,21 @@ def _build_retriever(statute_docs: list[dict], policy_results) -> tuple[VectorRe
         config=config,
         cache=SimpleLRUCache(10, 60),
     )
-    return retriever, statute_coll, policy_coll
+    return retriever, statute_coll, policy_coll, config.embedding_vector_field
 
 
 def test_policy_subchunk_retrieval_falls_back_when_filtered_vector_search_fails(monkeypatch) -> None:
     """Unsupported vector filter indexes should retry with post-search matching."""
     monkeypatch.setattr("vector_retriever.run_in_thread", _sync_run)
-    retriever, statute_coll, policy_coll = _build_retriever(
+    config = load_config()
+    vector_field = config.embedding_vector_field
+    retriever, statute_coll, policy_coll, _ = _build_retriever(
         statute_docs=[
             {
                 "_id": "stat-sub-1",
                 "document_id": "ccpa",
                 "jurisdiction": "CA",
-                "vector": [0.1, "0.2"],
+                vector_field: [0.1, "0.2"],
                 "subchunk_text": "Businesses must disclose deletion rights.",
             }
         ],
@@ -61,7 +63,7 @@ def test_policy_subchunk_retrieval_falls_back_when_filtered_vector_search_fails(
                     "_id": "policy-sub-1",
                     "document_id": "policy-1",
                     "chunk_text": "We provide deletion rights.",
-                    "vector": [9.9, 8.8],
+                    vector_field: [9.9, 8.8],
                     "score": 0.93,
                 }
             ],
@@ -93,17 +95,19 @@ def test_policy_subchunk_retrieval_falls_back_when_filtered_vector_search_fails(
     pair = result.pairs[0]
     assert pair.score == 0.93
     assert pair.policy_doc["_id"] == "policy-sub-1"
-    assert "vector" not in pair.policy_doc
+    assert vector_field not in pair.policy_doc
 
 
 def test_policy_subchunk_retrieval_skips_invalid_statute_vectors(monkeypatch) -> None:
     """Bad stored embeddings should not trigger policy searches or crash analysis."""
     monkeypatch.setattr("vector_retriever.run_in_thread", _sync_run)
-    retriever, _, policy_coll = _build_retriever(
+    config = load_config()
+    vector_field = config.embedding_vector_field
+    retriever, _, policy_coll, _ = _build_retriever(
         statute_docs=[
             {"_id": "missing-vector", "jurisdiction": "CA"},
-            {"_id": "string-vector", "jurisdiction": "CA", "vector": "0.1,0.2"},
-            {"_id": "bad-value", "jurisdiction": "CA", "vector": [0.1, object()]},
+            {"_id": "string-vector", "jurisdiction": "CA", vector_field: "0.1,0.2"},
+            {"_id": "bad-value", "jurisdiction": "CA", vector_field: [0.1, object()]},
         ],
         policy_results=[],
     )
