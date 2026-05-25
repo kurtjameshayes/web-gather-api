@@ -1742,6 +1742,7 @@ def search():
 
 
 @core_bp.route("/vector-search", methods=["GET", "POST"])
+@require_api_key
 def vector_search():
     """Vector search over a MongoDB Atlas vector index.
 
