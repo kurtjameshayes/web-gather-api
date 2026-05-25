@@ -7,8 +7,14 @@ import numpy as np
 import pytest
 from flask import Flask
 
+import security
 from core import PRIVACY_COMPLIANCE_DB, core_bp, init_core
 from conftest import _wire_mongo_core, DummyModel
+
+
+@pytest.fixture(autouse=True)
+def reset_app_api_key(monkeypatch) -> None:
+    monkeypatch.setattr(security, "_app_api_key", None)
 
 
 @pytest.fixture
@@ -60,6 +66,69 @@ def test_vector_search_post_success_with_query_vector(client, mock_clients) -> N
     assert data["index"] == "vector_idx"
     assert len(data["results"]) == 1
     assert data["results"][0]["text"] == "match"
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected_status", "expected_error"),
+    [
+        ({}, 401, "Missing API key."),
+        ({"x-api-key": "wrong"}, 403, "Invalid API key."),
+    ],
+)
+def test_vector_search_rejects_requests_without_configured_api_key(
+    client,
+    monkeypatch,
+    headers,
+    expected_status,
+    expected_error,
+) -> None:
+    """POST /vector-search enforces APP_API_KEY before touching vector search."""
+    monkeypatch.setattr(security, "_app_api_key", "secret")
+
+    response = client.post(
+        "/vector-search",
+        headers=headers,
+        json={
+            "database": "test_db",
+            "collection": "chunks",
+            "index": "vector_idx",
+            "query_vector": [0.1, 0.2, 0.3],
+            "path": "embedding",
+        },
+    )
+
+    assert response.status_code == expected_status
+    assert response.get_json()["error"] == expected_error
+
+
+def test_vector_search_accepts_valid_configured_api_key(
+    client,
+    mock_clients,
+    monkeypatch,
+) -> None:
+    """Valid APP_API_KEY header still allows vector search to execute."""
+    monkeypatch.setattr(security, "_app_api_key", "secret")
+    dbs = _wire_mongo_core(mock_clients["mongo"])
+    mock_coll = dbs["source_db"].__getitem__.return_value
+    mock_coll.aggregate.return_value = [
+        {"_id": "1", "text": "match", "score": 0.9},
+    ]
+
+    response = client.post(
+        "/vector-search",
+        headers={"x-api-key": "secret"},
+        json={
+            "database": "test_db",
+            "collection": "chunks",
+            "index": "vector_idx",
+            "query_vector": [0.1, 0.2, 0.3],
+            "path": "embedding",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["results"][0]["text"] == "match"
+    mock_coll.aggregate.assert_called_once()
 
 
 def test_vector_search_get_success_with_query_vector(client, mock_clients) -> None:

@@ -1426,7 +1426,11 @@ def build_openapi_spec():
                         {"name": "path", "in": "query", "schema": {"type": "string"}, "description": "Vector field path (default from embedding_model)"},
                         {"name": "filter", "in": "query", "schema": {"type": "string"}, "description": "MongoDB filter as JSON (e.g. {\"jurisdiction\": \"CA\"})"},
                     ],
-                    "responses": {"200": {"description": "Vector search results with score"}},
+                    "responses": {
+                        "200": {"description": "Vector search results with score"},
+                        "401": {"description": "Missing API key when APP_API_KEY is configured"},
+                        "403": {"description": "Invalid API key when APP_API_KEY is configured"},
+                    },
                 },
                 "post": {
                     "summary": "Vector search over MongoDB Atlas index",
@@ -1451,7 +1455,11 @@ def build_openapi_spec():
                             }
                         }
                     },
-                    "responses": {"200": {"description": "Vector search results with score"}},
+                    "responses": {
+                        "200": {"description": "Vector search results with score"},
+                        "401": {"description": "Missing API key when APP_API_KEY is configured"},
+                        "403": {"description": "Invalid API key when APP_API_KEY is configured"},
+                    },
                 },
             },
             "/create-paragraph-sections": {
