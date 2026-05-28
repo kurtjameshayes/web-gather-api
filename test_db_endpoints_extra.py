@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import urllib.parse
 from typing import Any, Dict
 from unittest.mock import MagicMock
 
@@ -74,7 +75,6 @@ def test_list_documents_invalid_query_json(client, mock_mongo_client) -> None:
 
 def test_list_documents_rejects_dangerous_operators(client, mock_mongo_client) -> None:
     """NoSQL injection: $where, $regex, etc. must be rejected."""
-    import urllib.parse
     query = urllib.parse.quote('{"$where": "1==1"}')
     response = client.get(
         f"/documents?database_name=test_db&collection_name=test_collection&query={query}"
@@ -82,6 +82,43 @@ def test_list_documents_rejects_dangerous_operators(client, mock_mongo_client) -
     assert response.status_code == 400
     payload = response.get_json()
     assert "not allowed" in payload["error"].lower() or "operator" in payload["error"].lower()
+
+
+def test_list_documents_accepts_double_encoded_query(client, mock_mongo_client) -> None:
+    """Some clients double-encode query JSON; it must still filter narrowly."""
+    dbs = _wire_mongo(mock_mongo_client)
+    collection = dbs["user_db"].__getitem__.return_value
+    cursor_mock = MagicMock()
+    cursor_mock.skip.return_value = cursor_mock
+    cursor_mock.limit.return_value = []
+    collection.find.return_value = cursor_mock
+
+    inner = json.dumps({"status": "active"})
+    query = urllib.parse.quote(json.dumps(inner))
+    response = client.get(
+        "/documents?database_name=test_db&collection_name=test_collection"
+        f"&query={query}"
+    )
+
+    assert response.status_code == 200
+    collection.find.assert_called_once_with({"status": "active"})
+
+
+def test_list_documents_rejects_nested_dangerous_operators(client, mock_mongo_client) -> None:
+    """Nested Mongo operators must not bypass the top-level query guard."""
+    dbs = _wire_mongo(mock_mongo_client)
+    collection = dbs["user_db"].__getitem__.return_value
+    query = urllib.parse.quote('{"profile": {"$regex": ".*"}}')
+
+    response = client.get(
+        "/documents?database_name=test_db&collection_name=test_collection"
+        f"&query={query}"
+    )
+
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert "operator" in payload["error"].lower()
+    collection.find.assert_not_called()
 
 
 def test_list_documents_invalid_collection_name(client, mock_mongo_client) -> None:
@@ -132,7 +169,6 @@ def test_delete_documents_invalid_query_json(client, mock_mongo_client) -> None:
 
 def test_delete_documents_rejects_dangerous_operators(client, mock_mongo_client) -> None:
     """NoSQL injection: $where must be rejected on DELETE."""
-    import urllib.parse
     query = urllib.parse.quote('{"$where": "1==1"}')
     response = client.delete(
         f"/documents?database_name=test_db&collection_name=test_collection&query={query}"
