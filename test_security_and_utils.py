@@ -1,11 +1,13 @@
 """Tests for security, utilities, cache, and redaction helpers."""
 from __future__ import annotations
 
+import asyncio
 import time
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from flask import Flask, jsonify
 
 from cache import SimpleLRUCache
 from compliance_config import load_config
@@ -21,6 +23,63 @@ from compliance_utils import (
 from rate_limiter import RateLimiter
 from redactor import Redactor
 from security import AuthorizationError, authorize_request
+
+
+def test_require_api_key_sync_blocks_missing_and_invalid_keys(monkeypatch: Any) -> None:
+    import security
+
+    app = Flask(__name__)
+    monkeypatch.setattr(security, "_app_api_key", "secret")
+
+    @security.require_api_key
+    def handler():
+        return jsonify({"ok": True})
+
+    with app.test_request_context("/"):
+        response, status = handler()
+    assert status == 401
+    assert response.get_json()["error"] == "Missing API key."
+
+    with app.test_request_context("/", headers={"x-api-key": "wrong"}):
+        response, status = handler()
+    assert status == 403
+    assert response.get_json()["error"] == "Invalid API key."
+
+
+def test_require_api_key_sync_allows_valid_key(monkeypatch: Any) -> None:
+    import security
+
+    app = Flask(__name__)
+    monkeypatch.setattr(security, "_app_api_key", "secret")
+
+    @security.require_api_key
+    def handler():
+        return jsonify({"ok": True})
+
+    with app.test_request_context("/", headers={"x-api-key": "secret"}):
+        response = handler()
+    assert response.get_json() == {"ok": True}
+
+
+def test_require_api_key_async_blocks_invalid_key(monkeypatch: Any) -> None:
+    import security
+
+    app = Flask(__name__)
+    monkeypatch.setattr(security, "_app_api_key", "secret")
+    called = False
+
+    @security.require_api_key_async
+    async def handler():
+        nonlocal called
+        called = True
+        return jsonify({"ok": True})
+
+    with app.test_request_context("/", headers={"x-api-key": "wrong"}):
+        response, status = asyncio.run(handler())
+
+    assert status == 403
+    assert response.get_json()["error"] == "Invalid API key."
+    assert called is False
 
 
 def test_authorize_request_missing_key() -> None:
