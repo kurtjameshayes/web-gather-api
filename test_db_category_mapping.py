@@ -1,6 +1,9 @@
 """Tests for db blueprint category-mapping endpoints."""
 from __future__ import annotations
 
+import json
+from urllib.parse import quote
+
 from bson import ObjectId
 from flask import Flask
 from unittest.mock import MagicMock
@@ -85,6 +88,17 @@ def test_get_category_mapping_invalid_query_json(client, mock_coll) -> None:
     assert "JSON" in response.get_json()["error"]
 
 
+def test_get_category_mapping_rejects_dangerous_query_operator(client, mock_coll) -> None:
+    """GET /category-mapping rejects raw Mongo operators before collection access."""
+    encoded_query = quote(json.dumps({"$where": "this.statute_category == 'retention'"}))
+
+    response = client.get(f"/category-mapping?query={encoded_query}")
+
+    assert response.status_code == 400
+    assert "$where" in response.get_json()["error"]
+    mock_coll.find.assert_not_called()
+
+
 def test_post_category_mapping_success(client, mock_coll) -> None:
     """POST /category-mapping creates a new mapping."""
     mock_coll.insert_one.return_value.inserted_id = ObjectId()
@@ -152,6 +166,17 @@ def test_delete_category_mapping_by_query(client, mock_coll) -> None:
     data = response.get_json()
     assert data["deleted_count"] == 3
     mock_coll.delete_many.assert_called_once_with({"statute_category": "old"})
+
+
+def test_delete_category_mapping_rejects_nested_query_operator(client, mock_coll) -> None:
+    """DELETE /category-mapping rejects nested Mongo operators before deletion."""
+    encoded_query = quote(json.dumps({"policy_categories": {"$regex": "retention"}}))
+
+    response = client.delete(f"/category-mapping?query={encoded_query}")
+
+    assert response.status_code == 400
+    assert "$regex" in response.get_json()["error"]
+    mock_coll.delete_many.assert_not_called()
 
 
 def test_delete_category_mapping_both_id_and_query(client) -> None:
