@@ -95,6 +95,42 @@ def test_ingest_web_success(client, mock_clients) -> None:
     assert payload["pages"] == 1
 
 
+def test_ingest_overwrite_deletes_only_matching_source_url(client, mock_clients) -> None:
+    """Overwrite mode must not clear unrelated documents in the target collection."""
+    _wire_mongo(mock_clients["mongo"])
+    target_coll = mock_clients["mongo"]["test_db"]["docs"]
+    documents_coll = mock_clients["mongo"][WEB_GATHER_DB][DOCUMENTS_COLLECTION]
+    target_coll.count_documents.return_value = 2
+    mock_clients["firecrawl"].crawl.return_value = [
+        {"url": "https://example.com/page", "title": "Title", "markdown": "Hello world"}
+    ]
+
+    with patch("core.detect_content_type", return_value=""):
+        response = client.post(
+            "/ingest",
+            json={
+                "url": "https://example.com/page",
+                "database": "test_db",
+                "collection": "docs",
+                "mode": "overwrite",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["overwritten"] is True
+    assert payload["previous_document_count"] == 2
+    target_coll.count_documents.assert_called_once_with({"source_url": "https://example.com/page"})
+    target_coll.delete_many.assert_called_once_with({"source_url": "https://example.com/page"})
+    documents_coll.delete_many.assert_called_once_with(
+        {
+            "database_name": "test_db",
+            "collection_name": "docs",
+            "source_url": "https://example.com/page",
+        }
+    )
+
+
 def test_ingest_pdf_success(client, mock_clients) -> None:
     _wire_mongo(mock_clients["mongo"])
     with patch("core.is_pdf_url", return_value=True), patch(
