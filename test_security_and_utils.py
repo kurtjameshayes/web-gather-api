@@ -1,11 +1,13 @@
 """Tests for security, utilities, cache, and redaction helpers."""
 from __future__ import annotations
 
+import asyncio
 import time
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from flask import Flask
 
 from cache import SimpleLRUCache
 from compliance_config import load_config
@@ -20,7 +22,18 @@ from compliance_utils import (
 )
 from rate_limiter import RateLimiter
 from redactor import Redactor
+import security
 from security import AuthorizationError, authorize_request
+
+
+@pytest.fixture
+def reset_app_api_key(monkeypatch: Any):
+    """Keep APP_API_KEY decorator state isolated between tests."""
+    monkeypatch.delenv("APP_API_KEY", raising=False)
+    security.init_app_api_key()
+    yield
+    monkeypatch.delenv("APP_API_KEY", raising=False)
+    security.init_app_api_key()
 
 
 def test_authorize_request_missing_key() -> None:
@@ -61,6 +74,72 @@ def test_authorize_request_role_allowed() -> None:
     config.allowed_roles = ["admin"]
     request = SimpleNamespace(headers={"x-api-key": "secret", "x-role": "admin"})
     authorize_request(config, request)
+
+
+def test_require_api_key_sync_enforces_configured_app_key(
+    monkeypatch: Any, reset_app_api_key: None
+) -> None:
+    monkeypatch.setenv("APP_API_KEY", "secret")
+    security.init_app_api_key()
+    app = Flask(__name__)
+
+    @app.get("/protected")
+    @security.require_api_key
+    def protected():
+        return {"ok": True}
+
+    client = app.test_client()
+
+    missing = client.get("/protected")
+    invalid = client.get("/protected", headers={"x-api-key": "wrong"})
+    valid = client.get("/protected", headers={"x-api-key": "secret"})
+
+    assert missing.status_code == 401
+    assert missing.get_json()["error"] == "Missing API key."
+    assert invalid.status_code == 403
+    assert invalid.get_json()["error"] == "Invalid API key."
+    assert valid.status_code == 200
+    assert valid.get_json() == {"ok": True}
+
+
+def test_require_api_key_sync_passes_through_when_unconfigured(reset_app_api_key: None) -> None:
+    app = Flask(__name__)
+
+    @app.get("/protected")
+    @security.require_api_key
+    def protected():
+        return {"ok": True}
+
+    response = app.test_client().get("/protected")
+
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True}
+
+
+def test_require_api_key_async_enforces_configured_app_key(
+    monkeypatch: Any, reset_app_api_key: None
+) -> None:
+    monkeypatch.setenv("APP_API_KEY", "secret")
+    security.init_app_api_key()
+    app = Flask(__name__)
+
+    @security.require_api_key_async
+    async def protected():
+        return "ok"
+
+    with app.test_request_context("/protected"):
+        response, status = asyncio.run(protected())
+    assert status == 401
+    assert response.get_json()["error"] == "Missing API key."
+
+    with app.test_request_context("/protected", headers={"x-api-key": "wrong"}):
+        response, status = asyncio.run(protected())
+    assert status == 403
+    assert response.get_json()["error"] == "Invalid API key."
+
+    with app.test_request_context("/protected", headers={"x-api-key": "secret"}):
+        result = asyncio.run(protected())
+    assert result == "ok"
 
 
 def test_redactor_masks_common_pii() -> None:
