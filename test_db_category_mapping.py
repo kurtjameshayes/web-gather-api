@@ -1,6 +1,8 @@
 """Tests for db blueprint category-mapping endpoints."""
 from __future__ import annotations
 
+import json
+
 from bson import ObjectId
 from flask import Flask
 from unittest.mock import MagicMock
@@ -85,6 +87,29 @@ def test_get_category_mapping_invalid_query_json(client, mock_coll) -> None:
     assert "JSON" in response.get_json()["error"]
 
 
+def test_get_category_mapping_accepts_double_encoded_query(client, mock_coll) -> None:
+    """Double-encoded query JSON is decoded before reaching MongoDB."""
+    mock_coll.find.return_value = []
+    query = json.dumps(json.dumps({"statute_category": "retention"}))
+
+    response = client.get("/category-mapping", query_string={"query": query})
+
+    assert response.status_code == 200
+    mock_coll.find.assert_called_once_with({"statute_category": "retention"})
+
+
+def test_get_category_mapping_rejects_dangerous_query_operator(client, mock_coll) -> None:
+    """GET rejects MongoDB operators before they can reach category_mapping.find."""
+    response = client.get(
+        "/category-mapping",
+        query_string={"query": json.dumps({"$where": "1==1"})},
+    )
+
+    assert response.status_code == 400
+    assert "not allowed" in response.get_json()["error"].lower()
+    mock_coll.find.assert_not_called()
+
+
 def test_post_category_mapping_success(client, mock_coll) -> None:
     """POST /category-mapping creates a new mapping."""
     mock_coll.insert_one.return_value.inserted_id = ObjectId()
@@ -152,6 +177,18 @@ def test_delete_category_mapping_by_query(client, mock_coll) -> None:
     data = response.get_json()
     assert data["deleted_count"] == 3
     mock_coll.delete_many.assert_called_once_with({"statute_category": "old"})
+
+
+def test_delete_category_mapping_rejects_dangerous_query_operator(client, mock_coll) -> None:
+    """DELETE rejects MongoDB operators before bulk deletion is attempted."""
+    response = client.delete(
+        "/category-mapping",
+        query_string={"query": json.dumps({"$where": "1==1"})},
+    )
+
+    assert response.status_code == 400
+    assert "not allowed" in response.get_json()["error"].lower()
+    mock_coll.delete_many.assert_not_called()
 
 
 def test_delete_category_mapping_both_id_and_query(client) -> None:
