@@ -85,6 +85,17 @@ def test_get_category_mapping_invalid_query_json(client, mock_coll) -> None:
     assert "JSON" in response.get_json()["error"]
 
 
+def test_get_category_mapping_rejects_dangerous_query_operator(client, mock_coll) -> None:
+    """GET /category-mapping rejects MongoDB operators before querying."""
+    response = client.get(
+        "/category-mapping",
+        query_string={"query": '{"$where": "return true"}'},
+    )
+    assert response.status_code == 400
+    assert "not allowed" in response.get_json()["error"]
+    mock_coll.find.assert_not_called()
+
+
 def test_post_category_mapping_success(client, mock_coll) -> None:
     """POST /category-mapping creates a new mapping."""
     mock_coll.insert_one.return_value.inserted_id = ObjectId()
@@ -152,6 +163,17 @@ def test_delete_category_mapping_by_query(client, mock_coll) -> None:
     data = response.get_json()
     assert data["deleted_count"] == 3
     mock_coll.delete_many.assert_called_once_with({"statute_category": "old"})
+
+
+def test_delete_category_mapping_rejects_dangerous_query_operator(client, mock_coll) -> None:
+    """DELETE /category-mapping rejects MongoDB operators before deleting."""
+    response = client.delete(
+        "/category-mapping",
+        query_string={"query": '{"$where": "return true"}'},
+    )
+    assert response.status_code == 400
+    assert "not allowed" in response.get_json()["error"]
+    mock_coll.delete_many.assert_not_called()
 
 
 def test_delete_category_mapping_both_id_and_query(client) -> None:
