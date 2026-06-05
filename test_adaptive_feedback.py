@@ -13,6 +13,7 @@ from compliance_routes import compliance_bp
 from compliance_routes_v4 import compliance_v4_bp
 from compliance_config import load_config
 from compliance_suite_schemas import (
+    GapAnalysisRequest,
     GapAnalysisResponse,
     GapItem,
     GapSummary,
@@ -287,6 +288,111 @@ class TestRecordFeedbackUsage:
         assert inserted["run_id"] == "run-456"
         assert inserted["feedback_ids_used"] == ["fb-1", "fb-2"]
         assert inserted["feedback_instructions_text"] == "- Do X\n- Do Y"
+
+
+# ---------------------------------------------------------------------------
+# GapAnalysisServiceV4 adaptive feedback integration
+# ---------------------------------------------------------------------------
+
+def test_gap_analysis_v4_injects_and_records_adaptive_feedback(mock_config):
+    """GapAnalysisServiceV4.run wires prior feedback through LLM and audit hooks."""
+    from gap_analysis_service_v4 import GapAnalysisServiceV4
+
+    mock_config.default_jurisdictions = ["CA"]
+    mongo = MagicMock()
+    db = MagicMock()
+    policies_coll = MagicMock()
+    statute_coll = MagicMock()
+    policy_legal_coll = MagicMock()
+    cat_map_coll = MagicMock()
+    results_coll = MagicMock()
+    run_log_coll = MagicMock()
+    collections = {
+        mock_config.policies_collection: policies_coll,
+        mock_config.statute_sub_topic_embeddings_collection: statute_coll,
+        mock_config.policy_legal_embeddings_collection: policy_legal_coll,
+        mock_config.category_mapping_collection: cat_map_coll,
+        mock_config.compliance_results_collection: results_coll,
+        mock_config.compliance_run_log_collection: run_log_coll,
+    }
+    db.__getitem__.side_effect = lambda name: collections[name]
+    mongo.__getitem__.return_value = db
+
+    policies_coll.find_one.return_value = {
+        "document_id": "pol-1",
+        "company_name": "Acme",
+        "text": "Users can request deletion of their data.",
+    }
+    policy_legal_coll.count_documents.return_value = 1
+    cat_map_coll.find.return_value = [
+        {
+            "statute_category": "consumer_rights",
+            "sub_topic": "delete",
+            "policy_categories": ["consumer_rights"],
+        }
+    ]
+    statute_coll.find.side_effect = [
+        [
+            {
+                "_id": "stat-1",
+                "document_id": "ccpa",
+                "category": "consumer_rights",
+                "sub_topic": "delete",
+                "header_text": "Cal. Civ. Code § 1798.105",
+                "subtopic_text": "Consumers may request deletion of personal information.",
+                "requirement_summary": "Right to delete",
+                "jurisdiction": "CA",
+            }
+        ],
+        [],
+    ]
+    policy_legal_coll.find.return_value = [
+        {"chunk_text": "Users can request deletion of their data."}
+    ]
+
+    llm = MagicMock()
+    llm.gap_check_v4 = AsyncMock(return_value={
+        "status": "addressed",
+        "policy_quote": "Users can request deletion of their data.",
+        "confidence": "high",
+        "requirement_summary": "Right to delete",
+        "statute_quote": "Consumers may request deletion of personal information.",
+    })
+    rate_limiter = MagicMock()
+    rate_limiter.allow = AsyncMock(return_value=True)
+    critic = MagicMock()
+    critic.get_active_feedback.return_value = [{"_id": "fb-1", "suggestions": []}]
+    critic.format_feedback_for_prompt.return_value = "- Require explicit deletion language"
+    critic.record_feedback_usage = AsyncMock()
+    critic.evaluate = AsyncMock()
+
+    service = GapAnalysisServiceV4(
+        mongo_client=mongo,
+        config=mock_config,
+        llm_client=llm,
+        rate_limiter=rate_limiter,
+        critic=critic,
+    )
+    request = GapAnalysisRequest(policy_document_id="pol-1", save_results=True)
+
+    response = asyncio.run(service.run(request))
+
+    assert response.summary.total_requirements == 1
+    assert response.gaps[0].status == "addressed"
+    assert llm.gap_check_v4.await_args.kwargs["adaptive_feedback"] == (
+        "- Require explicit deletion language"
+    )
+    critic.get_active_feedback.assert_called_once_with("pol-1")
+    inserted_run_id = results_coll.insert_one.call_args[0][0]["_id"]
+    critic.record_feedback_usage.assert_awaited_once_with(
+        run_id=inserted_run_id,
+        feedback_ids=["fb-1"],
+        rendered_text="- Require explicit deletion language",
+    )
+    critic.evaluate.assert_awaited_once()
+    evaluated_response, evaluated_run_id = critic.evaluate.await_args.args
+    assert evaluated_response.policy_document_id == "pol-1"
+    assert evaluated_run_id == inserted_run_id
 
 
 # ---------------------------------------------------------------------------
