@@ -321,7 +321,7 @@ class TestGapAnalysisServiceV4AdaptiveFeedback:
         llm.gap_check_v4.assert_awaited_once()
         llm_call = llm.gap_check_v4.await_args.kwargs
         assert llm_call["adaptive_feedback"] == "PRIOR ANALYSIS FEEDBACK\n- Require exact deletion-right citations."
-        assert "Right to delete" in llm_call["statutory_requirement"]
+        assert "request deletion" in llm_call["statutory_requirement"]
         assert "We honor deletion requests" in llm_call["policy_text"]
         assert response.gaps[0].status == "addressed"
 
