@@ -13,12 +13,14 @@ from compliance_routes import compliance_bp
 from compliance_routes_v4 import compliance_v4_bp
 from compliance_config import load_config
 from compliance_suite_schemas import (
+    GapAnalysisRequest,
     GapAnalysisResponse,
     GapItem,
     GapSummary,
     RetrievalMetadata,
 )
 from adaptive_feedback_service import CriticService, VALID_CATEGORIES, VALID_SEVERITIES
+from gap_analysis_service_v4 import GapAnalysisServiceV4
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +292,81 @@ class TestRecordFeedbackUsage:
 
 
 # ---------------------------------------------------------------------------
+# GapAnalysisServiceV4 adaptive feedback orchestration
+# ---------------------------------------------------------------------------
+
+class TestGapAnalysisServiceV4AdaptiveFeedback:
+    def test_run_injects_active_feedback_and_records_usage_with_persisted_run_id(self, mock_config):
+        service, llm, critic, mongo = _build_v4_service_with_adaptive_feedback(
+            mock_config,
+            feedback_docs=[
+                {
+                    "_id": "fb-1",
+                    "suggestions": [{"instruction": "Require exact deletion-right citations."}],
+                }
+            ],
+        )
+        critic.format_feedback_for_prompt.return_value = "PRIOR ANALYSIS FEEDBACK\n- Require exact deletion-right citations."
+
+        response = asyncio.run(
+            service.run(
+                GapAnalysisRequest(
+                    policy_document_id="pol-1",
+                    applicable_jurisdictions=["CA"],
+                    run_async=False,
+                )
+            )
+        )
+
+        llm.gap_check_v4.assert_awaited_once()
+        llm_call = llm.gap_check_v4.await_args.kwargs
+        assert llm_call["adaptive_feedback"] == "PRIOR ANALYSIS FEEDBACK\n- Require exact deletion-right citations."
+        assert "Right to delete" in llm_call["statutory_requirement"]
+        assert "We honor deletion requests" in llm_call["policy_text"]
+        assert response.gaps[0].status == "addressed"
+
+        results_coll = mongo[mock_config.compliance_database][mock_config.compliance_results_collection]
+        assert len(results_coll.inserted) == 1
+        run_id = results_coll.inserted[0]["_id"]
+        assert results_coll.inserted[0]["policy_document_id"] == "pol-1"
+
+        critic.get_active_feedback.assert_called_once_with("pol-1")
+        critic.format_feedback_for_prompt.assert_called_once()
+        critic.record_feedback_usage.assert_awaited_once_with(
+            run_id=run_id,
+            feedback_ids=["fb-1"],
+            rendered_text="PRIOR ANALYSIS FEEDBACK\n- Require exact deletion-right citations.",
+        )
+        critic.evaluate.assert_awaited_once_with(response, run_id)
+
+    def test_run_continues_when_feedback_lookup_fails(self, mock_config):
+        service, llm, critic, mongo = _build_v4_service_with_adaptive_feedback(
+            mock_config,
+            feedback_docs=[],
+        )
+        critic.get_active_feedback.side_effect = RuntimeError("feedback store unavailable")
+
+        response = asyncio.run(
+            service.run(
+                GapAnalysisRequest(
+                    policy_document_id="pol-1",
+                    applicable_jurisdictions=["CA"],
+                    run_async=False,
+                )
+            )
+        )
+
+        llm.gap_check_v4.assert_awaited_once()
+        assert llm.gap_check_v4.await_args.kwargs["adaptive_feedback"] == ""
+        assert response.summary.total_requirements == 1
+
+        results_coll = mongo[mock_config.compliance_database][mock_config.compliance_results_collection]
+        run_id = results_coll.inserted[0]["_id"]
+        critic.record_feedback_usage.assert_not_awaited()
+        critic.evaluate.assert_awaited_once_with(response, run_id)
+
+
+# ---------------------------------------------------------------------------
 # V4 endpoint: GET /adaptive-feedback
 # ---------------------------------------------------------------------------
 
@@ -379,3 +456,154 @@ class TestEnsureIndexes:
 async def _sync_run(func, *args, **kwargs):
     """Replacement for run_in_thread that runs synchronously."""
     return func(*args, **kwargs)
+
+
+class _FakeCollection:
+    def __init__(self, docs=None):
+        self.docs = list(docs or [])
+        self.inserted = []
+
+    def find_one(self, query):
+        for doc in self.docs:
+            if _matches_query(doc, query):
+                return doc
+        return None
+
+    def find(self, query=None, projection=None):
+        query = query or {}
+        return [
+            _project_doc(doc, projection)
+            for doc in self.docs
+            if _matches_query(doc, query)
+        ]
+
+    def count_documents(self, query):
+        return sum(1 for doc in self.docs if _matches_query(doc, query))
+
+    def insert_one(self, doc):
+        self.inserted.append(doc)
+        return MagicMock(inserted_id=doc.get("_id"))
+
+
+class _FakeDatabase:
+    def __init__(self, collections):
+        self._collections = collections
+
+    def __getitem__(self, name):
+        return self._collections[name]
+
+
+class _FakeMongo:
+    def __init__(self, databases):
+        self._databases = databases
+
+    def __getitem__(self, name):
+        return self._databases[name]
+
+
+def _matches_query(doc, query):
+    for key, expected in query.items():
+        actual = doc.get(key)
+        if isinstance(expected, dict) and "$in" in expected:
+            if actual not in expected["$in"]:
+                return False
+        elif actual != expected:
+            return False
+    return True
+
+
+def _project_doc(doc, projection):
+    if not projection:
+        return doc
+    return {key: doc[key] for key, include in projection.items() if include and key in doc}
+
+
+def _build_v4_service_with_adaptive_feedback(mock_config, feedback_docs):
+    mock_config.adaptive_feedback_enabled = True
+    mock_config.compliance_database = "privacy-compliance"
+    mock_config.statute_database = ""
+    mongo = _FakeMongo(
+        {
+            mock_config.compliance_database: _FakeDatabase(
+                {
+                    mock_config.policies_collection: _FakeCollection(
+                        [
+                            {
+                                "document_id": "pol-1",
+                                "company_name": "Acme",
+                                "text": "We honor deletion requests within 45 days.",
+                            }
+                        ]
+                    ),
+                    mock_config.policy_legal_embeddings_collection: _FakeCollection(
+                        [
+                            {
+                                "document_id": "pol-1",
+                                "category": "consumer_requests",
+                                "chunk_text": "We honor deletion requests within 45 days.",
+                            }
+                        ]
+                    ),
+                    mock_config.category_mapping_collection: _FakeCollection(
+                        [
+                            {
+                                "statute_category": "consumer_rights",
+                                "sub_topic": "deletion",
+                                "policy_categories": ["consumer_requests"],
+                            }
+                        ]
+                    ),
+                    mock_config.statute_sub_topic_embeddings_collection: _FakeCollection(
+                        [
+                            {
+                                "_id": "stat-1",
+                                "document_id": "ccpa",
+                                "category": "consumer_rights",
+                                "sub_topic": "deletion",
+                                "header_text": "CA Civ. Code § 1798.105",
+                                "subtopic_text": "Consumers have a right to request deletion.",
+                                "requirement_summary": "Right to delete",
+                                "jurisdiction": "CA",
+                            },
+                            {
+                                "_id": "ctx-1",
+                                "document_id": "ccpa",
+                                "category": "definitions",
+                                "header_text": "Definitions",
+                                "subtopic_text": "Consumer means a natural person.",
+                            },
+                        ]
+                    ),
+                    mock_config.compliance_results_collection: _FakeCollection(),
+                    mock_config.compliance_run_log_collection: _FakeCollection(),
+                }
+            )
+        }
+    )
+
+    llm = MagicMock()
+    llm.gap_check_v4 = AsyncMock(
+        return_value={
+            "status": "addressed",
+            "policy_quote": "We honor deletion requests",
+            "requirement_summary": "Right to delete",
+            "statute_quote": "Consumers have a right to request deletion.",
+            "confidence": "high",
+        }
+    )
+    rate_limiter = MagicMock()
+    rate_limiter.allow = AsyncMock(return_value=True)
+    critic = MagicMock()
+    critic.get_active_feedback.return_value = feedback_docs
+    critic.format_feedback_for_prompt.return_value = ""
+    critic.record_feedback_usage = AsyncMock()
+    critic.evaluate = AsyncMock()
+
+    service = GapAnalysisServiceV4(
+        mongo_client=mongo,
+        config=mock_config,
+        llm_client=llm,
+        rate_limiter=rate_limiter,
+        critic=critic,
+    )
+    return service, llm, critic, mongo
