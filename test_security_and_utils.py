@@ -128,22 +128,29 @@ def test_require_api_key_async_enforces_headers(
     init_app_api_key()
     app = Flask(__name__)
 
+    def run_isolated(coro):
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
     @require_api_key_async
     async def protected():
         return jsonify({"ok": True})
 
     with app.test_request_context("/protected"):
-        response, status = asyncio.run(protected())
+        response, status = run_isolated(protected())
     assert status == 401
     assert response.get_json()["error"] == "Missing API key."
 
     with app.test_request_context("/protected", headers={"x-api-key": "wrong"}):
-        response, status = asyncio.run(protected())
+        response, status = run_isolated(protected())
     assert status == 403
     assert response.get_json()["error"] == "Invalid API key."
 
     with app.test_request_context("/protected", headers={"x-api-key": "secret"}):
-        response = asyncio.run(protected())
+        response = run_isolated(protected())
     assert response.status_code == 200
     assert response.get_json() == {"ok": True}
 
