@@ -99,6 +99,25 @@ def test_index_invalid_source_query(client, mock_clients) -> None:
     assert "source_query" in payload["error"]
 
 
+def test_index_rejects_dangerous_source_query_before_mongo_access(client, mock_clients) -> None:
+    _wire_mongo(mock_clients["mongo"])
+
+    response = client.post(
+        "/create-embeddings",
+        json={
+            "source_database_name": "src",
+            "source_collection_name": "docs",
+            "index_database_name": "index_db",
+            "index_collection_name": "chunks",
+            "source_query": {"$where": "1 == 1"},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "not allowed" in response.get_json()["error"].lower()
+    mock_clients["mongo"].__getitem__.assert_not_called()
+
+
 def test_index_applies_source_query(client, mock_clients) -> None:
     dbs = _wire_mongo(mock_clients["mongo"])
     source_collection = dbs["source_db"].__getitem__.return_value

@@ -231,7 +231,7 @@ class TestEvaluate:
         })
 
         with patch("adaptive_feedback_service.run_in_thread", side_effect=_sync_run):
-            feedback_id = asyncio.get_event_loop().run_until_complete(
+            feedback_id = _run_async(
                 critic.evaluate(sample_response, "run-123")
             )
 
@@ -242,11 +242,19 @@ class TestEvaluate:
         assert inserted["policy_document_id"] == "pol-1"
         assert len(inserted["suggestions"]) == 1
         assert inserted["gap_summary_snapshot"]["total_requirements"] == 2
+        coll_mock.update_many.assert_called_once_with(
+            {
+                "policy_document_id": "pol-1",
+                "superseded_by": None,
+                "_id": {"$ne": inserted["_id"]},
+            },
+            {"$set": {"superseded_by": inserted["_id"]}},
+        )
 
     def test_evaluate_disabled(self, critic, mock_config, sample_response):
         mock_config.adaptive_feedback_enabled = False
         critic._cfg = mock_config
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run_async(
             critic.evaluate(sample_response, "run-123")
         )
         assert result is None
@@ -257,7 +265,7 @@ class TestEvaluate:
 
         critic._llm._call_json = AsyncMock(return_value=None)
 
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run_async(
             critic.evaluate(sample_response, "run-123")
         )
         assert result is None
@@ -274,7 +282,7 @@ class TestRecordFeedbackUsage:
         mock_mongo.__getitem__.return_value.__getitem__.return_value = coll_mock
 
         with patch("adaptive_feedback_service.run_in_thread", side_effect=_sync_run):
-            asyncio.get_event_loop().run_until_complete(
+            _run_async(
                 critic.record_feedback_usage(
                     run_id="run-456",
                     feedback_ids=["fb-1", "fb-2"],
@@ -375,6 +383,14 @@ class TestEnsureIndexes:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _run_async(coro):
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
 
 async def _sync_run(func, *args, **kwargs):
     """Replacement for run_in_thread that runs synchronously."""
