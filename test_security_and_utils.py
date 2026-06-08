@@ -1,6 +1,7 @@
 """Tests for security, utilities, cache, and redaction helpers."""
 from __future__ import annotations
 
+import asyncio
 import time
 from types import SimpleNamespace
 from typing import Any
@@ -20,7 +21,22 @@ from compliance_utils import (
 )
 from rate_limiter import RateLimiter
 from redactor import Redactor
-from security import AuthorizationError, authorize_request
+import security
+from security import (
+    AuthorizationError,
+    authorize_request,
+    require_api_key,
+    require_api_key_async,
+)
+
+
+@pytest.fixture(autouse=True)
+def reset_app_api_key() -> None:
+    """Keep APP_API_KEY decorator state isolated across tests."""
+    previous = security._app_api_key
+    security._app_api_key = None
+    yield
+    security._app_api_key = previous
 
 
 def test_authorize_request_missing_key() -> None:
@@ -61,6 +77,53 @@ def test_authorize_request_role_allowed() -> None:
     config.allowed_roles = ["admin"]
     request = SimpleNamespace(headers={"x-api-key": "secret", "x-role": "admin"})
     authorize_request(config, request)
+
+
+def test_require_api_key_allows_core_endpoint_when_unconfigured(app_db) -> None:
+    handler = require_api_key(lambda: {"ok": True})
+
+    with app_db.test_request_context("/documents"):
+        assert handler() == {"ok": True}
+
+
+def test_require_api_key_rejects_missing_and_invalid_headers(app_db) -> None:
+    security._app_api_key = "secret"
+    handler = require_api_key(lambda: {"ok": True})
+
+    with app_db.test_request_context("/documents"):
+        response, status = handler()
+        assert status == 401
+        assert response.get_json()["error"] == "Missing API key."
+
+    with app_db.test_request_context("/documents", headers={"x-api-key": "wrong"}):
+        response, status = handler()
+        assert status == 403
+        assert response.get_json()["error"] == "Invalid API key."
+
+
+def test_require_api_key_accepts_valid_header(app_db) -> None:
+    security._app_api_key = "secret"
+    handler = require_api_key(lambda: {"ok": True})
+
+    with app_db.test_request_context("/documents", headers={"x-api-key": "secret"}):
+        assert handler() == {"ok": True}
+
+
+def test_require_api_key_async_matches_sync_behavior(app_db) -> None:
+    security._app_api_key = "secret"
+
+    async def view():
+        return {"ok": True}
+
+    handler = require_api_key_async(view)
+
+    with app_db.test_request_context("/async-endpoint"):
+        response, status = asyncio.run(handler())
+        assert status == 401
+        assert response.get_json()["error"] == "Missing API key."
+
+    with app_db.test_request_context("/async-endpoint", headers={"x-api-key": "secret"}):
+        assert asyncio.run(handler()) == {"ok": True}
 
 
 def test_redactor_masks_common_pii() -> None:
