@@ -1,6 +1,9 @@
 """Tests for db blueprint category-mapping endpoints."""
 from __future__ import annotations
 
+import json
+import urllib.parse
+
 from bson import ObjectId
 from flask import Flask
 from unittest.mock import MagicMock
@@ -83,6 +86,25 @@ def test_get_category_mapping_invalid_query_json(client, mock_coll) -> None:
     response = client.get("/category-mapping?query={bad}")
     assert response.status_code == 400
     assert "JSON" in response.get_json()["error"]
+    mock_coll.find.assert_not_called()
+
+
+def test_get_category_mapping_rejects_dangerous_query_operator(client, mock_coll) -> None:
+    """GET /category-mapping blocks dangerous MongoDB operators before querying."""
+    query = urllib.parse.quote('{"$where": "1==1"}')
+    response = client.get(f"/category-mapping?query={query}")
+    assert response.status_code == 400
+    assert "not allowed" in response.get_json()["error"]
+    mock_coll.find.assert_not_called()
+
+
+def test_get_category_mapping_accepts_double_encoded_query_object(client, mock_coll) -> None:
+    """Double-encoded JSON object queries are normalized before find()."""
+    mock_coll.find.return_value = []
+    encoded_query = urllib.parse.quote(json.dumps(json.dumps({"sub_topic": "right_to_delete"})))
+    response = client.get(f"/category-mapping?query={encoded_query}")
+    assert response.status_code == 200
+    mock_coll.find.assert_called_once_with({"sub_topic": "right_to_delete"})
 
 
 def test_post_category_mapping_success(client, mock_coll) -> None:
@@ -152,6 +174,15 @@ def test_delete_category_mapping_by_query(client, mock_coll) -> None:
     data = response.get_json()
     assert data["deleted_count"] == 3
     mock_coll.delete_many.assert_called_once_with({"statute_category": "old"})
+
+
+def test_delete_category_mapping_rejects_dangerous_query_operator(client, mock_coll) -> None:
+    """DELETE /category-mapping blocks dangerous bulk-delete filters."""
+    query = urllib.parse.quote('{"$where": "1==1"}')
+    response = client.delete(f"/category-mapping?query={query}")
+    assert response.status_code == 400
+    assert "not allowed" in response.get_json()["error"]
+    mock_coll.delete_many.assert_not_called()
 
 
 def test_delete_category_mapping_both_id_and_query(client) -> None:
