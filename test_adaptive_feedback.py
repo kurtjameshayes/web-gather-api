@@ -13,11 +13,13 @@ from compliance_routes import compliance_bp
 from compliance_routes_v4 import compliance_v4_bp
 from compliance_config import load_config
 from compliance_suite_schemas import (
+    GapAnalysisRequest,
     GapAnalysisResponse,
     GapItem,
     GapSummary,
     RetrievalMetadata,
 )
+from gap_analysis_service_v4 import GapAnalysisServiceV4
 from adaptive_feedback_service import CriticService, VALID_CATEGORIES, VALID_SEVERITIES
 
 
@@ -287,6 +289,112 @@ class TestRecordFeedbackUsage:
         assert inserted["run_id"] == "run-456"
         assert inserted["feedback_ids_used"] == ["fb-1", "fb-2"]
         assert inserted["feedback_instructions_text"] == "- Do X\n- Do Y"
+
+
+# ---------------------------------------------------------------------------
+# GapAnalysisServiceV4 adaptive feedback integration
+# ---------------------------------------------------------------------------
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_v4_run_injects_feedback_and_records_usage(mock_config, anyio_backend):
+    """V4 run path injects active feedback and records post-run critic lifecycle."""
+    policies_coll = MagicMock()
+    policies_coll.find_one.return_value = {
+        "document_id": "pol-1",
+        "company_name": "Acme",
+        "text": "We honor deletion requests.",
+    }
+    statute_coll = MagicMock()
+    statute_coll.find.side_effect = [
+        [
+            {
+                "_id": "stat-1",
+                "document_id": "ccpa",
+                "category": "consumer_rights",
+                "sub_topic": "deletion",
+                "header_text": "§ 1798.105",
+                "subtopic_text": "Consumers may request deletion.",
+                "requirement_summary": "Deletion rights",
+                "jurisdiction": "CA",
+            }
+        ],
+        [],
+    ]
+    policy_legal_coll = MagicMock()
+    policy_legal_coll.count_documents.return_value = 1
+    policy_legal_coll.find.return_value = [{"chunk_text": "We honor deletion requests."}]
+    cat_map_coll = MagicMock()
+    cat_map_coll.find.return_value = [
+        {
+            "statute_category": "consumer_rights",
+            "sub_topic": "deletion",
+            "policy_categories": ["consumer_rights"],
+        }
+    ]
+    results_coll = MagicMock()
+    run_log_coll = MagicMock()
+
+    collections = {
+        mock_config.policies_collection: policies_coll,
+        mock_config.statute_sub_topic_embeddings_collection: statute_coll,
+        mock_config.policy_legal_embeddings_collection: policy_legal_coll,
+        mock_config.category_mapping_collection: cat_map_coll,
+        mock_config.compliance_results_collection: results_coll,
+        mock_config.compliance_run_log_collection: run_log_coll,
+    }
+    fake_db = MagicMock()
+    fake_db.__getitem__.side_effect = lambda name: collections[name]
+    mock_mongo = MagicMock()
+    mock_mongo.__getitem__.return_value = fake_db
+
+    llm = MagicMock()
+    llm.gap_check_v4 = AsyncMock(return_value={
+        "status": "addressed",
+        "policy_quote": "We honor deletion requests.",
+        "requirement_summary": "Deletion rights",
+        "statute_quote": "Consumers may request deletion.",
+        "confidence": "high",
+    })
+    rate_limiter = MagicMock()
+    rate_limiter.allow = AsyncMock(return_value=True)
+    critic = MagicMock()
+    critic.get_active_feedback.return_value = [
+        {"_id": "fb-1", "suggestions": [{"instruction": "Require exact quotes."}]}
+    ]
+    critic.format_feedback_for_prompt.return_value = "- Require exact quotes."
+    critic.record_feedback_usage = AsyncMock()
+    critic.evaluate = AsyncMock()
+
+    service = GapAnalysisServiceV4(
+        mongo_client=mock_mongo,
+        config=mock_config,
+        llm_client=llm,
+        rate_limiter=rate_limiter,
+        critic=critic,
+    )
+
+    response = await service.run(
+        GapAnalysisRequest(
+            policy_document_id="pol-1",
+            applicable_jurisdictions=["CA"],
+            save_results=True,
+        )
+    )
+
+    assert response.summary.addressed == 1
+    critic.get_active_feedback.assert_called_once_with("pol-1")
+    critic.format_feedback_for_prompt.assert_called_once_with(critic.get_active_feedback.return_value)
+    llm.gap_check_v4.assert_awaited_once()
+    assert llm.gap_check_v4.await_args.kwargs["adaptive_feedback"] == "- Require exact quotes."
+    results_coll.insert_one.assert_called_once()
+    run_id = results_coll.insert_one.call_args[0][0]["_id"]
+    critic.record_feedback_usage.assert_awaited_once_with(
+        run_id=run_id,
+        feedback_ids=["fb-1"],
+        rendered_text="- Require exact quotes.",
+    )
+    critic.evaluate.assert_awaited_once_with(response, run_id)
 
 
 # ---------------------------------------------------------------------------
