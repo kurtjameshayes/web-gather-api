@@ -204,6 +204,34 @@ def test_write_to_collection_append_success(client, mock_mongo_client) -> None:
     assert payload["mode"] == "append"
 
 
+@pytest.mark.parametrize(
+    ("payload_override", "expected_error"),
+    [
+        ({"database_name": "admin"}, "reserved"),
+        ({"collection_name": "bad.collection"}, "letters"),
+        ({"document": ["not", "an", "object"]}, "JSON object"),
+        ({"mode": "invalid"}, "mode"),
+        ({"mode": "replace"}, "update_id"),
+    ],
+)
+def test_write_to_collection_rejects_invalid_inputs_before_mongo_access(
+    client, mock_mongo_client, payload_override: dict[str, Any], expected_error: str
+) -> None:
+    payload = {
+        "database_name": "test_db",
+        "collection_name": "docs",
+        "mode": "append",
+        "document": {"name": "doc1"},
+    }
+    payload.update(payload_override)
+
+    response = client.post("/write_to_collection", json=payload)
+
+    assert response.status_code == 400
+    assert expected_error.lower() in response.get_json()["error"].lower()
+    mock_mongo_client.__getitem__.assert_not_called()
+
+
 def test_write_to_collection_replace_invalid_id(client, mock_mongo_client) -> None:
     response = client.post(
         "/write_to_collection",
