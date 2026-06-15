@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from flask import Flask, jsonify
 
 from cache import SimpleLRUCache
 from compliance_config import load_config
@@ -20,7 +21,25 @@ from compliance_utils import (
 )
 from rate_limiter import RateLimiter
 from redactor import Redactor
-from security import AuthorizationError, authorize_request
+import security
+from security import (
+    AuthorizationError,
+    authorize_request,
+    require_api_key,
+    require_api_key_async,
+)
+
+
+@pytest.fixture(autouse=True)
+def reset_app_api_key(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(security, "_app_api_key", None)
+    yield
+    monkeypatch.setattr(security, "_app_api_key", None)
+
+
+@pytest.fixture
+def flask_app() -> Flask:
+    return Flask(__name__)
 
 
 def test_authorize_request_missing_key() -> None:
@@ -61,6 +80,74 @@ def test_authorize_request_role_allowed() -> None:
     config.allowed_roles = ["admin"]
     request = SimpleNamespace(headers={"x-api-key": "secret", "x-role": "admin"})
     authorize_request(config, request)
+
+
+def test_require_api_key_passes_when_unconfigured(flask_app: Flask) -> None:
+    @require_api_key
+    def handler():
+        return jsonify({"ok": True})
+
+    with flask_app.test_request_context("/"):
+        response = handler()
+
+    assert response.get_json() == {"ok": True}
+
+
+def test_require_api_key_rejects_missing_and_invalid_key(
+    flask_app: Flask,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(security, "_app_api_key", "secret")
+
+    @require_api_key
+    def handler():
+        return jsonify({"ok": True})
+
+    with flask_app.test_request_context("/"):
+        response, status = handler()
+    assert status == 401
+    assert response.get_json()["error"] == "Missing API key."
+
+    with flask_app.test_request_context("/", headers={"x-api-key": "wrong"}):
+        response, status = handler()
+    assert status == 403
+    assert response.get_json()["error"] == "Invalid API key."
+
+
+def test_require_api_key_accepts_valid_key(
+    flask_app: Flask,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(security, "_app_api_key", "secret")
+
+    @require_api_key
+    def handler():
+        return jsonify({"ok": True})
+
+    with flask_app.test_request_context("/", headers={"x-api-key": "secret"}):
+        response = handler()
+
+    assert response.get_json() == {"ok": True}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_require_api_key_async_rejects_invalid_key(
+    flask_app: Flask,
+    monkeypatch: pytest.MonkeyPatch,
+    anyio_backend: str,
+) -> None:
+    monkeypatch.setattr(security, "_app_api_key", "secret")
+
+    @require_api_key_async
+    async def handler():
+        return jsonify({"ok": True})
+
+    with flask_app.test_request_context("/", headers={"x-api-key": "wrong"}):
+        response, status = await handler()
+
+    assert status == 403
+    assert response.get_json()["error"] == "Invalid API key."
 
 
 def test_redactor_masks_common_pii() -> None:
