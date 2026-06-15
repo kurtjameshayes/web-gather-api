@@ -39,16 +39,24 @@ def mock_clients() -> Dict[str, Any]:
     }
 
 
-def _wire_mongo(mock_mongo: MagicMock) -> None:
+def _wire_mongo(mock_mongo: MagicMock) -> Dict[str, MagicMock]:
     db = MagicMock()
     wg_db = MagicMock()
+    user_collection = MagicMock()
+    documents_collection = MagicMock()
 
     def _get_db(name: str) -> MagicMock:
         return wg_db if name == WEB_GATHER_DB else db
 
     mock_mongo.__getitem__.side_effect = _get_db
-    db.__getitem__.return_value = MagicMock()
-    wg_db.__getitem__.return_value = MagicMock()
+    db.__getitem__.return_value = user_collection
+    wg_db.__getitem__.return_value = documents_collection
+    return {
+        "db": db,
+        "wg_db": wg_db,
+        "user_collection": user_collection,
+        "documents_collection": documents_collection,
+    }
 
 
 def test_gather_success(client, mock_clients) -> None:
@@ -93,6 +101,41 @@ def test_ingest_web_success(client, mock_clients) -> None:
     payload = response.get_json()
     assert payload["document_type"] == "web"
     assert payload["pages"] == 1
+
+
+def test_ingest_overwrite_deletes_only_matching_source_url(client, mock_clients) -> None:
+    dbs = _wire_mongo(mock_clients["mongo"])
+    user_collection = dbs["user_collection"]
+    documents_collection = dbs["documents_collection"]
+    user_collection.count_documents.return_value = 2
+    mock_clients["firecrawl"].crawl.return_value = [
+        {"url": "https://example.com/page-a", "title": "Title", "markdown": "Hello world"}
+    ]
+
+    with patch("core.detect_content_type", return_value=""):
+        response = client.post(
+            "/ingest",
+            json={
+                "url": "https://example.com/page-a",
+                "database": "test_db",
+                "collection": "docs",
+                "mode": "overwrite",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["overwritten"] is True
+    assert payload["previous_document_count"] == 2
+    user_collection.count_documents.assert_called_once_with({"source_url": "https://example.com/page-a"})
+    user_collection.delete_many.assert_called_once_with({"source_url": "https://example.com/page-a"})
+    documents_collection.delete_many.assert_called_once_with(
+        {
+            "database_name": "test_db",
+            "collection_name": "docs",
+            "source_url": "https://example.com/page-a",
+        }
+    )
 
 
 def test_ingest_pdf_success(client, mock_clients) -> None:
