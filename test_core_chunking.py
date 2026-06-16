@@ -89,6 +89,89 @@ def test_create_paragraph_sections_invalid_source_query(client, mock_clients) ->
     assert "source_query" in response.get_json()["error"]
 
 
+@pytest.mark.parametrize(
+    ("endpoint", "payload"),
+    [
+        (
+            "/create-paragraph-sections",
+            {
+                "database": "db",
+                "source_collection": "chunks",
+                "destination_collection": "subchunks",
+                "column": "chunk_text",
+                "subsection_column": "subchunk_text",
+            },
+        ),
+        (
+            "/create-statute-subsections",
+            {
+                "database": "db",
+                "source_collection": "statute_chunks",
+                "destination_collection": "statute_subchunks",
+                "column": "chunk_text",
+                "subsection_column": "subchunk_text",
+            },
+        ),
+        (
+            "/create-statute-subtopics",
+            {
+                "database": "db",
+                "source_collection": "statute_subchunks",
+                "destination_collection": "statute_subtopics",
+                "column": "subchunk_text",
+                "subsection_column": "subchunk_text",
+            },
+        ),
+        (
+            "/parse-policy-subsections",
+            {
+                "database": "db",
+                "collection": "policy_chunks",
+                "column": "chunk_text",
+            },
+        ),
+    ],
+)
+def test_chunking_source_query_rejects_dangerous_operators(
+    client, mock_clients, endpoint, payload
+) -> None:
+    """source_query validation must reject Mongo operators before DB access."""
+    dbs = _wire_mongo_core(mock_clients["mongo"])
+    collection = dbs["source_db"].__getitem__.return_value
+    payload = {**payload, "source_query": {"$where": "sleep(1000)"}}
+
+    response = client.post(endpoint, json=payload)
+
+    assert response.status_code == 400
+    assert "$where" in response.get_json()["error"]
+    collection.find.assert_not_called()
+    collection.delete_many.assert_not_called()
+
+
+def test_create_paragraph_sections_rejects_non_object_source_query(
+    client, mock_clients
+) -> None:
+    """source_query strings must decode to objects, not arrays or scalars."""
+    dbs = _wire_mongo_core(mock_clients["mongo"])
+    collection = dbs["source_db"].__getitem__.return_value
+
+    response = client.post(
+        "/create-paragraph-sections",
+        json={
+            "database": "db",
+            "source_collection": "chunks",
+            "destination_collection": "subchunks",
+            "column": "chunk_text",
+            "subsection_column": "subchunk_text",
+            "source_query": "[]",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "json object" in response.get_json()["error"].lower()
+    collection.find.assert_not_called()
+
+
 def test_create_statute_subsections_missing_params(client, mock_clients) -> None:
     """POST /create-statute-subsections with missing params returns 400."""
     response = client.post(

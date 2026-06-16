@@ -136,6 +136,43 @@ def _get_json_payload_or_error():
         return (None, (jsonify({"error": f"Invalid JSON in request body: {str(exc)}"}), 400))
 
 
+def _parse_safe_source_query(
+    source_query_param,
+    log_prefix: str,
+    *,
+    allow_empty_string: bool = True,
+):
+    """Parse a source_query payload and reject unsafe MongoDB operators."""
+    if source_query_param is None:
+        return {}, None
+
+    if isinstance(source_query_param, dict):
+        source_query = source_query_param
+    elif isinstance(source_query_param, str):
+        if allow_empty_string and not source_query_param.strip():
+            return {}, None
+        try:
+            source_query = json.loads(source_query_param)
+        except json.JSONDecodeError as exc:
+            logger.warning("%s - Invalid JSON in source_query: %s", log_prefix, exc)
+            return None, (jsonify({"error": f"Invalid JSON in source_query: {str(exc)}"}), 400)
+    else:
+        logger.warning("%s - source_query must be a JSON object", log_prefix)
+        return None, (jsonify({"error": "source_query must be a JSON object"}), 400)
+
+    if not isinstance(source_query, dict):
+        logger.warning("%s - source_query must be a JSON object", log_prefix)
+        return None, (jsonify({"error": "source_query must be a JSON object"}), 400)
+
+    try:
+        _reject_dangerous_operators(source_query)
+    except ValueError as exc:
+        logger.warning("%s - Disallowed query operator: %s", log_prefix, exc)
+        return None, (jsonify({"error": str(exc)}), 400)
+
+    return source_query, None
+
+
 def calculate_relevance_score(query, title, description):
     """Calculate relevance score based on query term matching.
 
@@ -1444,35 +1481,13 @@ def index_document():
     source_query_param = payload.get("source_query")
     text_column = payload.get("text_column") or "chunk_text"
 
-    source_query = {}
-    if source_query_param is not None:
-        if isinstance(source_query_param, dict):
-            source_query = source_query_param
-        elif isinstance(source_query_param, str):
-            try:
-                source_query = json.loads(source_query_param)
-            except json.JSONDecodeError as exc:
-                logger.warning(
-                    "POST /create-embeddings - Invalid JSON in source_query: %s",
-                    str(exc),
-                )
-                return (
-                    jsonify({"error": f"Invalid JSON in source_query: {str(exc)}"}),
-                    400,
-                )
-        else:
-            logger.warning("POST /create-embeddings - source_query must be a JSON object")
-            return jsonify({"error": "source_query must be a JSON object"}), 400
-
-        if not isinstance(source_query, dict):
-            logger.warning("POST /create-embeddings - source_query must be a JSON object")
-            return jsonify({"error": "source_query must be a JSON object"}), 400
-
-        try:
-            _reject_dangerous_operators(source_query)
-        except ValueError as exc:
-            logger.warning("POST /create-embeddings - Disallowed query operator: %s", exc)
-            return jsonify({"error": str(exc)}), 400
+    source_query, source_query_err = _parse_safe_source_query(
+        source_query_param,
+        "POST /create-embeddings",
+        allow_empty_string=False,
+    )
+    if source_query_err is not None:
+        return source_query_err
 
     logger.info(
         "POST /create-embeddings - Parameters: source_database_name=%s, "
@@ -1939,18 +1954,12 @@ def create_subsections():
     column = payload.get("column")
     subsection_column = payload.get("subsection_column")
     source_query_param = payload.get("source_query")
-    source_query = {}
-    if source_query_param is not None:
-        if isinstance(source_query_param, dict):
-            source_query = source_query_param
-        elif isinstance(source_query_param, str) and source_query_param.strip():
-            try:
-                source_query = json.loads(source_query_param)
-            except json.JSONDecodeError as exc:
-                logger.warning("POST /create-paragraph-sections - Invalid JSON in source_query: %s", exc)
-                return jsonify({"error": f"Invalid JSON in source_query: {str(exc)}"}), 400
-        if not isinstance(source_query, dict):
-            source_query = {}
+    source_query, source_query_err = _parse_safe_source_query(
+        source_query_param,
+        "POST /create-paragraph-sections",
+    )
+    if source_query_err is not None:
+        return source_query_err
 
     missing = []
     if not database:
@@ -2231,18 +2240,12 @@ def create_statute_subsections():
     subsection_column = payload.get("subsection_column")
     parse_prompt = payload.get("parse_prompt") or ""
     source_query_param = payload.get("source_query")
-    source_query = {}
-    if source_query_param is not None:
-        if isinstance(source_query_param, dict):
-            source_query = source_query_param
-        elif isinstance(source_query_param, str) and source_query_param.strip():
-            try:
-                source_query = json.loads(source_query_param)
-            except json.JSONDecodeError as exc:
-                logger.warning("POST /create-statute-subsections - Invalid JSON in source_query: %s", exc)
-                return jsonify({"error": f"Invalid JSON in source_query: {str(exc)}"}), 400
-        if not isinstance(source_query, dict):
-            source_query = {}
+    source_query, source_query_err = _parse_safe_source_query(
+        source_query_param,
+        "POST /create-statute-subsections",
+    )
+    if source_query_err is not None:
+        return source_query_err
 
     missing = []
     if not database:
@@ -2460,18 +2463,12 @@ def create_statute_subtopics():
     subsection_column = payload.get("subsection_column")
     parse_prompt = payload.get("parse_prompt") or ""
     source_query_param = payload.get("source_query")
-    source_query = {}
-    if source_query_param is not None:
-        if isinstance(source_query_param, dict):
-            source_query = source_query_param
-        elif isinstance(source_query_param, str) and source_query_param.strip():
-            try:
-                source_query = json.loads(source_query_param)
-            except json.JSONDecodeError as exc:
-                logger.warning("POST /create-statute-subtopics - Invalid JSON in source_query: %s", exc)
-                return jsonify({"error": f"Invalid JSON in source_query: {str(exc)}"}), 400
-        if not isinstance(source_query, dict):
-            source_query = {}
+    source_query, source_query_err = _parse_safe_source_query(
+        source_query_param,
+        "POST /create-statute-subtopics",
+    )
+    if source_query_err is not None:
+        return source_query_err
 
     missing = []
     if not database:
@@ -2917,18 +2914,12 @@ def parse_policy_subsections():
     column = payload.get("column")
     parse_prompt = payload.get("parse_prompt") or ""
     source_query_param = payload.get("source_query")
-    source_query = {}
-    if source_query_param is not None:
-        if isinstance(source_query_param, dict):
-            source_query = source_query_param
-        elif isinstance(source_query_param, str) and source_query_param.strip():
-            try:
-                source_query = json.loads(source_query_param)
-            except json.JSONDecodeError as exc:
-                logger.warning("POST /parse-policy-subsections - Invalid JSON in source_query: %s", exc)
-                return jsonify({"error": f"Invalid JSON in source_query: {str(exc)}"}), 400
-        if not isinstance(source_query, dict):
-            source_query = {}
+    source_query, source_query_err = _parse_safe_source_query(
+        source_query_param,
+        "POST /parse-policy-subsections",
+    )
+    if source_query_err is not None:
+        return source_query_err
 
     missing = []
     if not database:
@@ -3074,13 +3065,12 @@ def create_sub_vector_index():
     if document_type not in ("policy", "statute"):
         return jsonify({"error": "document_type must be 'policy' or 'statute'"}), 400
 
-    if isinstance(source_query, str) and source_query.strip():
-        try:
-            source_query = json.loads(source_query)
-        except json.JSONDecodeError:
-            return jsonify({"error": "source_query must be valid JSON when provided as string"}), 400
-    if not isinstance(source_query, dict):
-        source_query = {}
+    source_query, source_query_err = _parse_safe_source_query(
+        source_query,
+        "POST /create-sub-vector-index",
+    )
+    if source_query_err is not None:
+        return source_query_err
 
     try:
         from index_job_service import start_sub_vector_index_job

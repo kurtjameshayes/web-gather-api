@@ -1352,7 +1352,8 @@ def build_openapi_spec():
                                         "source_query": {
                                             "type": "string",
                                             "description": (
-                                                "Optional Mongo query as JSON text to filter source rows"
+                                                "Optional Mongo query as JSON text to filter source rows. "
+                                                "Must decode to a JSON object; MongoDB operators other than $oid are rejected."
                                             ),
                                         },
                                     },
@@ -1470,7 +1471,7 @@ def build_openapi_spec():
                                         "destination_collection": {"type": "string", "description": "New collection to write subchunks to"},
                                         "column": {"type": "string", "description": "Source field to split (e.g. chunk_text)"},
                                         "subsection_column": {"type": "string", "description": "Field name for subchunk text in destination (e.g. subchunk_text)"},
-                                        "source_query": {"type": "object", "description": "Optional MongoDB query to filter source records (e.g. {\"document_id\": \"x\"}). When omitted, all records are processed."},
+                                        "source_query": {"type": "object", "description": "Optional MongoDB query to filter source records (e.g. {\"document_id\": \"x\"}). MongoDB operators other than $oid are rejected. When omitted, all records are processed."},
                                     },
                                     "required": ["database", "source_collection", "destination_collection", "column", "subsection_column"],
                                 }
@@ -1498,7 +1499,7 @@ def build_openapi_spec():
                                 }
                             },
                         },
-                        "400": {"description": "Missing required parameters"},
+                        "400": {"description": "Missing required parameters or invalid source_query"},
                         "500": {"description": "Failed to read source collection"},
                     },
                 }
@@ -1519,7 +1520,7 @@ def build_openapi_spec():
                                         "destination_collection": {"type": "string", "description": "Collection to write subsections to"},
                                         "column": {"type": "string", "description": "Source field containing statute text (e.g. chunk_text)"},
                                         "subsection_column": {"type": "string", "description": "Field name for subsection text in destination (e.g. subchunk_text)"},
-                                        "source_query": {"type": "object", "description": "Optional MongoDB query to filter source records."},
+                                        "source_query": {"type": "object", "description": "Optional MongoDB query to filter source records. MongoDB operators other than $oid are rejected."},
                                         "parse_prompt": {"type": "string", "description": "Optional. Additional parsing instructions. When blank, uses default prompt."},
                                     },
                                     "required": ["database", "source_collection", "destination_collection", "column", "subsection_column"],
@@ -1549,7 +1550,7 @@ def build_openapi_spec():
                                 }
                             }
                         },
-                        "400": {"description": "Missing required parameters or invalid source_query JSON"},
+                        "400": {"description": "Missing required parameters or invalid source_query"},
                         "500": {"description": "Failed to read source collection"},
                     },
                 }
@@ -1570,7 +1571,7 @@ def build_openapi_spec():
                                         "destination_collection": {"type": "string", "description": "Collection to write sub_topics to"},
                                         "column": {"type": "string", "description": "Source field containing statute text (e.g. chunk_text or sub_chunk_text)"},
                                         "subsection_column": {"type": "string", "description": "Field name for statute text in destination (provides context per record)"},
-                                        "source_query": {"type": "object", "description": "Optional MongoDB query to filter source records."},
+                                        "source_query": {"type": "object", "description": "Optional MongoDB query to filter source records. MongoDB operators other than $oid are rejected."},
                                         "parse_prompt": {"type": "string", "description": "Optional. Additional parsing instructions. When blank, uses default prompt."},
                                     },
                                     "required": ["database", "source_collection", "destination_collection", "column", "subsection_column"],
@@ -1600,7 +1601,7 @@ def build_openapi_spec():
                                 }
                             }
                         },
-                        "400": {"description": "Missing required parameters or invalid source_query JSON"},
+                        "400": {"description": "Missing required parameters or invalid source_query"},
                         "500": {"description": "Failed to read source collection"},
                     },
                 }
@@ -1619,7 +1620,7 @@ def build_openapi_spec():
                                         "database": {"type": "string"},
                                         "collection": {"type": "string", "description": "Source collection to read from"},
                                         "column": {"type": "string", "description": "Source field containing policy text (e.g. chunk_text)"},
-                                        "source_query": {"type": "object", "description": "Optional MongoDB query to filter source records."},
+                                        "source_query": {"type": "object", "description": "Optional MongoDB query to filter source records. MongoDB operators other than $oid are rejected."},
                                         "parse_prompt": {"type": "string", "description": "Optional. Additional parsing instructions. When blank, uses default prompt."},
                                     },
                                     "required": ["database", "collection", "column"],
@@ -1661,7 +1662,7 @@ def build_openapi_spec():
                                 }
                             }
                         },
-                        "400": {"description": "Missing required parameters or invalid source_query JSON"},
+                        "400": {"description": "Missing required parameters or invalid source_query"},
                         "500": {"description": "Failed to read source collection"},
                     },
                 }
@@ -1827,10 +1828,10 @@ def build_openapi_spec():
                                         },
                                         "source_query": {
                                             "oneOf": [
-                                                {"type": "object", "description": "MongoDB query object"},
-                                                {"type": "string", "description": "JSON string of MongoDB query"},
+                                                {"type": "object", "description": "Safe MongoDB query object"},
+                                                {"type": "string", "description": "JSON string of safe MongoDB query"},
                                             ],
-                                            "description": "MongoDB query to filter source records. For policy, use {\"document_id\": \"<policy-uuid>\"} to index a specific policy.",
+                                            "description": "MongoDB query to filter source records. Must decode to an object; MongoDB operators other than $oid are rejected. For policy, use {\"document_id\": \"<policy-uuid>\"} to index a specific policy.",
                                         },
                                     },
                                     "required": ["document_type"],

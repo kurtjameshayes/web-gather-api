@@ -103,6 +103,35 @@ def test_create_sub_vector_index_invalid_source_query_json(client) -> None:
     assert "source_query" in response.get_json()["error"].lower() or "json" in response.get_json()["error"].lower()
 
 
+def test_create_sub_vector_index_rejects_dangerous_source_query(client) -> None:
+    """Dangerous source_query operators must be rejected before job creation."""
+    with patch("core._get_index_job_storage") as mock_get_storage, patch(
+        "index_job_service.start_sub_vector_index_job"
+    ) as mock_start_job:
+        response = client.post(
+            "/create-sub-vector-index",
+            json={"document_type": "policy", "source_query": {"$where": "sleep(1000)"}},
+        )
+
+    assert response.status_code == 400
+    assert "$where" in response.get_json()["error"]
+    mock_get_storage.assert_not_called()
+    mock_start_job.assert_not_called()
+
+
+def test_create_sub_vector_index_rejects_non_object_source_query(client) -> None:
+    """source_query strings for index jobs must decode to JSON objects."""
+    with patch("core._get_index_job_storage") as mock_get_storage:
+        response = client.post(
+            "/create-sub-vector-index",
+            json={"document_type": "policy", "source_query": "[]"},
+        )
+
+    assert response.status_code == 400
+    assert "json object" in response.get_json()["error"].lower()
+    mock_get_storage.assert_not_called()
+
+
 def test_create_sub_vector_index_invalid_body_json(client) -> None:
     """POST /create-sub-vector-index with invalid JSON body returns 400."""
     response = client.post(
