@@ -4,8 +4,10 @@ from __future__ import annotations
 import time
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
+from flask import Flask
 
 from cache import SimpleLRUCache
 from compliance_config import load_config
@@ -20,7 +22,7 @@ from compliance_utils import (
 )
 from rate_limiter import RateLimiter
 from redactor import Redactor
-from security import AuthorizationError, authorize_request
+from security import AuthorizationError, authorize_request, require_api_key_async
 
 
 def test_authorize_request_missing_key() -> None:
@@ -61,6 +63,37 @@ def test_authorize_request_role_allowed() -> None:
     config.allowed_roles = ["admin"]
     request = SimpleNamespace(headers={"x-api-key": "secret", "x-role": "admin"})
     authorize_request(config, request)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_require_api_key_async_enforces_configured_app_key(
+    monkeypatch: Any,
+    anyio_backend: str,
+) -> None:
+    app = Flask(__name__)
+    handler = MagicMock(return_value="ok")
+
+    @require_api_key_async
+    async def protected():
+        return handler()
+
+    monkeypatch.setattr("security._app_api_key", "secret")
+
+    with app.test_request_context("/"):
+        response, status = await protected()
+    assert status == 401
+    assert response.get_json()["error"] == "Missing API key."
+
+    with app.test_request_context("/", headers={"x-api-key": "wrong"}):
+        response, status = await protected()
+    assert status == 403
+    assert response.get_json()["error"] == "Invalid API key."
+    handler.assert_not_called()
+
+    with app.test_request_context("/", headers={"x-api-key": "secret"}):
+        assert await protected() == "ok"
+    handler.assert_called_once_with()
 
 
 def test_redactor_masks_common_pii() -> None:

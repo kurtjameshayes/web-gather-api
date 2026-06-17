@@ -63,6 +63,43 @@ def test_list_documents_success(client, mock_mongo_client) -> None:
     assert payload["documents"][1]["_id"] == str(second_id)
 
 
+def test_list_documents_requires_configured_app_api_key(
+    client,
+    mock_mongo_client,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr("security._app_api_key", "secret")
+
+    response = client.get(
+        "/documents?database_name=test_db&collection_name=test_collection"
+    )
+    assert response.status_code == 401
+    assert response.get_json()["error"] == "Missing API key."
+
+    response = client.get(
+        "/documents?database_name=test_db&collection_name=test_collection",
+        headers={"x-api-key": "wrong"},
+    )
+    assert response.status_code == 403
+    assert response.get_json()["error"] == "Invalid API key."
+    mock_mongo_client.__getitem__.assert_not_called()
+
+    dbs = _wire_mongo(mock_mongo_client)
+    docs = [{"_id": ObjectId(), "name": "doc1"}]
+    cursor_mock = MagicMock()
+    cursor_mock.skip.return_value = cursor_mock
+    cursor_mock.limit.return_value = docs
+    dbs["user_db"].__getitem__.return_value.find.return_value = cursor_mock
+
+    response = client.get(
+        "/documents?database_name=test_db&collection_name=test_collection",
+        headers={"x-api-key": "secret"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["documents"][0]["name"] == "doc1"
+
+
 def test_list_documents_invalid_query_json(client, mock_mongo_client) -> None:
     response = client.get(
         "/documents?database_name=test_db&collection_name=test_collection&query={bad}"
