@@ -4,8 +4,10 @@ from __future__ import annotations
 import time
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
+from flask import Flask
 
 from cache import SimpleLRUCache
 from compliance_config import load_config
@@ -20,7 +22,13 @@ from compliance_utils import (
 )
 from rate_limiter import RateLimiter
 from redactor import Redactor
+import security
 from security import AuthorizationError, authorize_request
+
+
+@pytest.fixture(autouse=True)
+def reset_app_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(security, "_app_api_key", None)
 
 
 def test_authorize_request_missing_key() -> None:
@@ -61,6 +69,47 @@ def test_authorize_request_role_allowed() -> None:
     config.allowed_roles = ["admin"]
     request = SimpleNamespace(headers={"x-api-key": "secret", "x-role": "admin"})
     authorize_request(config, request)
+
+
+def test_app_api_key_enforced_across_core_db_and_util_blueprints(monkeypatch: pytest.MonkeyPatch) -> None:
+    """APP_API_KEY protects each non-compliance blueprint before handlers run."""
+    from core import core_bp
+    from db import db_bp
+    from util import init_util, util_bp
+
+    monkeypatch.setattr(security, "_app_api_key", "secret")
+
+    wg_db = MagicMock()
+    wg_db.__getitem__.return_value.find.return_value = []
+    mock_mongo = MagicMock()
+    mock_mongo.__getitem__.return_value = wg_db
+    init_util(mock_mongo)
+
+    app = Flask(__name__)
+    app.register_blueprint(core_bp)
+    app.register_blueprint(db_bp)
+    app.register_blueprint(util_bp)
+    client = app.test_client()
+
+    protected_routes = [
+        ("post", "/gather", {"json": {}}, 400),
+        ("get", "/documents", {}, 400),
+        ("get", "/embedding-models", {}, 200),
+    ]
+
+    for method, path, kwargs, allowed_status in protected_routes:
+        request_fn = getattr(client, method)
+
+        missing = request_fn(path, **kwargs)
+        assert missing.status_code == 401
+        assert missing.get_json()["error"] == "Missing API key."
+
+        invalid = request_fn(path, headers={"x-api-key": "wrong"}, **kwargs)
+        assert invalid.status_code == 403
+        assert invalid.get_json()["error"] == "Invalid API key."
+
+        allowed = request_fn(path, headers={"x-api-key": "secret"}, **kwargs)
+        assert allowed.status_code == allowed_status
 
 
 def test_redactor_masks_common_pii() -> None:
