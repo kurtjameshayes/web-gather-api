@@ -80,6 +80,7 @@ def _retriever(mongo: FakeMongo) -> tuple[VectorRetriever, Any]:
 
 
 def test_policy_chunk_retrieval_falls_back_to_post_match_when_vector_filter_fails() -> None:
+    config = load_config()
     retriever, config = _retriever(
         FakeMongo(
             {
