@@ -20,6 +20,7 @@ from compliance_routes import compliance_bp
 from llm_client import build_prompt
 from redactor import Redactor
 from segmenter import PolicySegmenter
+import vector_retriever as vector_retriever_module
 from vector_retriever import StatuteCandidate, VectorRetriever
 from rate_limiter import RateLimiter
 from schemas import StatutePolicyComplianceResponse
@@ -134,6 +135,125 @@ def test_retriever_returns_statute_candidates():
     )
     assert results[0].statute_id == "stat-1"
     assert results[0].score == 0.77
+
+
+async def _run_sync(func, *args, **kwargs):
+    return func(*args, **kwargs)
+
+
+class _FakeMongoDatabase:
+    def __init__(self, collections):
+        self._collections = collections
+
+    def __getitem__(self, collection_name):
+        return self._collections[collection_name]
+
+
+class _FakeMongoClientWithDatabase:
+    def __init__(self, collections):
+        self._db = _FakeMongoDatabase(collections)
+
+    def __getitem__(self, _database):
+        return self._db
+
+
+def test_retrieve_policy_subchunks_falls_back_when_vector_filter_unsupported(monkeypatch):
+    """Filtered vector search may be unavailable; fallback must still scope matches to the policy."""
+    config = load_config()
+    vector_field = config.embedding_vector_field
+    statute_coll = MagicMock()
+    policy_coll = MagicMock()
+    statute_coll.find.return_value = [
+        {
+            "_id": "stat-sub-1",
+            config.statute_jurisdiction_field: "CA",
+            vector_field: ["0.1", 0.2],
+            "subchunk_text": "Consumer deletion requirement.",
+        }
+    ]
+    policy_coll.aggregate.side_effect = [
+        RuntimeError("filter is not supported for this index"),
+        [
+            {
+                "_id": "policy-sub-1",
+                config.policy_document_id_field: "pol-1",
+                vector_field: [0.4, 0.5],
+                "chunk_text": "Deletion request policy text.",
+                "score": 0.87,
+            }
+        ],
+    ]
+    retriever = VectorRetriever(
+        _FakeMongoClientWithDatabase(
+            {
+                config.statute_sub_embeddings_collection: statute_coll,
+                config.policy_sub_embeddings_collection: policy_coll,
+            }
+        ),
+        MagicMock(),
+        config,
+        SimpleLRUCache(10, 60),
+    )
+    monkeypatch.setattr(vector_retriever_module, "run_in_thread", _run_sync)
+
+    result = asyncio.run(
+        retriever.retrieve_policy_subchunks_for_statute_subchunks(
+            database="privacy",
+            policy_document_id="pol-1",
+            applicable_jurisdictions=["CA"],
+            top_k_per_statute=2,
+        )
+    )
+
+    assert result.statute_subchunks_considered == 1
+    assert len(result.pairs) == 1
+    assert result.pairs[0].policy_doc["_id"] == "policy-sub-1"
+    assert vector_field not in result.pairs[0].policy_doc
+    assert policy_coll.aggregate.call_count == 2
+    filtered_pipeline = policy_coll.aggregate.call_args_list[0][0][0]
+    fallback_pipeline = policy_coll.aggregate.call_args_list[1][0][0]
+    policy_filter = {config.policy_document_id_field: "pol-1"}
+    assert filtered_pipeline[0]["$vectorSearch"]["filter"] == policy_filter
+    assert "filter" not in fallback_pipeline[0]["$vectorSearch"]
+    assert {"$match": policy_filter} in fallback_pipeline
+    assert fallback_pipeline[-1] == {"$limit": 2}
+
+
+def test_retrieve_policy_chunks_skips_malformed_statute_vectors(monkeypatch):
+    """Bad stored embeddings should not trigger policy searches or fail the whole retrieval."""
+    config = load_config()
+    vector_field = config.embedding_vector_field
+    statute_coll = MagicMock()
+    policy_coll = MagicMock()
+    statute_coll.find.return_value = [
+        {"_id": "missing-vector", config.statute_jurisdiction_field: "CA"},
+        {"_id": "not-a-list", config.statute_jurisdiction_field: "CA", vector_field: "0.1,0.2"},
+        {"_id": "not-numeric", config.statute_jurisdiction_field: "CA", vector_field: [0.1, "bad"]},
+    ]
+    retriever = VectorRetriever(
+        _FakeMongoClientWithDatabase(
+            {
+                config.statute_embeddings_collection: statute_coll,
+                config.policy_embeddings_collection: policy_coll,
+            }
+        ),
+        MagicMock(),
+        config,
+        SimpleLRUCache(10, 60),
+    )
+    monkeypatch.setattr(vector_retriever_module, "run_in_thread", _run_sync)
+
+    result = asyncio.run(
+        retriever.retrieve_policy_chunks_for_statute_chunks(
+            database="privacy",
+            policy_document_id="pol-1",
+            applicable_jurisdictions=["CA"],
+        )
+    )
+
+    assert result.statute_chunks_considered == 3
+    assert result.pairs == []
+    policy_coll.aggregate.assert_not_called()
 
 
 def test_statute_policy_compliance_endpoint_delegates_to_v4():
