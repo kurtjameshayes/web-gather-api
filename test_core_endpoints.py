@@ -39,16 +39,24 @@ def mock_clients() -> Dict[str, Any]:
     }
 
 
-def _wire_mongo(mock_mongo: MagicMock) -> None:
+def _wire_mongo(mock_mongo: MagicMock) -> Dict[str, MagicMock]:
     db = MagicMock()
     wg_db = MagicMock()
+    source_coll = MagicMock()
+    documents_coll = MagicMock()
 
     def _get_db(name: str) -> MagicMock:
         return wg_db if name == WEB_GATHER_DB else db
 
     mock_mongo.__getitem__.side_effect = _get_db
-    db.__getitem__.return_value = MagicMock()
-    wg_db.__getitem__.return_value = MagicMock()
+    db.__getitem__.return_value = source_coll
+    wg_db.__getitem__.return_value = documents_coll
+    return {
+        "source_db": db,
+        "wg_db": wg_db,
+        "source_coll": source_coll,
+        "documents_coll": documents_coll,
+    }
 
 
 def test_gather_success(client, mock_clients) -> None:
@@ -93,6 +101,41 @@ def test_ingest_web_success(client, mock_clients) -> None:
     payload = response.get_json()
     assert payload["document_type"] == "web"
     assert payload["pages"] == 1
+
+
+def test_ingest_overwrite_deletes_only_matching_source_url(client, mock_clients) -> None:
+    """Overwrite mode must not clear unrelated documents in the same collection."""
+    dbs = _wire_mongo(mock_clients["mongo"])
+    url = "https://example.com/privacy"
+    dbs["source_coll"].count_documents.return_value = 2
+    mock_clients["firecrawl"].crawl.return_value = [
+        {"url": url, "title": "Privacy", "markdown": "Updated privacy text"}
+    ]
+
+    with patch("core.detect_content_type", return_value=""):
+        response = client.post(
+            "/ingest",
+            json={
+                "url": url,
+                "database": "test_db",
+                "collection": "docs",
+                "mode": "overwrite",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["overwritten"] is True
+    assert payload["previous_document_count"] == 2
+    dbs["source_coll"].count_documents.assert_called_once_with({"source_url": url})
+    dbs["source_coll"].delete_many.assert_called_once_with({"source_url": url})
+    dbs["documents_coll"].delete_many.assert_called_once_with(
+        {
+            "database_name": "test_db",
+            "collection_name": "docs",
+            "source_url": url,
+        }
+    )
 
 
 def test_ingest_pdf_success(client, mock_clients) -> None:
