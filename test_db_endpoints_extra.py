@@ -9,7 +9,14 @@ import pytest
 from bson import ObjectId
 from flask import Flask
 
-from db import DOCUMENTS_COLLECTION, WEB_GATHER_DB, db_bp, init_db
+from db import (
+    DOCUMENTS_COLLECTION,
+    PRIVACY_COMPLIANCE_DB,
+    WEB_GATHER_DB,
+    db_bp,
+    ensure_privacy_compliance_indexes,
+    init_db,
+)
 
 
 @pytest.fixture
@@ -42,6 +49,63 @@ def _wire_mongo(mock_mongo: MagicMock) -> Dict[str, Any]:
     wg_db.__getitem__.return_value = MagicMock()
     user_db.__getitem__.return_value = MagicMock()
     return {"wg_db": wg_db, "user_db": user_db}
+
+
+def test_ensure_privacy_compliance_indexes_creates_unique_indexes() -> None:
+    """Startup index creation should protect every compliance collection from duplicates."""
+    mock_client = MagicMock()
+    mock_db = MagicMock()
+    collections: Dict[str, MagicMock] = {}
+
+    def _get_collection(name: str) -> MagicMock:
+        collections.setdefault(name, MagicMock(name=name))
+        return collections[name]
+
+    mock_client.__getitem__.return_value = mock_db
+    mock_db.__getitem__.side_effect = _get_collection
+
+    ensure_privacy_compliance_indexes(mock_client)
+
+    mock_client.__getitem__.assert_called_once_with(PRIVACY_COMPLIANCE_DB)
+    expected_specs = {
+        "statutes": [("document_id", 1)],
+        "policies": [("document_id", 1)],
+        "statute_chunks": [("document_id", 1), ("chunk_index", 1)],
+        "policy_chunks": [("document_id", 1), ("chunk_index", 1)],
+        "policy_sub_chunks": [("document_id", 1), ("subchunk_id", 1)],
+        "statute_sub_chunks": [("document_id", 1), ("subchunk_id", 1)],
+        "policy_sub_embeddings": [("document_id", 1), ("subchunk_id", 1)],
+        "statute_sub_embeddings": [("document_id", 1), ("subchunk_id", 1)],
+    }
+    assert set(collections) == set(expected_specs)
+    for collection_name, keys in expected_specs.items():
+        collections[collection_name].create_index.assert_called_once_with(
+            keys, unique=True
+        )
+
+
+def test_ensure_privacy_compliance_indexes_continues_after_failure() -> None:
+    """A single index failure should not prevent indexes on later collections."""
+    mock_client = MagicMock()
+    mock_db = MagicMock()
+    failing_collection = MagicMock()
+    succeeding_collection = MagicMock()
+    failing_collection.create_index.side_effect = RuntimeError("index conflict")
+
+    def _get_collection(name: str) -> MagicMock:
+        if name == "statutes":
+            return failing_collection
+        return succeeding_collection
+
+    mock_client.__getitem__.return_value = mock_db
+    mock_db.__getitem__.side_effect = _get_collection
+
+    ensure_privacy_compliance_indexes(mock_client, database_name="compliance_test")
+
+    failing_collection.create_index.assert_called_once_with(
+        [("document_id", 1)], unique=True
+    )
+    assert succeeding_collection.create_index.call_count == 7
 
 
 def test_list_documents_success(client, mock_mongo_client) -> None:
