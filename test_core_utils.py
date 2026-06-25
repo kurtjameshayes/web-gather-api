@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import sys
-from typing import List
+from typing import Any, List
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -12,6 +12,17 @@ import pytest
 sys.modules["sentence_transformers"] = MagicMock()
 
 import core
+
+
+@pytest.fixture
+def isolated_model_cache() -> None:
+    original_cache = dict(core._model_cache)
+    core._model_cache.clear()
+    try:
+        yield
+    finally:
+        core._model_cache.clear()
+        core._model_cache.update(original_cache)
 
 
 def test_calculate_relevance_score_exact_phrase() -> None:
@@ -61,3 +72,38 @@ def test_chunk_text_by_semantic_uses_model() -> None:
         text, chunk_size=50, overlap=10, model=DummyModel()
     )
     assert chunks
+
+
+def test_get_model_rejects_unknown_model_when_cache_full(
+    monkeypatch: Any, isolated_model_cache: None
+) -> None:
+    for idx in range(core._MAX_MODEL_CACHE_SIZE):
+        core._model_cache[f"cached-{idx}"] = object()
+    loader = MagicMock()
+    monkeypatch.setattr(core, "SentenceTransformer", loader)
+
+    with pytest.raises(ValueError, match="not in the allowlist"):
+        core.get_model("untrusted-model-name")
+
+    loader.assert_not_called()
+    assert list(core._model_cache) == [
+        f"cached-{idx}" for idx in range(core._MAX_MODEL_CACHE_SIZE)
+    ]
+
+
+def test_get_model_evicts_oldest_allowed_model_when_cache_full(
+    monkeypatch: Any, isolated_model_cache: None
+) -> None:
+    for idx in range(core._MAX_MODEL_CACHE_SIZE):
+        core._model_cache[f"cached-{idx}"] = object()
+    loaded_model = object()
+    loader = MagicMock(return_value=loaded_model)
+    monkeypatch.setattr(core, "SentenceTransformer", loader)
+
+    result = core.get_model("all-MiniLM-L6-v2")
+
+    assert result is loaded_model
+    loader.assert_called_once_with("all-MiniLM-L6-v2")
+    assert "cached-0" not in core._model_cache
+    assert core._model_cache["all-MiniLM-L6-v2"] is loaded_model
+    assert len(core._model_cache) == core._MAX_MODEL_CACHE_SIZE

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from flask import Flask, jsonify
 
 from cache import SimpleLRUCache
 from compliance_config import load_config
@@ -20,6 +21,7 @@ from compliance_utils import (
 )
 from rate_limiter import RateLimiter
 from redactor import Redactor
+import security
 from security import AuthorizationError, authorize_request
 
 
@@ -61,6 +63,53 @@ def test_authorize_request_role_allowed() -> None:
     config.allowed_roles = ["admin"]
     request = SimpleNamespace(headers={"x-api-key": "secret", "x-role": "admin"})
     authorize_request(config, request)
+
+
+def test_require_api_key_rejects_missing_invalid_and_allows_valid(monkeypatch: Any) -> None:
+    app = Flask(__name__)
+
+    @app.get("/protected")
+    @security.require_api_key
+    def protected():
+        return jsonify({"ok": True})
+
+    monkeypatch.setattr(security, "_app_api_key", "secret")
+    client = app.test_client()
+
+    missing = client.get("/protected")
+    assert missing.status_code == 401
+    assert missing.get_json() == {"error": "Missing API key."}
+
+    invalid = client.get("/protected", headers={"x-api-key": "wrong"})
+    assert invalid.status_code == 403
+    assert invalid.get_json() == {"error": "Invalid API key."}
+
+    valid = client.get("/protected", headers={"x-api-key": "secret"})
+    assert valid.status_code == 200
+    assert valid.get_json() == {"ok": True}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_require_api_key_async_uses_same_app_key_rules(
+    monkeypatch: Any, anyio_backend: str
+) -> None:
+    app = Flask(__name__)
+
+    @security.require_api_key_async
+    async def protected():
+        return jsonify({"ok": True})
+
+    monkeypatch.setattr(security, "_app_api_key", "secret")
+
+    with app.test_request_context("/protected"):
+        response, status = await protected()
+        assert status == 401
+        assert response.get_json() == {"error": "Missing API key."}
+
+    with app.test_request_context("/protected", headers={"x-api-key": "secret"}):
+        response = await protected()
+        assert response.get_json() == {"ok": True}
 
 
 def test_redactor_masks_common_pii() -> None:
