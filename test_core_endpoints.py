@@ -95,6 +95,50 @@ def test_ingest_web_success(client, mock_clients) -> None:
     assert payload["pages"] == 1
 
 
+def test_ingest_overwrite_deletes_only_matching_source_url(client, mock_clients) -> None:
+    url = "https://example.com/privacy"
+    data_db = MagicMock()
+    web_gather_db = MagicMock()
+    documents = MagicMock()
+    metadata = MagicMock()
+
+    def get_db(name: str) -> MagicMock:
+        return web_gather_db if name == WEB_GATHER_DB else data_db
+
+    mock_clients["mongo"].__getitem__.side_effect = get_db
+    data_db.__getitem__.return_value = documents
+    web_gather_db.__getitem__.return_value = metadata
+    documents.count_documents.return_value = 2
+    mock_clients["firecrawl"].crawl.return_value = [
+        {"url": url, "title": "Privacy", "markdown": "Updated privacy policy"}
+    ]
+
+    with patch("core.detect_content_type", return_value="text/html"):
+        response = client.post(
+            "/ingest",
+            json={
+                "url": url,
+                "database": "customer_db",
+                "collection": "policies",
+                "mode": "overwrite",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["overwritten"] is True
+    assert payload["previous_document_count"] == 2
+    documents.count_documents.assert_called_once_with({"source_url": url})
+    documents.delete_many.assert_called_once_with({"source_url": url})
+    metadata.delete_many.assert_called_once_with(
+        {
+            "database_name": "customer_db",
+            "collection_name": "policies",
+            "source_url": url,
+        }
+    )
+
+
 def test_ingest_pdf_success(client, mock_clients) -> None:
     _wire_mongo(mock_clients["mongo"])
     with patch("core.is_pdf_url", return_value=True), patch(
