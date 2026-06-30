@@ -9,6 +9,7 @@ from compliance_config import load_config
 from compliance_job_service import (
     ComplianceJobStorage,
     JOB_STATUS_COMPLETED,
+    JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,
     JOB_STATUS_RUNNING,
     start_gap_analysis_job,
@@ -81,6 +82,31 @@ def test_compliance_job_storage_update_status() -> None:
     assert call_args[1]["$set"]["status"] == JOB_STATUS_COMPLETED
     assert call_args[1]["$set"]["result"] == {"gaps": []}
     assert "completed_at" in call_args[1]["$set"]
+
+
+def test_compliance_job_storage_cleanup_zombie_jobs_marks_pending_and_running_failed() -> None:
+    """Startup cleanup must fail only unfinished jobs and report the modified count."""
+    mock_mongo = MagicMock()
+    mock_coll = MagicMock()
+    mock_coll.update_many.return_value.modified_count = 2
+    mock_mongo.__getitem__.return_value.__getitem__.return_value = mock_coll
+    config = load_config()
+    storage = ComplianceJobStorage(mock_mongo, config)
+
+    with patch("compliance_job_service._iso", return_value="2026-06-30T10:00:00+00:00"):
+        cleaned = storage.cleanup_zombie_jobs()
+
+    assert cleaned == 2
+    mock_coll.update_many.assert_called_once_with(
+        {"status": {"$in": [JOB_STATUS_PENDING, JOB_STATUS_RUNNING]}},
+        {
+            "$set": {
+                "status": JOB_STATUS_FAILED,
+                "error": "Job interrupted by server restart.",
+                "completed_at": "2026-06-30T10:00:00+00:00",
+            }
+        },
+    )
 
 
 def test_index_job_storage_create_and_get() -> None:
