@@ -164,6 +164,58 @@ def test_ingest_invalid_mode(client, mock_clients) -> None:
     assert "mode" in payload["error"]
 
 
+def test_ingest_overwrite_deletes_only_matching_source_url(client, mock_clients) -> None:
+    url = "https://example.com/privacy"
+    db = MagicMock()
+    wg_db = MagicMock()
+    target_collection = MagicMock()
+    documents_collection = MagicMock()
+    target_collection.count_documents.return_value = 2
+
+    def _get_db(name: str) -> MagicMock:
+        return wg_db if name == WEB_GATHER_DB else db
+
+    mock_clients["mongo"].__getitem__.side_effect = _get_db
+    db.__getitem__.return_value = target_collection
+    wg_db.__getitem__.return_value = documents_collection
+    mock_clients["firecrawl"].crawl.return_value = [
+        {"url": url, "title": "Privacy", "markdown": "Policy body"}
+    ]
+
+    with patch("core.detect_content_type", return_value=""), patch(
+        "core.uuid.uuid4", return_value="doc-1"
+    ):
+        response = client.post(
+            "/ingest",
+            json={
+                "url": url,
+                "database": "test_db",
+                "collection": "docs",
+                "mode": "overwrite",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["mode"] == "overwrite"
+    assert payload["overwritten"] is True
+    assert payload["previous_document_count"] == 2
+
+    overwrite_filter = {"source_url": url}
+    target_collection.count_documents.assert_called_once_with(overwrite_filter)
+    target_collection.delete_many.assert_called_once_with(overwrite_filter)
+    documents_collection.delete_many.assert_called_once_with(
+        {
+            "database_name": "test_db",
+            "collection_name": "docs",
+            "source_url": url,
+        }
+    )
+    inserted_doc = target_collection.insert_one.call_args[0][0]
+    assert inserted_doc["_id"] == "doc-1"
+    assert inserted_doc["source_url"] == url
+
+
 def test_crawl_playwright_success(client, mock_clients) -> None:
     """Playwright is tried first; when it succeeds, that method is used."""
     with patch(
