@@ -13,6 +13,7 @@ from compliance_routes_v3 import compliance_v3_bp
 from compliance_routes_v4 import compliance_v4_bp
 from compliance_config import load_config
 from compliance_suite_schemas import GapAnalysisResponse, GapSummary
+from gap_analysis_service_v4 import GapAnalysisServiceV4Error
 
 
 @pytest.fixture
@@ -184,3 +185,53 @@ def test_v4_gap_analysis_async_returns_job_id(mock_config, mock_v4_service, mock
     data = response.get_json()
     assert "job_id" in data
     assert data["status"] == "pending"
+
+
+def test_v4_gap_analysis_async_forces_no_direct_persistence(
+    mock_config, mock_v4_service, mock_job_storage
+) -> None:
+    """Async V4 jobs persist only through job completion, not the direct route request."""
+    mock_suite = MagicMock()
+    mock_suite._storage = MagicMock()
+    with patch.object(compliance_routes, "_config", mock_config), patch(
+        "compliance_routes_v4._get_gap_analysis_v4_service", return_value=mock_v4_service
+    ), patch("compliance_routes_v4._get_job_storage", return_value=mock_job_storage), patch(
+        "compliance_routes_v4._get_suite_service", return_value=mock_suite
+    ), patch("compliance_routes_v4.start_gap_analysis_job", return_value="job-123") as mock_start:
+        app = Flask(__name__)
+        app.register_blueprint(compliance_v4_bp, url_prefix="/api/v4/compliance")
+        client = app.test_client()
+        response = client.post(
+            "/api/v4/compliance/gap-analysis",
+            json={
+                "policy_document_id": "pol-1",
+                "applicable_jurisdictions": ["CA"],
+                "run_async": True,
+                "save_results": True,
+            },
+        )
+
+    assert response.status_code == 202
+    request_dict = mock_start.call_args.args[0]
+    assert "run_async" not in request_dict
+    assert request_dict["save_results"] is False
+
+
+def test_v4_gap_analysis_service_error_returns_declared_status(
+    mock_config, mock_v4_service, mock_job_storage
+) -> None:
+    """V4 service errors should preserve their explicit HTTP status code."""
+    mock_v4_service.run = AsyncMock(side_effect=GapAnalysisServiceV4Error("Policy not indexed", 404))
+    with patch.object(compliance_routes, "_config", mock_config), patch(
+        "compliance_routes_v4._get_gap_analysis_v4_service", return_value=mock_v4_service
+    ), patch("compliance_routes_v4._get_job_storage", return_value=mock_job_storage):
+        app = Flask(__name__)
+        app.register_blueprint(compliance_v4_bp, url_prefix="/api/v4/compliance")
+        client = app.test_client()
+        response = client.post(
+            "/api/v4/compliance/gap-analysis",
+            json={"policy_document_id": "pol-1", "applicable_jurisdictions": ["CA"], "run_async": False},
+        )
+
+    assert response.status_code == 404
+    assert response.get_json()["error"] == "Policy not indexed"

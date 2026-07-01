@@ -32,6 +32,21 @@ def test_openapi_json_returns_valid_spec(client_routes) -> None:
     assert "components" in data
 
 
+def test_openapi_documents_adaptive_feedback_endpoints(client_routes) -> None:
+    """Adaptive-feedback endpoints must stay represented in OpenAPI."""
+    response = client_routes.get("/openapi.json")
+    assert response.status_code == 200
+    paths = response.get_json()["paths"]
+
+    feedback_path = paths["/api/v4/compliance/adaptive-feedback"]["get"]
+    assert feedback_path["summary"] == "List adaptive feedback history"
+    assert any(
+        param["name"] == "policy_document_id" and param.get("required") is True
+        for param in feedback_path["parameters"]
+    )
+    assert "/api/v4/compliance/adaptive-feedback/log" in paths
+
+
 def test_docs_returns_html(client_routes) -> None:
     """GET /docs returns 200 with HTML content."""
     response = client_routes.get("/docs")

@@ -63,6 +63,49 @@ def test_list_documents_success(client, mock_mongo_client) -> None:
     assert payload["documents"][1]["_id"] == str(second_id)
 
 
+def test_list_documents_clamps_pagination(client, mock_mongo_client) -> None:
+    """GET /documents clamps large limits and negative offsets before querying."""
+    dbs = _wire_mongo(mock_mongo_client)
+    cursor_mock = MagicMock()
+    cursor_mock.skip.return_value = cursor_mock
+    cursor_mock.limit.return_value = []
+    dbs["user_db"].__getitem__.return_value.find.return_value = cursor_mock
+
+    response = client.get(
+        "/documents?database_name=test_db&collection_name=test_collection"
+        "&limit=50000&offset=-10"
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["limit"] == 10000
+    assert payload["offset"] == 0
+    cursor_mock.skip.assert_called_once_with(0)
+    cursor_mock.limit.assert_called_once_with(10000)
+
+
+def test_list_documents_accepts_extended_json_object_id(client, mock_mongo_client) -> None:
+    """Extended JSON $oid remains supported while other $ operators are blocked."""
+    dbs = _wire_mongo(mock_mongo_client)
+    oid = ObjectId()
+    cursor_mock = MagicMock()
+    cursor_mock.skip.return_value = cursor_mock
+    cursor_mock.limit.return_value = []
+    dbs["user_db"].__getitem__.return_value.find.return_value = cursor_mock
+
+    response = client.get(
+        "/documents",
+        query_string={
+            "database_name": "test_db",
+            "collection_name": "test_collection",
+            "query": json.dumps({"_id": {"$oid": str(oid)}}),
+        },
+    )
+
+    assert response.status_code == 200
+    dbs["user_db"].__getitem__.return_value.find.assert_called_once_with({"_id": oid})
+
+
 def test_list_documents_invalid_query_json(client, mock_mongo_client) -> None:
     response = client.get(
         "/documents?database_name=test_db&collection_name=test_collection&query={bad}"
@@ -117,6 +160,28 @@ def test_delete_documents_success(client, mock_mongo_client) -> None:
     payload = response.get_json()
     assert payload["deleted_count"] == 3
     dbs["user_db"].__getitem__.return_value.delete_many.assert_called_with(
+        {"status": "inactive"}
+    )
+
+
+def test_delete_documents_accepts_double_encoded_query(client, mock_mongo_client) -> None:
+    """DELETE /documents supports clients that double-encode JSON object queries."""
+    dbs = _wire_mongo(mock_mongo_client)
+    delete_result = MagicMock()
+    delete_result.deleted_count = 1
+    dbs["user_db"].__getitem__.return_value.delete_many.return_value = delete_result
+
+    response = client.delete(
+        "/documents",
+        query_string={
+            "database_name": "test_db",
+            "collection_name": "test_collection",
+            "query": json.dumps(json.dumps({"status": "inactive"})),
+        },
+    )
+
+    assert response.status_code == 200
+    dbs["user_db"].__getitem__.return_value.delete_many.assert_called_once_with(
         {"status": "inactive"}
     )
 
