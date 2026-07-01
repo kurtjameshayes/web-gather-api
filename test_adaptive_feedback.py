@@ -242,6 +242,14 @@ class TestEvaluate:
         assert inserted["policy_document_id"] == "pol-1"
         assert len(inserted["suggestions"]) == 1
         assert inserted["gap_summary_snapshot"]["total_requirements"] == 2
+        coll_mock.update_many.assert_called_once_with(
+            {
+                "policy_document_id": "pol-1",
+                "superseded_by": None,
+                "_id": {"$ne": feedback_id},
+            },
+            {"$set": {"superseded_by": feedback_id}},
+        )
 
     def test_evaluate_disabled(self, critic, mock_config, sample_response):
         mock_config.adaptive_feedback_enabled = False
