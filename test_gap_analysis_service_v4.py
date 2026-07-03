@@ -12,6 +12,15 @@ from compliance_suite_schemas import GapAnalysisRequest
 from gap_analysis_service_v4 import GapAnalysisServiceV4
 
 
+def _run(coro):
+    """Run async service code without mutating pytest's main-thread event loop."""
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
 def _build_service(
     *,
     policy_text: str,
@@ -110,7 +119,7 @@ def test_run_downgrades_addressed_gap_when_policy_quote_is_not_grounded() -> Non
         },
     )
 
-    response = asyncio.run(
+    response = _run(
         service.run(
             GapAnalysisRequest(
                 policy_document_id="pol-1",
@@ -160,7 +169,7 @@ def test_run_injects_active_feedback_and_records_usage_after_persistence() -> No
     )
 
     with patch("uuid.uuid4", return_value="run-123"):
-        response = asyncio.run(
+        response = _run(
             service.run(
                 GapAnalysisRequest(
                     policy_document_id="pol-1",
