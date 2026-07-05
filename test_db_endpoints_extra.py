@@ -9,7 +9,7 @@ import pytest
 from bson import ObjectId
 from flask import Flask
 
-from db import DOCUMENTS_COLLECTION, WEB_GATHER_DB, db_bp, init_db
+from db import DOCUMENTS_COLLECTION, WEB_GATHER_DB, db_bp, init_db, _parse_safe_query
 
 
 @pytest.fixture
@@ -236,3 +236,76 @@ def test_write_to_collection_replace_not_found(client, mock_mongo_client) -> Non
     assert response.status_code == 404
     payload = response.get_json()
     assert "not found" in payload["error"].lower()
+
+
+def test_parse_safe_query_decodes_nested_json_and_extended_oid(app: Flask) -> None:
+    """Double-encoded query JSON and nested $oid values should remain usable."""
+    oid = ObjectId()
+    query = json.dumps(
+        json.dumps(
+            {
+                "_id": {"$oid": str(oid)},
+                "history": [{"source_id": {"$oid": str(oid)}}],
+            }
+        )
+    )
+
+    with app.app_context():
+        mongo_query, error = _parse_safe_query(query)
+
+    assert error is None
+    assert mongo_query == {
+        "_id": oid,
+        "history": [{"source_id": oid}],
+    }
+
+
+def test_parse_safe_query_rejects_non_object_payload(app: Flask) -> None:
+    """Array queries must not reach MongoDB operators that expect a dict filter."""
+    with app.app_context():
+        mongo_query, error = _parse_safe_query(json.dumps([{"status": "active"}]))
+
+    assert mongo_query is None
+    response, status = error
+    assert status == 400
+    assert "JSON object" in response.get_json()["error"]
+
+
+def test_parse_safe_query_rejects_nested_dangerous_operator(app: Flask) -> None:
+    """Dangerous Mongo operators are blocked even when nested below safe keys."""
+    query = json.dumps({"profile": {"age": {"$gt": 18}}})
+
+    with app.app_context():
+        mongo_query, error = _parse_safe_query(query)
+
+    assert mongo_query is None
+    response, status = error
+    assert status == 400
+    error_message = response.get_json()["error"]
+    assert "$gt" in error_message
+    assert "not allowed" in error_message
+
+
+def test_parse_safe_query_requires_oid_to_be_only_key(app: Flask) -> None:
+    query = json.dumps(
+        {"_id": {"$oid": "64b8f7b7b1f1eaf5b2f0c001", "extra": "unexpected"}}
+    )
+
+    with app.app_context():
+        mongo_query, error = _parse_safe_query(query)
+
+    assert mongo_query is None
+    response, status = error
+    assert status == 400
+    assert "$oid must be the only key" in response.get_json()["error"]
+
+
+def test_parse_safe_query_leaves_invalid_oid_unchanged(app: Flask) -> None:
+    """Invalid ObjectId text should not crash query parsing."""
+    query = json.dumps({"_id": {"$oid": "not-an-objectid"}})
+
+    with app.app_context():
+        mongo_query, error = _parse_safe_query(query)
+
+    assert error is None
+    assert mongo_query == {"_id": {"$oid": "not-an-objectid"}}
