@@ -3,10 +3,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from flask import Flask
+
+# Avoid importing optional network/model SDKs for route-level unit tests.
+sys.modules["anthropic"] = MagicMock()
+sys.modules["sentence_transformers"] = MagicMock()
 
 import compliance_routes
 from compliance_routes import compliance_bp
