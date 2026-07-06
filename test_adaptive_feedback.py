@@ -209,6 +209,59 @@ class TestGetActiveFeedback:
 
 
 # ---------------------------------------------------------------------------
+# CriticService audit query helpers
+# ---------------------------------------------------------------------------
+
+class TestFeedbackAuditQueries:
+    def test_get_feedback_history_scopes_active_policy_and_paginates(
+        self, critic, mock_mongo
+    ):
+        coll_mock = MagicMock()
+        cursor_mock = MagicMock()
+        cursor_mock.sort.return_value = cursor_mock
+        cursor_mock.skip.return_value = cursor_mock
+        cursor_mock.limit.return_value = [
+            {"_id": 123, "policy_document_id": "pol-1", "superseded_by": None}
+        ]
+        coll_mock.find.return_value = cursor_mock
+        mock_mongo.__getitem__.return_value.__getitem__.return_value = coll_mock
+
+        result = critic.get_feedback_history(
+            policy_document_id="pol-1",
+            active_only=True,
+            limit=12,
+            offset=7,
+        )
+
+        assert result[0]["_id"] == "123"
+        coll_mock.find.assert_called_once_with(
+            {"policy_document_id": "pol-1", "superseded_by": None}
+        )
+        cursor_mock.sort.assert_called_once_with("created_at", -1)
+        cursor_mock.skip.assert_called_once_with(7)
+        cursor_mock.limit.assert_called_once_with(12)
+
+    def test_get_feedback_log_filters_run_id_and_paginates(self, critic, mock_mongo):
+        coll_mock = MagicMock()
+        cursor_mock = MagicMock()
+        cursor_mock.sort.return_value = cursor_mock
+        cursor_mock.skip.return_value = cursor_mock
+        cursor_mock.limit.return_value = [
+            {"_id": 456, "run_id": "run-1", "feedback_ids_used": ["fb-1"]}
+        ]
+        coll_mock.find.return_value = cursor_mock
+        mock_mongo.__getitem__.return_value.__getitem__.return_value = coll_mock
+
+        result = critic.get_feedback_log(run_id="run-1", limit=9, offset=3)
+
+        assert result[0]["_id"] == "456"
+        coll_mock.find.assert_called_once_with({"run_id": "run-1"})
+        cursor_mock.sort.assert_called_once_with("created_at", -1)
+        cursor_mock.skip.assert_called_once_with(3)
+        cursor_mock.limit.assert_called_once_with(9)
+
+
+# ---------------------------------------------------------------------------
 # CriticService.evaluate (async)
 # ---------------------------------------------------------------------------
 
@@ -342,6 +395,26 @@ class TestAdaptiveFeedbackEndpoints:
             offset=0,
         )
 
+    def test_list_feedback_clamps_pagination(self, client, mock_config):
+        mock_critic = MagicMock()
+        mock_critic.get_feedback_history.return_value = []
+        with patch.object(compliance_routes, "_config", mock_config):
+            with patch.object(compliance_routes, "_critic_service", mock_critic):
+                resp = client.get(
+                    "/api/v4/compliance/adaptive-feedback"
+                    "?policy_document_id=pol-1&active_only=yes&limit=999&offset=-5"
+                )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["limit"] == 200
+        assert data["offset"] == 0
+        mock_critic.get_feedback_history.assert_called_once_with(
+            policy_document_id="pol-1",
+            active_only=True,
+            limit=200,
+            offset=0,
+        )
+
     def test_list_feedback_log(self, client, mock_config):
         mock_critic = MagicMock()
         mock_critic.get_feedback_log.return_value = [
@@ -357,6 +430,22 @@ class TestAdaptiveFeedbackEndpoints:
         assert len(data["log"]) == 1
         mock_critic.get_feedback_log.assert_called_once_with(
             run_id="run-1", limit=50, offset=0,
+        )
+
+    def test_list_feedback_log_clamps_pagination(self, client, mock_config):
+        mock_critic = MagicMock()
+        mock_critic.get_feedback_log.return_value = []
+        with patch.object(compliance_routes, "_config", mock_config):
+            with patch.object(compliance_routes, "_critic_service", mock_critic):
+                resp = client.get(
+                    "/api/v4/compliance/adaptive-feedback/log?limit=0&offset=-2"
+                )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["limit"] == 1
+        assert data["offset"] == 0
+        mock_critic.get_feedback_log.assert_called_once_with(
+            run_id=None, limit=1, offset=0,
         )
 
 
