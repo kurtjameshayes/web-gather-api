@@ -96,6 +96,14 @@ def sample_response():
     )
 
 
+def _run(coro):
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
 # ---------------------------------------------------------------------------
 # CriticService._validate_suggestions
 # ---------------------------------------------------------------------------
@@ -231,9 +239,7 @@ class TestEvaluate:
         })
 
         with patch("adaptive_feedback_service.run_in_thread", side_effect=_sync_run):
-            feedback_id = asyncio.get_event_loop().run_until_complete(
-                critic.evaluate(sample_response, "run-123")
-            )
+            feedback_id = _run(critic.evaluate(sample_response, "run-123"))
 
         assert feedback_id is not None
         coll_mock.insert_one.assert_called_once()
@@ -242,13 +248,19 @@ class TestEvaluate:
         assert inserted["policy_document_id"] == "pol-1"
         assert len(inserted["suggestions"]) == 1
         assert inserted["gap_summary_snapshot"]["total_requirements"] == 2
+        coll_mock.update_many.assert_called_once_with(
+            {
+                "policy_document_id": "pol-1",
+                "superseded_by": None,
+                "_id": {"$ne": feedback_id},
+            },
+            {"$set": {"superseded_by": feedback_id}},
+        )
 
     def test_evaluate_disabled(self, critic, mock_config, sample_response):
         mock_config.adaptive_feedback_enabled = False
         critic._cfg = mock_config
-        result = asyncio.get_event_loop().run_until_complete(
-            critic.evaluate(sample_response, "run-123")
-        )
+        result = _run(critic.evaluate(sample_response, "run-123"))
         assert result is None
 
     def test_evaluate_handles_llm_failure(self, critic, mock_mongo, sample_response):
@@ -257,9 +269,7 @@ class TestEvaluate:
 
         critic._llm._call_json = AsyncMock(return_value=None)
 
-        result = asyncio.get_event_loop().run_until_complete(
-            critic.evaluate(sample_response, "run-123")
-        )
+        result = _run(critic.evaluate(sample_response, "run-123"))
         assert result is None
         coll_mock.insert_one.assert_not_called()
 
@@ -274,7 +284,7 @@ class TestRecordFeedbackUsage:
         mock_mongo.__getitem__.return_value.__getitem__.return_value = coll_mock
 
         with patch("adaptive_feedback_service.run_in_thread", side_effect=_sync_run):
-            asyncio.get_event_loop().run_until_complete(
+            _run(
                 critic.record_feedback_usage(
                     run_id="run-456",
                     feedback_ids=["fb-1", "fb-2"],
