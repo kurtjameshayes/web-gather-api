@@ -9,6 +9,7 @@ import pytest
 from bson import ObjectId
 from flask import Flask
 
+import security
 from db import DOCUMENTS_COLLECTION, WEB_GATHER_DB, db_bp, init_db
 
 
@@ -29,6 +30,15 @@ def mock_mongo_client() -> MagicMock:
     mock_client = MagicMock()
     init_db(mock_client)
     return mock_client
+
+
+@pytest.fixture
+def configured_app_api_key(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("APP_API_KEY", "secret")
+    security.init_app_api_key()
+    yield
+    monkeypatch.delenv("APP_API_KEY", raising=False)
+    security.init_app_api_key()
 
 
 def _wire_mongo(mock_mongo: MagicMock) -> Dict[str, Any]:
@@ -61,6 +71,35 @@ def test_list_documents_success(client, mock_mongo_client) -> None:
     assert len(payload["documents"]) == 2
     assert payload["documents"][0]["_id"] == str(first_id)
     assert payload["documents"][1]["_id"] == str(second_id)
+
+
+def test_list_documents_enforces_configured_app_api_key(
+    client,
+    mock_mongo_client,
+    configured_app_api_key,
+) -> None:
+    url = "/documents?database_name=test_db&collection_name=test_collection"
+
+    response = client.get(url)
+    assert response.status_code == 401
+    assert response.get_json() == {"error": "Missing API key."}
+    mock_mongo_client.__getitem__.assert_not_called()
+
+    response = client.get(url, headers={"x-api-key": "wrong"})
+    assert response.status_code == 403
+    assert response.get_json() == {"error": "Invalid API key."}
+    mock_mongo_client.__getitem__.assert_not_called()
+
+    dbs = _wire_mongo(mock_mongo_client)
+    cursor_mock = MagicMock()
+    cursor_mock.skip.return_value = cursor_mock
+    cursor_mock.limit.return_value = []
+    dbs["user_db"].__getitem__.return_value.find.return_value = cursor_mock
+
+    response = client.get(url, headers={"x-api-key": "secret"})
+    assert response.status_code == 200
+    assert response.get_json()["documents"] == []
+    dbs["user_db"].__getitem__.return_value.find.assert_called_once_with({})
 
 
 def test_list_documents_invalid_query_json(client, mock_mongo_client) -> None:
