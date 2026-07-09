@@ -99,6 +99,40 @@ def test_index_invalid_source_query(client, mock_clients) -> None:
     assert "source_query" in payload["error"]
 
 
+@pytest.mark.parametrize(
+    ("source_query", "operator"),
+    [
+        ({"$where": "this.active == true"}, "$where"),
+        ('{"metadata": {"title": {"$regex": "privacy"}}}', "$regex"),
+    ],
+)
+def test_index_rejects_dangerous_source_query_operators(
+    client,
+    mock_clients,
+    source_query,
+    operator,
+) -> None:
+    dbs = _wire_mongo(mock_clients["mongo"])
+    source_collection = dbs["source_db"].__getitem__.return_value
+
+    response = client.post(
+        "/create-embeddings",
+        json={
+            "source_database_name": "src",
+            "source_collection_name": "docs",
+            "index_database_name": "index_db",
+            "index_collection_name": "chunks",
+            "source_query": source_query,
+        },
+    )
+
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert operator in payload["error"]
+    source_collection.find.assert_not_called()
+    mock_clients["mongo"].__getitem__.assert_not_called()
+
+
 def test_index_applies_source_query(client, mock_clients) -> None:
     dbs = _wire_mongo(mock_clients["mongo"])
     source_collection = dbs["source_db"].__getitem__.return_value
