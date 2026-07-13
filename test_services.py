@@ -1,18 +1,21 @@
 """Unit tests for compliance_job_service, index_job_service, embedder."""
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
 from compliance_config import load_config
 from compliance_job_service import (
     ComplianceJobStorage,
+    JOB_STATUS_FAILED,
     JOB_STATUS_COMPLETED,
     JOB_STATUS_PENDING,
     JOB_STATUS_RUNNING,
+    build_gap_analysis_graph,
     start_gap_analysis_job,
 )
+from compliance_suite_schemas import GapAnalysisResponse, GapSummary
 from index_job_service import IndexJobStorage, JOB_STATUS_PENDING
 
 
@@ -81,6 +84,111 @@ def test_compliance_job_storage_update_status() -> None:
     assert call_args[1]["$set"]["status"] == JOB_STATUS_COMPLETED
     assert call_args[1]["$set"]["result"] == {"gaps": []}
     assert "completed_at" in call_args[1]["$set"]
+
+
+def test_compliance_job_storage_cleanup_zombie_jobs() -> None:
+    """Pending/running jobs are failed on startup so pollers do not wait forever."""
+    mock_mongo = MagicMock()
+    mock_coll = MagicMock()
+    mock_coll.update_many.return_value = MagicMock(modified_count=2)
+    mock_mongo.__getitem__.return_value.__getitem__.return_value = mock_coll
+    config = load_config()
+    storage = ComplianceJobStorage(mock_mongo, config)
+
+    assert storage.cleanup_zombie_jobs() == 2
+
+    mock_coll.update_many.assert_called_once()
+    query, update = mock_coll.update_many.call_args[0]
+    assert query == {"status": {"$in": [JOB_STATUS_PENDING, JOB_STATUS_RUNNING]}}
+    assert update["$set"]["status"] == JOB_STATUS_FAILED
+    assert update["$set"]["error"] == "Job interrupted by server restart."
+    assert "completed_at" in update["$set"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_gap_analysis_graph_completes_and_persists_result(anyio_backend: str) -> None:
+    """A successful background gap-analysis job writes results before completing."""
+    response = GapAnalysisResponse(
+        policy_document_id="pol-1",
+        company_name="Example Co",
+        applicable_jurisdictions=["CA"],
+        analyzed_at="2026-07-13T10:00:00+00:00",
+        gaps=[],
+        summary=GapSummary(total_requirements=0),
+        statute_chunk_ids_used=["statute-chunk-1"],
+        run_types=["gap_v4"],
+        run_type="gap_analysis_v4",
+        version="v4",
+    )
+    run_gap_analysis = AsyncMock(return_value=response)
+    job_storage = MagicMock()
+    compliance_storage = MagicMock()
+    compliance_storage.write_compliance_result = AsyncMock()
+    compliance_storage.write_compliance_run_log = AsyncMock()
+    graph = build_gap_analysis_graph(run_gap_analysis, job_storage, compliance_storage)
+
+    result = await graph.ainvoke({
+        "job_id": "job-1",
+        "job_type": "gap_analysis",
+        "status": JOB_STATUS_PENDING,
+        "request": {
+            "policy_document_id": "pol-1",
+            "company_name": "Example Co",
+            "applicable_jurisdictions": ["CA"],
+        },
+    })
+
+    result_dict = response.model_dump()
+    assert result["status"] == JOB_STATUS_COMPLETED
+    assert result["result"] == result_dict
+    run_gap_analysis.assert_awaited_once()
+    assert run_gap_analysis.await_args.args[0].policy_document_id == "pol-1"
+    compliance_storage.write_compliance_result.assert_awaited_once()
+    persisted_doc = compliance_storage.write_compliance_result.await_args.args[0]
+    assert persisted_doc["policy_document_id"] == "pol-1"
+    assert persisted_doc["run_types"] == ["gap_v4"]
+    assert persisted_doc["run_type"] == "gap_analysis_v4"
+    assert persisted_doc["version"] == "v4"
+    compliance_storage.write_compliance_run_log.assert_awaited_once()
+    log_doc = compliance_storage.write_compliance_run_log.await_args.args[0]
+    assert log_doc["statute_chunk_ids_used"] == ["statute-chunk-1"]
+    assert log_doc["run_type"] == "gap_analysis_v4"
+    job_storage.update_job_status.assert_has_calls([
+        call("job-1", JOB_STATUS_RUNNING),
+        call("job-1", JOB_STATUS_COMPLETED, result=result_dict),
+    ])
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_gap_analysis_graph_marks_failed_without_partial_persistence(anyio_backend: str) -> None:
+    """Service failures fail the job and avoid writing incomplete compliance results."""
+    run_gap_analysis = AsyncMock(side_effect=RuntimeError("LLM unavailable"))
+    job_storage = MagicMock()
+    compliance_storage = MagicMock()
+    compliance_storage.write_compliance_result = AsyncMock()
+    compliance_storage.write_compliance_run_log = AsyncMock()
+    graph = build_gap_analysis_graph(run_gap_analysis, job_storage, compliance_storage)
+
+    result = await graph.ainvoke({
+        "job_id": "job-1",
+        "job_type": "gap_analysis",
+        "status": JOB_STATUS_PENDING,
+        "request": {
+            "policy_document_id": "pol-1",
+            "applicable_jurisdictions": ["CA"],
+        },
+    })
+
+    assert result["status"] == JOB_STATUS_FAILED
+    assert result["error"] == "LLM unavailable"
+    compliance_storage.write_compliance_result.assert_not_awaited()
+    compliance_storage.write_compliance_run_log.assert_not_awaited()
+    job_storage.update_job_status.assert_has_calls([
+        call("job-1", JOB_STATUS_RUNNING),
+        call("job-1", JOB_STATUS_FAILED, error="LLM unavailable"),
+    ])
 
 
 def test_index_job_storage_create_and_get() -> None:
