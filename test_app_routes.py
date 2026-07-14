@@ -1,8 +1,34 @@
 """Tests for app root, 404 handler, and routes blueprint (openapi.json, docs)."""
 from __future__ import annotations
 
+import importlib
+import sys
+from unittest.mock import MagicMock
+
 import pytest
 from flask import Flask
+
+
+@pytest.fixture
+def app_module(monkeypatch):
+    """Import the real app with external clients replaced by deterministic mocks."""
+    import anthropic
+    import firecrawl
+    import pymongo
+
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "test-firecrawl-key")
+    monkeypatch.setenv("MONGODB_URI", "mongodb://localhost:27017")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+
+    mongo_client = MagicMock()
+    monkeypatch.setattr(pymongo, "MongoClient", MagicMock(return_value=mongo_client))
+    monkeypatch.setattr(firecrawl, "FirecrawlApp", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr(anthropic, "Anthropic", MagicMock(return_value=MagicMock()))
+
+    sys.modules.pop("app", None)
+    module = importlib.import_module("app")
+    yield module
+    sys.modules.pop("app", None)
 
 
 @pytest.fixture
@@ -97,3 +123,46 @@ def test_404_api_returns_json(client_full) -> None:
     assert response.status_code == 404
     data = response.get_json()
     assert "error" in data
+
+
+def test_health_reports_ok_when_database_ping_succeeds(app_module) -> None:
+    """A successful MongoDB ping keeps the service ready for traffic."""
+    app_module.mongo_client.admin.command.return_value = {"ok": 1}
+
+    response = app_module.app.test_client().get("/health")
+
+    assert response.status_code == 200
+    assert response.get_json() == {"status": "ok", "database": "ok"}
+    app_module.mongo_client.admin.command.assert_called_once_with("ping")
+
+
+def test_health_reports_degraded_when_database_ping_fails(app_module) -> None:
+    """Database failure must make the load-balancer health check fail closed."""
+    app_module.mongo_client.admin.command.side_effect = RuntimeError("database unavailable")
+
+    response = app_module.app.test_client().get("/health")
+
+    assert response.status_code == 503
+    assert response.get_json() == {"status": "degraded", "database": "error"}
+
+
+def test_safe_log_body_redacts_secrets_and_truncates_large_payloads(app_module) -> None:
+    """Request logging must not expose credentials or unbounded payloads."""
+    redacted = app_module._safe_log_body(
+        {
+            "username": "alice",
+            "Password": "do-not-log",
+            "authorization_token": "also-secret",
+        }
+    )
+
+    assert redacted == {
+        "username": "alice",
+        "Password": "[REDACTED]",
+        "authorization_token": "[REDACTED]",
+    }
+
+    truncated = app_module._safe_log_body({"content": "x" * 1000})
+    assert isinstance(truncated, str)
+    assert truncated.endswith("... [truncated]")
+    assert len(truncated) == app_module._LOG_BODY_MAX_LEN + len("... [truncated]")
