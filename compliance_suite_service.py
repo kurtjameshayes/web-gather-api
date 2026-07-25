@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import uuid
 from datetime import datetime, timezone
@@ -59,6 +60,8 @@ from compliance_suite_schemas import (
     HealthScoreRequest,
     MultiJurisdictionalRequest,
 )
+
+logger = logging.getLogger("policy-compliance")
 
 
 def _iso(dt: Optional[datetime] = None) -> str:
