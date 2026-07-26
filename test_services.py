@@ -1,7 +1,7 @@
 """Unit tests for compliance_job_service, index_job_service, embedder."""
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -9,10 +9,13 @@ from compliance_config import load_config
 from compliance_job_service import (
     ComplianceJobStorage,
     JOB_STATUS_COMPLETED,
+    JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,
     JOB_STATUS_RUNNING,
+    build_health_score_graph,
     start_gap_analysis_job,
 )
+from compliance_suite_schemas import HealthScoreResponse
 from index_job_service import IndexJobStorage, JOB_STATUS_PENDING
 
 
@@ -81,6 +84,114 @@ def test_compliance_job_storage_update_status() -> None:
     assert call_args[1]["$set"]["status"] == JOB_STATUS_COMPLETED
     assert call_args[1]["$set"]["result"] == {"gaps": []}
     assert "completed_at" in call_args[1]["$set"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_health_score_graph_persists_result_on_success(anyio_backend: str) -> None:
+    """Successful health-score jobs write compliance_results before completing."""
+    response = HealthScoreResponse(
+        policy_document_id="pol-1",
+        company_name="Example Co",
+        privacy_health_score=91,
+        score_assessment="Good",
+        score_breakdown={"by_jurisdiction": {"CA": 91}},
+        components={"addressed": 9, "missing": 1},
+        analyzed_at="2026-07-26T10:00:00+00:00",
+    )
+    run_health_score = AsyncMock(return_value=response)
+    job_storage = MagicMock()
+    compliance_storage = MagicMock()
+    compliance_storage.write_compliance_result = AsyncMock()
+    graph = build_health_score_graph(run_health_score, job_storage, compliance_storage)
+
+    result = await graph.ainvoke({
+        "job_id": "job-hs-1",
+        "job_type": "health_score",
+        "status": JOB_STATUS_PENDING,
+        "request": {
+            "policy_document_id": "pol-1",
+            "applicable_jurisdictions": ["CA"],
+        },
+    })
+
+    result_dict = response.model_dump()
+    assert result["status"] == JOB_STATUS_COMPLETED
+    assert result["result"] == result_dict
+    run_health_score.assert_awaited_once()
+    assert run_health_score.await_args.args[0].policy_document_id == "pol-1"
+    compliance_storage.write_compliance_result.assert_awaited_once()
+    persisted = compliance_storage.write_compliance_result.await_args.args[0]
+    assert persisted["policy_document_id"] == "pol-1"
+    assert persisted["privacy_health_score"] == 91
+    assert persisted["run_types"] == ["health_score"]
+    assert persisted["score_assessment"] == "Good"
+    job_storage.update_job_status.assert_has_calls([
+        call("job-hs-1", JOB_STATUS_RUNNING),
+        call("job-hs-1", JOB_STATUS_COMPLETED, result=result_dict),
+    ])
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_health_score_graph_fails_without_partial_persistence(
+    anyio_backend: str,
+) -> None:
+    """Health-score failures mark the job failed and skip compliance_results writes."""
+    run_health_score = AsyncMock(side_effect=RuntimeError("score unavailable"))
+    job_storage = MagicMock()
+    compliance_storage = MagicMock()
+    compliance_storage.write_compliance_result = AsyncMock()
+    graph = build_health_score_graph(run_health_score, job_storage, compliance_storage)
+
+    result = await graph.ainvoke({
+        "job_id": "job-hs-2",
+        "job_type": "health_score",
+        "status": JOB_STATUS_PENDING,
+        "request": {"policy_document_id": "pol-1"},
+    })
+
+    assert result["status"] == JOB_STATUS_FAILED
+    assert result["error"] == "score unavailable"
+    compliance_storage.write_compliance_result.assert_not_awaited()
+    job_storage.update_job_status.assert_has_calls([
+        call("job-hs-2", JOB_STATUS_RUNNING),
+        call("job-hs-2", JOB_STATUS_FAILED, error="score unavailable"),
+    ])
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_health_score_graph_completes_when_result_write_fails(
+    anyio_backend: str,
+) -> None:
+    """Persistence failures must not fail an otherwise successful health-score job."""
+    response = HealthScoreResponse(
+        policy_document_id="pol-1",
+        privacy_health_score=70,
+        analyzed_at="2026-07-26T10:00:00+00:00",
+    )
+    run_health_score = AsyncMock(return_value=response)
+    job_storage = MagicMock()
+    compliance_storage = MagicMock()
+    compliance_storage.write_compliance_result = AsyncMock(
+        side_effect=RuntimeError("mongo down")
+    )
+    graph = build_health_score_graph(run_health_score, job_storage, compliance_storage)
+
+    result = await graph.ainvoke({
+        "job_id": "job-hs-3",
+        "job_type": "health_score",
+        "status": JOB_STATUS_PENDING,
+        "request": {"policy_document_id": "pol-1"},
+    })
+
+    assert result["status"] == JOB_STATUS_COMPLETED
+    assert result["result"]["privacy_health_score"] == 70
+    job_storage.update_job_status.assert_has_calls([
+        call("job-hs-3", JOB_STATUS_RUNNING),
+        call("job-hs-3", JOB_STATUS_COMPLETED, result=response.model_dump()),
+    ])
 
 
 def test_index_job_storage_create_and_get() -> None:
