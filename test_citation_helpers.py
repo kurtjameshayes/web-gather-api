@@ -1,6 +1,12 @@
 """Regression tests for citation-binding helpers used by gap analysis."""
 from __future__ import annotations
 
+import sys
+from unittest.mock import MagicMock
+
+# llm_client imports anthropic at module load; stub for lightweight unit tests.
+sys.modules.setdefault("anthropic", MagicMock())
+
 from compliance_suite_service import (
     _citation_binding,
     _looks_like_section_citation,

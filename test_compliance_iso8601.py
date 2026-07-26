@@ -1,6 +1,12 @@
 """Regression tests for compliance route ISO8601 query parsing."""
 from __future__ import annotations
 
+import sys
+from unittest.mock import MagicMock
+
+# Route imports pull in llm_client, which requires anthropic at import time.
+sys.modules.setdefault("anthropic", MagicMock())
+
 from compliance_routes import _parse_iso8601
 
 
