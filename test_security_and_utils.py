@@ -16,6 +16,7 @@ from compliance_utils import (
     normalize_jurisdiction,
     safe_truncate,
     slugify,
+    truncate_at_sentence,
     validate_collection_name,
 )
 from rate_limiter import RateLimiter
@@ -116,3 +117,15 @@ def test_compliance_utils_helpers() -> None:
     assert extract_json_block("x {\"a\":1} y") == '{"a":1}'
     assert validate_collection_name("valid_name-1") is True
     assert validate_collection_name("bad name") is False
+
+
+def test_truncate_at_sentence_boundaries_and_edge_cases() -> None:
+    """Truncate on last . ! or ? before max_chars; fall back without a boundary."""
+    text = "First sentence. Second sentence! Third question? Trailing text continues."
+    assert truncate_at_sentence(text, 40) == "First sentence. Second sentence!"
+    assert truncate_at_sentence(text, 55) == "First sentence. Second sentence! Third question?"
+    assert truncate_at_sentence("No terminator here at all", 10) == "No termina"
+    assert truncate_at_sentence("Short.", 100) == "Short."
+    assert truncate_at_sentence("", 50) == ""
+    assert truncate_at_sentence("Hello world.", 0) == "Hello world."
+    assert truncate_at_sentence(None, 20) == ""  # type: ignore[arg-type]
