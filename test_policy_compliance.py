@@ -34,6 +34,23 @@ def test_segmenter_splits_on_headings():
     assert "We keep data" in sections[0].section_text
 
 
+def test_segmenter_uses_existing_sections_and_splits_long_text():
+    segmenter = PolicySegmenter(max_section_chars=20)
+    sections = segmenter.segment(
+        "",
+        existing_sections=[
+            {"section_id": "retention", "section_text": "Keep data only as long as needed for service."},
+            {"title": "Empty", "text": "   "},
+            {"title": "Security Controls", "text": "Encrypt at rest."},
+        ],
+    )
+    assert sections
+    assert sections[0].section_id.startswith("retention")
+    assert all(len(section.section_text) <= 20 for section in sections)
+    assert any(section.section_id.startswith("security_controls") for section in sections)
+    assert segmenter.segment("   ") == []
+
+
 def test_build_prompt_uses_template():
     candidate = StatuteCandidate(
         statute_id="stat-1",
