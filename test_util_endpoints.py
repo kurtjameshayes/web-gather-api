@@ -134,6 +134,116 @@ def test_post_embedding_models_invalid_fields() -> None:
     assert "fields" in response.get_json()["error"]
 
 
+def test_validate_embedding_model_document_rejects_non_vector_and_non_cosine() -> None:
+    """Embedding model docs must use type=vector and cosine similarity only."""
+    from util import _validate_embedding_model_document
+
+    base = {
+        "database_name": "db",
+        "model_name": "all-MiniLM-L6-v2",
+        "fields": [
+            {
+                "type": "vector",
+                "path": "embedding",
+                "numDimensions": 384,
+                "similarity": "cosine",
+            }
+        ],
+    }
+    ok, err = _validate_embedding_model_document(base)
+    assert err is None
+    assert ok is base
+
+    bad_type = {
+        **base,
+        "fields": [
+            {
+                "type": "filter",
+                "path": "embedding",
+                "numDimensions": 384,
+                "similarity": "cosine",
+            }
+        ],
+    }
+    doc, err = _validate_embedding_model_document(bad_type)
+    assert doc is None
+    assert err is not None
+    assert 'type must be exactly "vector"' in err
+
+    for similarity in ("euclidean", "dotProduct", "DotProduct"):
+        bad_sim = {
+            **base,
+            "fields": [
+                {
+                    "type": "vector",
+                    "path": "embedding",
+                    "numDimensions": 384,
+                    "similarity": similarity,
+                }
+            ],
+        }
+        doc, err = _validate_embedding_model_document(bad_sim)
+        assert doc is None
+        assert err is not None
+        assert "cosine" in err
+
+
+def test_validate_embedding_model_document_rejects_malformed_field_entries() -> None:
+    """Field entries need object shape, non-empty path, and numeric dimensions."""
+    from util import _validate_embedding_model_document
+
+    doc, err = _validate_embedding_model_document("not-an-object")
+    assert doc is None
+    assert err == "Request body must be a JSON object"
+
+    doc, err = _validate_embedding_model_document(
+        {
+            "database_name": "db",
+            "model_name": "m",
+            "fields": ["embedding"],
+        }
+    )
+    assert doc is None
+    assert err is not None
+    assert "fields[0] must be an object" in err
+
+    doc, err = _validate_embedding_model_document(
+        {
+            "database_name": "db",
+            "model_name": "m",
+            "fields": [
+                {
+                    "type": "vector",
+                    "path": "   ",
+                    "numDimensions": 384,
+                    "similarity": "cosine",
+                }
+            ],
+        }
+    )
+    assert doc is None
+    assert err is not None
+    assert "path must be a non-empty string" in err
+
+    doc, err = _validate_embedding_model_document(
+        {
+            "database_name": "db",
+            "model_name": "m",
+            "fields": [
+                {
+                    "type": "vector",
+                    "path": "embedding",
+                    "numDimensions": "384",
+                    "similarity": "cosine",
+                }
+            ],
+        }
+    )
+    assert doc is None
+    assert err is not None
+    assert "numDimensions must be a number" in err
+
+
 def test_create_vector_index_missing_database_name() -> None:
     """POST /create-vector-index without database_name returns 400."""
     from util import init_util
