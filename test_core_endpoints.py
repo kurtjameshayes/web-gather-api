@@ -281,3 +281,77 @@ def test_gap_check_success(client, mock_clients) -> None:
     assert "gap_check" in payload
     assert payload["gap_check"]["addressed"] is True
     assert payload["gap_check"]["policy_quote"] == "5 years"
+
+
+def test_gap_check_retries_when_first_response_unparseable(client, mock_clients) -> None:
+    """POST /gap-check retries with a stricter prompt when the first LLM JSON parse fails."""
+    with patch("core._fetch_document_text") as mock_fetch:
+        mock_fetch.side_effect = [
+            ("Statute text: disclosure required.", None),
+            ("Policy text: we disclose categories of data.", None),
+        ]
+        bad = MagicMock()
+        bad_block = MagicMock()
+        bad_block.type = "text"
+        bad_block.text = "sorry, I cannot comply"
+        bad.content = [bad_block]
+
+        good = MagicMock()
+        good_block = MagicMock()
+        good_block.type = "text"
+        good_block.text = (
+            '{"addressed": true, "policy_quote": "we disclose categories of data", '
+            '"missing": false, "conflict": false, "conflict_description": null}'
+        )
+        good.content = [good_block]
+        mock_clients["anthropic"].messages.create.side_effect = [bad, good]
+
+        response = client.post(
+            "/gap-check",
+            json={
+                "policy_database_name": "pdb",
+                "policy_collection_name": "policies",
+                "policy_document_id": "pol-1",
+                "statute_database_name": "sdb",
+                "statute_collection_name": "statutes",
+                "statute_document_id": "stat-1",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["gap_check"]["addressed"] is True
+    assert mock_clients["anthropic"].messages.create.call_count == 2
+    retry_messages = mock_clients["anthropic"].messages.create.call_args_list[1].kwargs["messages"]
+    assert "ONLY a valid JSON object" in retry_messages[0]["content"]
+
+
+def test_gap_check_returns_500_when_retry_also_unparseable(client, mock_clients) -> None:
+    """POST /gap-check returns 500 when both LLM responses cannot be parsed as JSON."""
+    with patch("core._fetch_document_text") as mock_fetch:
+        mock_fetch.side_effect = [
+            ("Statute text: disclosure required.", None),
+            ("Policy text: we disclose categories of data.", None),
+        ]
+        unusable = MagicMock()
+        block = MagicMock()
+        block.type = "text"
+        block.text = "still not json"
+        unusable.content = [block]
+        mock_clients["anthropic"].messages.create.return_value = unusable
+
+        response = client.post(
+            "/gap-check",
+            json={
+                "policy_database_name": "pdb",
+                "policy_collection_name": "policies",
+                "policy_document_id": "pol-1",
+                "statute_database_name": "sdb",
+                "statute_collection_name": "statutes",
+                "statute_document_id": "stat-1",
+            },
+        )
+
+    assert response.status_code == 500
+    assert "parse" in response.get_json()["error"].lower()
+    assert mock_clients["anthropic"].messages.create.call_count == 2
