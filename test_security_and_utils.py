@@ -71,6 +71,25 @@ def test_redactor_masks_common_pii() -> None:
     assert result.redaction_count >= 2
 
 
+def test_redactor_masks_ssn_and_card_numbers() -> None:
+    """SSN and payment-card patterns must be redacted before logging or LLM prompts."""
+    redactor = Redactor()
+    result = redactor.redact(
+        "SSN 123-45-6789 and card 4111 1111 1111 1111 should never leave the boundary."
+    )
+    assert "[REDACTED_SSN]" in result.redacted_text
+    assert "[REDACTED_CARD]" in result.redacted_text
+    assert "123-45-6789" not in result.redacted_text
+    assert "4111 1111 1111 1111" not in result.redacted_text
+    assert result.redaction_count >= 2
+
+
+def test_redactor_empty_text_is_noop() -> None:
+    result = Redactor().redact("")
+    assert result.redacted_text == ""
+    assert result.redaction_count == 0
+
+
 def test_cache_eviction_and_expiry(monkeypatch: Any) -> None:
     now = 1000.0
 
