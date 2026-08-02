@@ -4,9 +4,25 @@ from __future__ import annotations
 import pytest
 from unittest.mock import MagicMock, patch
 
+from bson import ObjectId
 from flask import Flask
 
-from db import db_bp, init_db
+from db import _serialize_doc, db_bp, init_db
+
+
+def test_serialize_doc_stringifies_object_id() -> None:
+    """API responses must stringify Mongo _id values for JSON safety."""
+    oid = ObjectId()
+    doc = {"_id": oid, "name": "policy"}
+    _serialize_doc(doc)
+    assert doc["_id"] == str(oid)
+    assert doc["name"] == "policy"
+
+
+def test_serialize_doc_ignores_missing_id() -> None:
+    doc = {"name": "policy"}
+    _serialize_doc(doc)
+    assert doc == {"name": "policy"}
 
 
 @pytest.fixture
