@@ -99,39 +99,163 @@ def test_create_statute_subsections_missing_params(client, mock_clients) -> None
     assert "Missing required parameters" in response.get_json()["error"]
 
 
-def test_create_statute_subsections_success(client, mock_clients) -> None:
-    """POST /create-statute-subsections with LLM mock succeeds."""
+def _llm_text_response(text: str) -> MagicMock:
+    """Build an Anthropic-like messages.create response with one text block."""
+    mock_response = MagicMock()
+    block = MagicMock()
+    block.type = "text"
+    block.text = text
+    mock_response.content = [block]
+    return mock_response
+
+
+def test_create_statute_subsections_success_extracts_line_ranges_and_metadata(
+    client, mock_clients
+) -> None:
+    """Statute subsections should use line ranges, prepend chunk headers, and persist metadata."""
     dbs = _wire_mongo_core(mock_clients["mongo"])
-    source_coll = dbs["source_db"].__getitem__.return_value
-    dest_coll = dbs["source_db"].__getitem__.return_value
-    source_coll.find.return_value = [
-        {"_id": "1", "chunk_text": "(a) First section. (b) Second section."},
+    coll = dbs["source_db"].__getitem__.return_value
+    deleted = MagicMock()
+    deleted.deleted_count = 2
+    coll.delete_many.return_value = deleted
+    coll.find.return_value = [
+        {
+            "_id": "src-1",
+            "document_id": "stat-1",
+            "chunk_text": (
+                "# 1798.105. Right to Delete\n"
+                "(a) A consumer may request deletion.\n"
+                "(b) A business shall comply within 45 days."
+            ),
+        },
     ]
 
-    mock_response = MagicMock()
-    mock_response.content = []
-    for block in [
-        {"type": "text", "text": '{"subsections":[{"header_text":"A","identifier":"(a)","start_line":1,"end_line":2},{"header_text":"B","identifier":"(b)","start_line":3,"end_line":4}]}'},
-    ]:
-        b = MagicMock()
-        b.type = block["type"]
-        b.text = block.get("text", "")
-        mock_response.content.append(b)
+    mock_clients["anthropic"].messages.create.return_value = _llm_text_response(
+        '{"subsections":['
+        '{"header_text":"Right to request deletion","identifier":"(a)",'
+        '"category":"consumer_rights","category_reasoning":"Creates a consumer right.",'
+        '"start_line":2,"end_line":2},'
+        '{"header_text":"Business duty","identifier":"(b)",'
+        '"category":"controller_duties","start_line":3,"end_line":3}'
+        "]}"
+    )
 
-    mock_clients["anthropic"].messages.create.return_value = mock_response
+    response = client.post(
+        "/create-statute-subsections",
+        json={
+            "database": "privacy-compliance",
+            "source_collection": "statute_chunks",
+            "destination_collection": "statute_sub_chunks",
+            "column": "chunk_text",
+            "subsection_column": "sub_chunk_text",
+            "source_query": {"document_id": "stat-1"},
+            "parse_prompt": "Keep nested numeric markers together.",
+        },
+    )
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["records_inserted"] == 2
+    assert data["source_rows_processed"] == 1
+    assert data["source_rows_skipped"] == 0
+    assert data["llm_errors"] == 0
+
+    coll.find.assert_called_once_with({"document_id": "stat-1"})
+    coll.delete_many.assert_called_once_with({"document_id": "stat-1"})
+    assert coll.insert_one.call_count == 2
+
+    first = coll.insert_one.call_args_list[0].args[0]
+    second = coll.insert_one.call_args_list[1].args[0]
+    assert first["subsection_identifier"] == "(a)"
+    assert first["header_text"] == "Right to request deletion"
+    assert first["category"] == "consumer_rights"
+    assert first["category_reasoning"] == "Creates a consumer right."
+    assert first["source_id"] == "src-1"
+    assert first["document_id"] == "stat-1"
+    assert first["sub_chunk_text"].startswith("# 1798.105. Right to Delete")
+    assert "(a) A consumer may request deletion." in first["sub_chunk_text"]
+    assert second["subsection_identifier"] == "(b)"
+    assert second["category"] == "controller_duties"
+    assert "(b) A business shall comply within 45 days." in second["sub_chunk_text"]
+
+    prompt = mock_clients["anthropic"].messages.create.call_args.kwargs["messages"][0]["content"]
+    assert "Additional parsing instructions:" in prompt
+    assert "Keep nested numeric markers together." in prompt
+    assert "1: # 1798.105. Right to Delete" in prompt
+
+
+def test_create_statute_subsections_llm_failure_counts_error_without_failing_request(
+    client, mock_clients
+) -> None:
+    """LLM failures for a source row should increment llm_errors and still return 200."""
+    dbs = _wire_mongo_core(mock_clients["mongo"])
+    coll = dbs["source_db"].__getitem__.return_value
+    coll.delete_many.return_value = MagicMock(deleted_count=0)
+    coll.find.return_value = [
+        {"_id": "1", "chunk_text": "(a) A consumer may request deletion."},
+        {"_id": "2", "chunk_text": "   "},
+    ]
+    mock_clients["anthropic"].messages.create.side_effect = RuntimeError("anthropic down")
 
     response = client.post(
         "/create-statute-subsections",
         json={
             "database": "db",
             "source_collection": "statute_chunks",
-            "destination_collection": "statute_subchunks",
+            "destination_collection": "statute_sub_chunks",
             "column": "chunk_text",
-            "subsection_column": "subchunk_text",
+            "subsection_column": "sub_chunk_text",
         },
     )
-    # May succeed or fail depending on LLM response parsing
-    assert response.status_code in (200, 500)
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["records_inserted"] == 0
+    assert data["llm_errors"] == 1
+    assert data["source_rows_skipped"] == 2
+    assert data["source_rows_processed"] == 0
+    coll.insert_one.assert_not_called()
+
+
+def test_create_statute_subsections_invalid_json_and_source_query(
+    client, mock_clients
+) -> None:
+    """Invalid source_query JSON is 400; unparseable LLM JSON increments llm_errors."""
+    bad_query = client.post(
+        "/create-statute-subsections",
+        json={
+            "database": "db",
+            "source_collection": "statute_chunks",
+            "destination_collection": "statute_sub_chunks",
+            "column": "chunk_text",
+            "subsection_column": "sub_chunk_text",
+            "source_query": "{bad",
+        },
+    )
+    assert bad_query.status_code == 400
+    assert "source_query" in bad_query.get_json()["error"]
+
+    dbs = _wire_mongo_core(mock_clients["mongo"])
+    coll = dbs["source_db"].__getitem__.return_value
+    coll.delete_many.return_value = MagicMock(deleted_count=0)
+    coll.find.return_value = [{"_id": "1", "chunk_text": "(a) Text."}]
+    mock_clients["anthropic"].messages.create.return_value = _llm_text_response(
+        "Sorry, I cannot comply."
+    )
+
+    response = client.post(
+        "/create-statute-subsections",
+        json={
+            "database": "db",
+            "source_collection": "statute_chunks",
+            "destination_collection": "statute_sub_chunks",
+            "column": "chunk_text",
+            "subsection_column": "sub_chunk_text",
+        },
+    )
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["llm_errors"] == 1
+    assert data["records_inserted"] == 0
+    coll.insert_one.assert_not_called()
 
 
 def test_create_statute_subtopics_missing_params(client, mock_clients) -> None:
@@ -142,6 +266,95 @@ def test_create_statute_subtopics_missing_params(client, mock_clients) -> None:
     )
     assert response.status_code == 400
     assert "Missing required parameters" in response.get_json()["error"]
+
+
+def test_create_statute_subtopics_success_uses_fallback_column_and_metadata(
+    client, mock_clients
+) -> None:
+    """Subtopics should fall back to alternate text columns and persist LLM metadata."""
+    dbs = _wire_mongo_core(mock_clients["mongo"])
+    coll = dbs["source_db"].__getitem__.return_value
+    coll.delete_many.return_value = MagicMock(deleted_count=1)
+    coll.find.return_value = [
+        {
+            "_id": "sub-1",
+            "document_id": "stat-9",
+            "category": "consumer_rights",
+            "chunk_text": "",
+            "sub_chunk_text": "A consumer may request deletion of personal information.",
+        }
+    ]
+    mock_clients["anthropic"].messages.create.return_value = _llm_text_response(
+        '{"sub_topics":[{'
+        '"sub_topic":"Right to delete",'
+        '"requirement_summary":"Consumers can demand deletion.",'
+        '"policy_categories":["deletion","retention"],'
+        '"requires_consent":false,'
+        '"consumer_facing":true'
+        "}]}"
+    )
+
+    response = client.post(
+        "/create-statute-subtopics",
+        json={
+            "database": "privacy-compliance",
+            "source_collection": "statute_sub_chunks",
+            "destination_collection": "statute_subtopics",
+            "column": "chunk_text",
+            "subsection_column": "sub_chunk_text",
+            "source_query": {"document_id": "stat-9"},
+        },
+    )
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["records_inserted"] == 1
+    assert data["source_rows_processed"] == 1
+    assert data["llm_errors"] == 0
+
+    coll.delete_many.assert_called_once_with({"document_id": "stat-9"})
+    inserted = coll.insert_one.call_args.args[0]
+    assert inserted["sub_topic"] == "Right to delete"
+    assert inserted["requirement_summary"] == "Consumers can demand deletion."
+    assert inserted["policy_categories"] == ["deletion", "retention"]
+    assert inserted["requires_consent"] is False
+    assert inserted["consumer_facing"] is True
+    assert inserted["category"] == "consumer_rights"
+    assert inserted["source_id"] == "sub-1"
+    assert inserted["sub_chunk_text"] == (
+        "A consumer may request deletion of personal information."
+    )
+
+    prompt = mock_clients["anthropic"].messages.create.call_args.kwargs["messages"][0]["content"]
+    assert "pre-classified into category: consumer_rights" in prompt
+    assert "A consumer may request deletion of personal information." in prompt
+
+
+def test_create_statute_subtopics_llm_failure_is_non_fatal(client, mock_clients) -> None:
+    """Subtopic LLM failures should be counted without failing the HTTP request."""
+    dbs = _wire_mongo_core(mock_clients["mongo"])
+    coll = dbs["source_db"].__getitem__.return_value
+    coll.delete_many.return_value = MagicMock(deleted_count=0)
+    coll.find.return_value = [
+        {"_id": "1", "sub_chunk_text": "Controllers must provide a privacy notice."}
+    ]
+    mock_clients["anthropic"].messages.create.side_effect = RuntimeError("timeout")
+
+    response = client.post(
+        "/create-statute-subtopics",
+        json={
+            "database": "db",
+            "source_collection": "statute_sub_chunks",
+            "destination_collection": "statute_subtopics",
+            "column": "sub_chunk_text",
+            "subsection_column": "sub_chunk_text",
+        },
+    )
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["llm_errors"] == 1
+    assert data["records_inserted"] == 0
+    assert data["source_rows_skipped"] == 1
+    coll.insert_one.assert_not_called()
 
 
 def test_parse_policy_subsections_missing_params(client, mock_clients) -> None:
