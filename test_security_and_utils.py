@@ -12,6 +12,7 @@ from compliance_config import load_config
 from compliance_utils import (
     clamp,
     extract_json_block,
+    hash_text,
     jurisdiction_filter_values,
     normalize_jurisdiction,
     safe_truncate,
@@ -116,3 +117,12 @@ def test_compliance_utils_helpers() -> None:
     assert extract_json_block("x {\"a\":1} y") == '{"a":1}'
     assert validate_collection_name("valid_name-1") is True
     assert validate_collection_name("bad name") is False
+
+
+def test_hash_text_is_stable_sha256_hex() -> None:
+    """Cache keys and audit hashes must remain stable across process restarts."""
+    digest = hash_text("privacy policy text")
+    assert digest == hash_text("privacy policy text")
+    assert digest != hash_text("privacy policy text ")
+    assert len(digest) == 64
+    assert all(ch in "0123456789abcdef" for ch in digest)
