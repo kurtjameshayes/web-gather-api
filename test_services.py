@@ -13,7 +13,13 @@ from compliance_job_service import (
     JOB_STATUS_RUNNING,
     start_gap_analysis_job,
 )
-from index_job_service import IndexJobStorage, JOB_STATUS_PENDING
+from index_job_service import (
+    IndexJobStorage,
+    JOB_STATUS_COMPLETED,
+    JOB_STATUS_FAILED,
+    JOB_STATUS_PENDING,
+    JOB_STATUS_RUNNING,
+)
 
 
 def test_compliance_job_storage_create_and_get() -> None:
@@ -119,6 +125,46 @@ def test_index_job_storage_get_not_found() -> None:
     storage = IndexJobStorage(mock_mongo, config)
 
     assert storage.get_job("nonexistent") is None
+
+
+def test_index_job_storage_update_status_sets_timestamps_result_and_error() -> None:
+    """IndexJobStorage update_job_status records started/completed timestamps and payloads."""
+    mock_mongo = MagicMock()
+    mock_coll = MagicMock()
+    mock_mongo.__getitem__.return_value.__getitem__.return_value = mock_coll
+    config = load_config()
+    storage = IndexJobStorage(mock_mongo, config)
+
+    with patch("index_job_service._iso", return_value="2026-08-06T10:00:00+00:00"):
+        storage.update_job_status("job-1", JOB_STATUS_RUNNING)
+    running_update = mock_coll.update_one.call_args_list[0][0]
+    assert running_update[0] == {"job_id": "job-1"}
+    assert running_update[1]["$set"]["status"] == JOB_STATUS_RUNNING
+    assert running_update[1]["$set"]["started_at"] == "2026-08-06T10:00:00+00:00"
+    assert "completed_at" not in running_update[1]["$set"]
+
+    with patch("index_job_service._iso", return_value="2026-08-06T10:05:00+00:00"):
+        storage.update_job_status(
+            "job-1",
+            JOB_STATUS_COMPLETED,
+            result={"document_type": "policy"},
+        )
+    completed_update = mock_coll.update_one.call_args_list[1][0]
+    assert completed_update[1]["$set"]["status"] == JOB_STATUS_COMPLETED
+    assert completed_update[1]["$set"]["result"] == {"document_type": "policy"}
+    assert completed_update[1]["$set"]["completed_at"] == "2026-08-06T10:05:00+00:00"
+
+    with patch("index_job_service._iso", return_value="2026-08-06T10:06:00+00:00"):
+        storage.update_job_status(
+            "job-2",
+            JOB_STATUS_FAILED,
+            error="pipeline step failed",
+        )
+    failed_update = mock_coll.update_one.call_args_list[2][0]
+    assert failed_update[0] == {"job_id": "job-2"}
+    assert failed_update[1]["$set"]["status"] == JOB_STATUS_FAILED
+    assert failed_update[1]["$set"]["error"] == "pipeline step failed"
+    assert failed_update[1]["$set"]["completed_at"] == "2026-08-06T10:06:00+00:00"
 
 
 @pytest.mark.anyio
