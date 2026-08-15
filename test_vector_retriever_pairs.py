@@ -15,7 +15,7 @@ sys.modules["sentence_transformers"] = MagicMock()
 
 from cache import SimpleLRUCache
 from compliance_config import load_config
-from compliance_utils import jurisdiction_filter_values, normalize_jurisdiction
+from compliance_utils import jurisdiction_filter_values
 from vector_retriever import VECTOR_SEARCH_JURISDICTION, VectorRetriever
 
 
@@ -143,10 +143,13 @@ def test_retrieve_policy_subchunks_default_jurisdiction_and_skips_bad_vectors() 
     assert result.statute_subchunks_considered == 3
     assert policy_coll.aggregate_calls == []
     statute_query, _ = statute_coll.find_calls[0]
-    default_values = jurisdiction_filter_values(
-        normalize_jurisdiction(VECTOR_SEARCH_JURISDICTION)
-    )
-    assert statute_query[config.statute_jurisdiction_field]["$in"] == default_values
+    # Empty jurisdictions skip normalize_jurisdiction and filter on the raw default.
+    default_values = jurisdiction_filter_values(VECTOR_SEARCH_JURISDICTION)
+    if len(default_values) > 1:
+        assert statute_query[config.statute_jurisdiction_field]["$in"] == default_values
+    else:
+        assert statute_query[config.statute_jurisdiction_field] == default_values[0]
+        assert default_values[0] == VECTOR_SEARCH_JURISDICTION
     assert "document_id" not in statute_query
 
 

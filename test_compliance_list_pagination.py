@@ -6,10 +6,14 @@ that decide what reaches storage.
 """
 from __future__ import annotations
 
+import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from flask import Flask
+
+sys.modules.setdefault("sentence_transformers", MagicMock())
+sys.modules.setdefault("anthropic", MagicMock())
 
 import compliance_routes
 from compliance_config import load_config
@@ -53,7 +57,7 @@ def test_list_runs_clamps_limit_and_offset_and_parses_types(client, mock_storage
         "/api/compliance/runs"
         "?policy_document_id=pol-1"
         "&since=2026-03-01T00:00:00Z"
-        "&until=2026-03-31T23:59:59+00:00"
+        "&until=2026-03-31T23:59:59Z"
         "&limit=999"
         "&offset=-4"
         "&types=gap, health_score, ,multi_jurisdictional"
@@ -67,7 +71,7 @@ def test_list_runs_clamps_limit_and_offset_and_parses_types(client, mock_storage
     mock_storage.list_runs.assert_awaited_once_with(
         policy_document_id="pol-1",
         since="2026-03-01T00:00:00Z",
-        until="2026-03-31T23:59:59+00:00",
+        until="2026-03-31T23:59:59Z",
         types=["gap", "health_score", "multi_jurisdictional"],
         limit=200,
         offset=0,
