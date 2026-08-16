@@ -7,7 +7,10 @@ This pins the shared wrapper: cache hit, empty-embedding short-circuit
 from __future__ import annotations
 
 import asyncio
+import sys
 from unittest.mock import AsyncMock, MagicMock
+
+sys.modules["sentence_transformers"] = MagicMock()
 
 from cache import SimpleLRUCache
 from compliance_config import load_config
