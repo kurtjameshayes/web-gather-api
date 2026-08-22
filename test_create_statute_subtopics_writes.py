@@ -1,7 +1,6 @@
 """Regression tests for /create-statute-subtopics write and parse contracts."""
 from __future__ import annotations
 
-import json
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -163,12 +162,10 @@ def test_create_statute_subtopics_json5_fallback_and_empty_sub_topic_skip(
     source_coll.find.return_value = [
         {"_id": "src-3", "chunk_text": "Consumers have a right to know."}
     ]
+    # Trailing commas are invalid for json.loads but accepted by json5.
     mock_clients["anthropic"].messages.create.return_value = _llm_text_response(
-        "Here you go: {not-strict-json}"
+        'Here you go: {"sub_topics":[{},{"sub_topic":""},{"sub_topic":"Right to know"},]}'
     )
-
-    def _strict_json_loads(value, *args, **kwargs):
-        raise json.JSONDecodeError("expecting value", str(value), 0)
 
     fake_json5 = MagicMock()
     fake_json5.loads.return_value = {
@@ -179,9 +176,7 @@ def test_create_statute_subtopics_json5_fallback_and_empty_sub_topic_skip(
         ]
     }
 
-    with patch("core.json.loads", side_effect=_strict_json_loads), patch.dict(
-        sys.modules, {"json5": fake_json5}
-    ):
+    with patch.dict(sys.modules, {"json5": fake_json5}):
         response = client.post("/create-statute-subtopics", json=_valid_payload())
 
     assert response.status_code == 200
