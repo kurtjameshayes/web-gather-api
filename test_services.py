@@ -9,6 +9,7 @@ from compliance_config import load_config
 from compliance_job_service import (
     ComplianceJobStorage,
     JOB_STATUS_COMPLETED,
+    JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,
     JOB_STATUS_RUNNING,
     start_gap_analysis_job,
@@ -81,6 +82,41 @@ def test_compliance_job_storage_update_status() -> None:
     assert call_args[1]["$set"]["status"] == JOB_STATUS_COMPLETED
     assert call_args[1]["$set"]["result"] == {"gaps": []}
     assert "completed_at" in call_args[1]["$set"]
+
+
+def test_cleanup_zombie_jobs_fails_only_pending_and_running() -> None:
+    """Startup cleanup must fail in-flight jobs and leave finished ones alone."""
+    mock_mongo = MagicMock()
+    mock_coll = MagicMock()
+    mock_db = MagicMock()
+    mock_db.__getitem__.return_value = mock_coll
+    mock_mongo.__getitem__.return_value = mock_db
+    mock_coll.update_many.return_value.modified_count = 2
+    config = load_config()
+    config.compliance_database = "tenant-db"
+    config.compliance_jobs_collection = "compliance_jobs_custom"
+    storage = ComplianceJobStorage(mock_mongo, config)
+
+    assert storage.cleanup_zombie_jobs() == 2
+    mock_mongo.__getitem__.assert_called_with("tenant-db")
+    mock_db.__getitem__.assert_called_with("compliance_jobs_custom")
+    query, update = mock_coll.update_many.call_args[0]
+    assert query == {"status": {"$in": [JOB_STATUS_PENDING, JOB_STATUS_RUNNING]}}
+    assert update["$set"]["status"] == JOB_STATUS_FAILED
+    assert update["$set"]["error"] == "Job interrupted by server restart."
+    assert update["$set"]["completed_at"]
+    assert "result" not in update["$set"]
+
+
+def test_cleanup_zombie_jobs_returns_zero_when_none_match() -> None:
+    mock_mongo = MagicMock()
+    mock_coll = MagicMock()
+    mock_mongo.__getitem__.return_value.__getitem__.return_value = mock_coll
+    mock_coll.update_many.return_value.modified_count = 0
+    storage = ComplianceJobStorage(mock_mongo, load_config())
+
+    assert storage.cleanup_zombie_jobs() == 0
+    mock_coll.update_many.assert_called_once()
 
 
 def test_index_job_storage_create_and_get() -> None:
