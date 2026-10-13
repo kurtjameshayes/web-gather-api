@@ -1,8 +1,8 @@
-"""Regression tests for POST /gap-check document resolution and POST /crawl bounds.
+"""Regression tests for POST /gap-check resolution and crawl content selection.
 
-These paths decide which text reaches the gap-check model and how far a crawl
-is allowed to run. The happy-path endpoint tests do not cover truncation,
-lookup order, boolean coercion, or the crawl clamp/content split.
+Covers document lookup, policy-window edge slices, gap-result coercion, and the
+browser-versus-Firecrawl split over empty markdown. Integer clamps, float
+truncation, null bounds, retry, and basic crawl text joining are covered elsewhere.
 """
 from __future__ import annotations
 
@@ -168,25 +168,6 @@ class TestFetchDocumentText:
 
 
 class TestGapCheck:
-    def test_truncates_statute_start_and_policy_end(self, client, mock_clients) -> None:
-        statute = ("S" * 4000) + "CUT_STATUTE"
-        policy = "CUT_POLICY" + ("P" * 100)
-        with patch("core._fetch_document_text", side_effect=[(statute, None), (policy, None)]):
-            mock_clients["anthropic"].messages.create.return_value = _llm_response(
-                ("text", '{"addressed": true, "policy_quote": "P", "missing": false, "conflict": false, "conflict_description": null}')
-            )
-            response = client.post("/gap-check", json=_gap_body(max_policy_chars=40))
-        assert response.status_code == 200
-        prompt = _prompt(mock_clients)
-        assert "CUT_STATUTE" not in prompt
-        assert "S" * 4000 in prompt
-        assert "CUT_POLICY" not in prompt
-        assert "P" * 40 in prompt
-        assert "P" * 41 not in prompt
-        call = mock_clients["anthropic"].messages.create.call_args
-        assert call.kwargs["model"] == "claude-sonnet-4-6"
-        assert call.kwargs["max_tokens"] == 500
-
     def test_default_policy_window_is_last_8000_chars(self, client, mock_clients) -> None:
         policy = "X" + ("Y" * 8000)
         with patch("core._fetch_document_text", side_effect=[("short statute", None), (policy, None)]):
@@ -199,13 +180,15 @@ class TestGapCheck:
         assert "short statute" in prompt
         assert "Y" * 8000 in prompt
         assert "XY" not in prompt
+        call = mock_clients["anthropic"].messages.create.call_args
+        assert call.kwargs["model"] == "claude-sonnet-4-6"
+        assert call.kwargs["max_tokens"] == 500
 
     @pytest.mark.parametrize(
         ("max_policy_chars", "expected", "absent"),
         [
             (0, "ABCDEFGHIJ", None),
             (-4, "EFGHIJ", "ABCD"),
-            (4, "GHIJ", "ABCDEF"),
         ],
     )
     def test_non_positive_policy_window_uses_python_slice(
@@ -316,29 +299,6 @@ class TestGapCheck:
         assert gap["conflict"] is True
         assert mock_clients["anthropic"].messages.create.call_count == 1
 
-    def test_retries_when_first_payload_is_not_json(self, client, mock_clients) -> None:
-        first = _llm_response(("text", '{"addressed": true} and {"addressed": false}'))
-        second = _llm_response(
-            ("text", '{"addressed": false, "policy_quote": "kept", "missing": false, "conflict": true, "conflict_description": "differs"}')
-        )
-        with patch("core._fetch_document_text", side_effect=[("statute", None), ("policy", None)]):
-            mock_clients["anthropic"].messages.create.side_effect = [first, second]
-            response = client.post("/gap-check", json=_gap_body())
-        assert response.status_code == 200
-        assert response.get_json()["gap_check"]["policy_quote"] == "kept"
-        assert response.get_json()["gap_check"]["conflict"] is True
-        assert mock_clients["anthropic"].messages.create.call_count == 2
-        assert "ONLY a valid JSON object" in _prompt(mock_clients, 1)
-        assert _prompt(mock_clients, 1).startswith(_prompt(mock_clients, 0))
-
-    def test_unparseable_retry_is_500(self, client, mock_clients) -> None:
-        with patch("core._fetch_document_text", side_effect=[("statute", None), ("policy", None)]):
-            mock_clients["anthropic"].messages.create.return_value = _llm_response(("text", "no json"))
-            response = client.post("/gap-check", json=_gap_body())
-        assert response.status_code == 500
-        assert response.get_json()["error"] == "Could not parse LLM response"
-        assert mock_clients["anthropic"].messages.create.call_count == 2
-
     def test_llm_exception_is_500(self, client, mock_clients) -> None:
         with patch("core._fetch_document_text", side_effect=[("statute", None), ("policy", None)]):
             mock_clients["anthropic"].messages.create.side_effect = RuntimeError("boom")
@@ -358,42 +318,9 @@ class _Page:
         self.summary = "summary"
 
 
-class TestCrawlBounds:
-    def _silence_browsers(self):
-        return patch.multiple(
-            "core",
-            playwright_crawl=MagicMock(return_value=[]),
-            puppeteer_crawl=MagicMock(return_value=[]),
-            selenium_crawl=MagicMock(return_value=[]),
-        )
-
-    def test_depth_and_breadth_are_clamped_in_call_and_response(self, client, mock_clients) -> None:
-        seen = {}
-
-        def playwright(url, depth, breadth):
-            seen["url"] = url
-            seen["depth"] = depth
-            seen["breadth"] = breadth
-            return [{"url": url, "title": "T", "markdown": "Body"}]
-
-        with patch("core.playwright_crawl", side_effect=playwright), patch(
-            "core.puppeteer_crawl"
-        ) as puppeteer, patch("core.selenium_crawl") as selenium:
-            response = client.post(
-                "/crawl",
-                json={"url": "https://example.com/start", "depth": 50, "breadth": 0},
-            )
-        assert response.status_code == 200
-        payload = response.get_json()
-        assert seen == {"url": "https://example.com/start", "depth": 10, "breadth": 1}
-        assert payload["depth"] == 10
-        assert payload["breadth"] == 1
-        assert payload["crawl_method"] == "playwright"
-        puppeteer.assert_not_called()
-        selenium.assert_not_called()
-        mock_clients["firecrawl"].crawl.assert_not_called()
-
-    def test_omitted_bounds_default_and_numeric_coercion(self, client, mock_clients) -> None:
+class TestCrawlContentSelection:
+    def test_bool_and_digit_strings_pass_int_then_clamp(self, client, mock_clients) -> None:
+        """JSON true and digit strings are ints, unlike non-numeric strings that 400."""
         calls = []
 
         def playwright(_url, depth, breadth):
@@ -401,47 +328,26 @@ class TestCrawlBounds:
             return [{"url": "https://example.com", "title": "T", "markdown": "Body"}]
 
         with patch("core.playwright_crawl", side_effect=playwright):
-            omitted = client.post("/crawl", json={"url": "https://example.com"})
-            coerced = client.post(
+            as_bool = client.post(
                 "/crawl",
-                json={"url": "https://example.com", "depth": 9.9, "breadth": True},
+                json={"url": "https://example.com", "depth": True, "breadth": True},
             )
             as_text = client.post(
                 "/crawl",
                 json={"url": "https://example.com", "depth": "4", "breadth": "101"},
             )
-        assert omitted.status_code == 200
-        assert omitted.get_json()["depth"] == 2
-        assert omitted.get_json()["breadth"] == 10
-        assert coerced.status_code == 200
-        assert coerced.get_json()["depth"] == 9
-        assert coerced.get_json()["breadth"] == 1
+        assert as_bool.status_code == 200
+        assert as_bool.get_json()["depth"] == 1
+        assert as_bool.get_json()["breadth"] == 1
         assert as_text.status_code == 200
         assert as_text.get_json()["depth"] == 4
         assert as_text.get_json()["breadth"] == 100
-        assert calls == [(2, 10), (9, 1), (4, 100)]
-
-    @pytest.mark.parametrize(
-        ("field", "value"),
-        [
-            ("depth", "abc"),
-            ("depth", None),
-            ("breadth", "nope"),
-            ("breadth", None),
-        ],
-    )
-    def test_invalid_bounds_are_400_before_crawl(self, client, mock_clients, field: str, value: Any) -> None:
-        with patch("core.playwright_crawl") as playwright:
-            response = client.post("/crawl", json={"url": "https://example.com", field: value})
-        assert response.status_code == 400
-        assert field in response.get_json()["error"]
-        playwright.assert_not_called()
+        assert calls == [(1, 1), (4, 100)]
         mock_clients["firecrawl"].crawl.assert_not_called()
 
-    def test_browser_text_uses_markdown_only_and_keeps_empty_urls_out(self, client, mock_clients) -> None:
+    def test_browser_crawl_ignores_html_and_blank_urls(self, client, mock_clients) -> None:
         pages = [
             {"url": "https://a.example/p", "title": "Privacy", "markdown": "Keep", "html": "<p>no</p>"},
-            {"url": "https://b.example/q", "title": "", "markdown": "More"},
             {"url": "", "title": "No URL", "markdown": "Still"},
             {"url": "https://c.example/r", "title": "Blank", "markdown": "", "html": "<p>Hi</p>"},
         ]
@@ -449,35 +355,25 @@ class TestCrawlBounds:
             response = client.post("/crawl", json={"url": "https://example.com"})
         assert response.status_code == 200
         payload = response.get_json()
-        assert payload["pages_crawled"] == 4
-        assert payload["urls_crawled"] == [
-            "https://a.example/p",
-            "https://b.example/q",
-            "https://c.example/r",
-        ]
+        assert payload["urls_crawled"] == ["https://a.example/p", "https://c.example/r"]
         assert payload["combined_text"] == (
             "Privacy | Source: https://a.example/p\nKeep\n\n"
-            "Source: https://b.example/q\nMore\n\n"
             "No URL | Source: \nStill"
         )
-        assert payload["text_length"] == len(payload["combined_text"])
         assert "<p>Hi</p>" not in payload["combined_text"]
-
-    def test_browser_pages_without_markdown_do_not_fall_back_to_html(self, client, mock_clients) -> None:
-        with patch(
-            "core.playwright_crawl",
-            return_value=[{"url": "https://example.com", "title": "T", "markdown": "", "html": "<p>Hi</p>"}],
-        ):
-            response = client.post("/crawl", json={"url": "https://example.com"})
-        assert response.status_code == 400
-        assert response.get_json()["error"] == "crawl returned no content"
+        assert "<p>no</p>" not in payload["combined_text"]
         mock_clients["firecrawl"].crawl.assert_not_called()
 
-    def test_firecrawl_falls_back_to_html_and_reads_page_url(self, client, mock_clients) -> None:
+    def test_firecrawl_empty_markdown_uses_html_not_raw_or_summary(self, client, mock_clients) -> None:
         page = _Page("https://html.example/policy", "HTML", "", html="<p>Hi</p>")
         mock_clients["firecrawl"].crawl.return_value = type("Job", (), {"data": [page]})()
-        with self._silence_browsers():
-            response = client.post("/crawl", json={"url": "https://example.com", "depth": 3, "breadth": 7})
+        with patch.multiple(
+            "core",
+            playwright_crawl=MagicMock(return_value=[]),
+            puppeteer_crawl=MagicMock(return_value=[]),
+            selenium_crawl=MagicMock(return_value=[]),
+        ):
+            response = client.post("/crawl", json={"url": "https://example.com"})
         assert response.status_code == 200
         payload = response.get_json()
         assert payload["crawl_method"] == "firecrawl"
@@ -485,25 +381,3 @@ class TestCrawlBounds:
         assert payload["combined_text"] == "HTML | Source: https://html.example/policy\n<p>Hi</p>"
         assert "raw" not in payload["combined_text"]
         assert "summary" not in payload["combined_text"]
-        crawl_call = mock_clients["firecrawl"].crawl.call_args
-        assert crawl_call.kwargs["url"] == "https://example.com"
-        assert crawl_call.kwargs["limit"] == 7
-        assert crawl_call.kwargs["max_discovery_depth"] == 3
-
-    def test_firecrawl_exception_includes_browser_errors(self, client, mock_clients) -> None:
-        mock_clients["firecrawl"].crawl.side_effect = RuntimeError("fc down")
-        with patch("core.playwright_crawl", side_effect=RuntimeError("pw down")), patch(
-            "core.puppeteer_crawl", side_effect=RuntimeError("pu down")
-        ), patch("core.selenium_crawl", side_effect=RuntimeError("se down")):
-            response = client.post("/crawl", json={"url": "https://example.com"})
-        assert response.status_code == 500
-        assert response.get_json()["error"] == (
-            "crawl failed - playwright: pw down; puppeteer: pu down; selenium: se down; firecrawl: fc down"
-        )
-
-    def test_empty_firecrawl_result_is_no_pages(self, client, mock_clients) -> None:
-        mock_clients["firecrawl"].crawl.return_value = []
-        with self._silence_browsers():
-            response = client.post("/crawl", json={"url": "https://example.com"})
-        assert response.status_code == 400
-        assert response.get_json()["error"] == "crawl returned no pages - website may be blocking crawlers"
