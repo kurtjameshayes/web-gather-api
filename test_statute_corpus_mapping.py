@@ -117,6 +117,12 @@ def test_statute_subsections_bind_line_ranges_and_chunk_header() -> None:
                         "start_line": "nope",
                         "end_line": 1,
                     },
+                    {
+                        "identifier": "(e)",
+                        "text": "should not win",
+                        "start_line": 0,
+                        "end_line": 1,
+                    },
                 ]
             }
         )
@@ -137,15 +143,16 @@ def test_statute_subsections_bind_line_ranges_and_chunk_header() -> None:
 
     assert response.status_code == 200
     body = response.get_json()
-    assert body["records_inserted"] == 4
+    assert body["records_inserted"] == 5
     assert body["source_rows_processed"] == 1
     assert body["source_rows_skipped"] == 1
     assert body["llm_errors"] == 0
-    assert [row["subsection_identifier"] for row in inserted] == ["(a)", "(b)", "(c)", "(d)"]
+    assert [row["subsection_identifier"] for row in inserted] == ["(a)", "(b)", "(c)", "(d)", "(e)"]
     assert inserted[0]["sub_chunk_text"] == "# 1798.100 Title (a) First line"
     assert inserted[1]["sub_chunk_text"] == "# 1798.100 Title (b) Second"
     assert inserted[2]["sub_chunk_text"] == "# 1798.100 Title kept quote"
     assert inserted[3]["sub_chunk_text"] == "# 1798.100 Title fallback"
+    assert inserted[4]["sub_chunk_text"] == "# 1798.100 Title"
     assert inserted[0]["category"] == "consumer_rights"
     assert inserted[0]["header_text"] == "Right"
     assert inserted[0]["category_reasoning"] == "because"
