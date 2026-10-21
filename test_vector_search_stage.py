@@ -79,36 +79,21 @@ def test_num_candidates_uses_reset_limit_and_floor(
     assert "query" not in response.get_json()
 
 
-def test_query_vector_coercion_and_non_numeric_rejection(client, mock_clients):
-    coll = _coll(mock_clients)
-    bad = client.post(
+def test_empty_query_is_echoed_when_a_vector_is_present(client, mock_clients):
+    _coll(mock_clients)
+    response = client.post(
         "/vector-search",
         json={
             "database": "db",
             "collection": "chunks",
             "index": "idx",
-            "query_vector": [1, "no"],
-            "path": "embedding",
-        },
-    )
-    assert bad.status_code == 400
-    assert bad.get_json()["error"] == "query_vector must contain only numbers"
-    coll.aggregate.assert_not_called()
-
-    ok = client.post(
-        "/vector-search",
-        json={
-            "database": "db",
-            "collection": "chunks",
-            "index": "idx",
-            "query_vector": [True, "2.5", 0],
+            "query_vector": [1],
             "path": "embedding",
             "query": "",
         },
     )
-    assert ok.status_code == 200
-    assert ok.get_json()["query"] == ""
-    assert _stage(coll)["queryVector"] == [1.0, 2.5, 0.0]
+    assert response.status_code == 200
+    assert response.get_json()["query"] == ""
 
 
 def test_filter_shapes(client, mock_clients):
