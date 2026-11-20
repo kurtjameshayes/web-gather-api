@@ -63,6 +63,79 @@ def test_authorize_request_role_allowed() -> None:
     authorize_request(config, request)
 
 
+def test_authorize_request_skips_checks_when_auth_disabled() -> None:
+    config = load_config()
+    config.auth_required = False
+    config.api_key = "secret"
+    config.allowed_roles = ["admin"]
+    request = SimpleNamespace(headers={})
+    authorize_request(config, request)
+
+
+def test_authorize_request_strips_provided_key_but_not_configured_key() -> None:
+    config = load_config()
+    config.auth_required = True
+    config.api_key = "secret"
+    config.allowed_roles = []
+    authorize_request(config, SimpleNamespace(headers={"x-api-key": "  secret  "}))
+
+    config.api_key = " secret "
+    request = SimpleNamespace(headers={"x-api-key": "secret"})
+    with pytest.raises(AuthorizationError) as exc:
+        authorize_request(config, request)
+    assert exc.value.status_code == 403
+    assert exc.value.message == "Invalid API key."
+
+
+def test_authorize_request_whitespace_key_is_missing() -> None:
+    config = load_config()
+    config.auth_required = True
+    config.api_key = "secret"
+    config.allowed_roles = []
+    request = SimpleNamespace(headers={"x-api-key": "   "})
+    with pytest.raises(AuthorizationError) as exc:
+        authorize_request(config, request)
+    assert exc.value.status_code == 401
+    assert exc.value.message == "Missing API key."
+
+
+def test_authorize_request_empty_configured_key_still_enforces_role() -> None:
+    config = load_config()
+    config.auth_required = True
+    config.api_key = ""
+    config.allowed_roles = ["admin"]
+    authorize_request(
+        config,
+        SimpleNamespace(headers={"x-api-key": "any-caller-key", "x-role": "Admin"}),
+    )
+    with pytest.raises(AuthorizationError) as exc:
+        authorize_request(
+            config,
+            SimpleNamespace(headers={"x-api-key": "any-caller-key", "x-role": "viewer"}),
+        )
+    assert exc.value.status_code == 403
+    assert exc.value.message == "Insufficient role."
+
+
+def test_authorize_request_uses_configured_role_header_and_strips_role() -> None:
+    config = load_config()
+    config.auth_required = True
+    config.api_key = "secret"
+    config.allowed_roles = ["Compliance"]
+    config.default_role_header = "x-user-role"
+    authorize_request(
+        config,
+        SimpleNamespace(headers={"x-api-key": "secret", "x-role": "admin", "x-user-role": "  compliance  "}),
+    )
+    with pytest.raises(AuthorizationError) as exc:
+        authorize_request(
+            config,
+            SimpleNamespace(headers={"x-api-key": "secret", "x-role": "compliance"}),
+        )
+    assert exc.value.status_code == 403
+    assert exc.value.message == "Insufficient role."
+
+
 def test_redactor_masks_common_pii() -> None:
     redactor = Redactor()
     result = redactor.redact("Email me at a@example.com or call 555-123-4567.")
