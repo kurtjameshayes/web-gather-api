@@ -44,6 +44,114 @@ def _wire_mongo(mock_mongo: MagicMock) -> Dict[str, Any]:
     return {"wg_db": wg_db, "user_db": user_db}
 
 
+def _cursor_returning(docs: list) -> MagicMock:
+    cursor = MagicMock()
+    cursor.skip.return_value = cursor
+    cursor.limit.return_value = docs
+    return cursor
+
+
+@pytest.mark.parametrize(
+    ("limit_arg", "offset_arg", "expected_limit", "expected_offset"),
+    [
+        (None, None, 100, 0),
+        ("0", "0", 1, 0),
+        ("-4", "-2", 1, 0),
+        ("10001", "25", 10000, 25),
+        ("10000", "1", 10000, 1),
+        ("abc", "nope", 100, 0),
+        ("4.9", "4.9", 100, 0),
+        ("  8 ", "  3 ", 8, 3),
+        ("", "", 100, 0),
+    ],
+)
+def test_list_documents_clamps_page_bounds(
+    client,
+    mock_mongo_client,
+    limit_arg: str | None,
+    offset_arg: str | None,
+    expected_limit: int,
+    expected_offset: int,
+) -> None:
+    """limit 0 is unlimited in MongoDB, so non-positive page sizes become 1."""
+    dbs = _wire_mongo(mock_mongo_client)
+    cursor = _cursor_returning([])
+    dbs["user_db"].__getitem__.return_value.find.return_value = cursor
+    params = {"database_name": "test_db", "collection_name": "docs"}
+    if limit_arg is not None:
+        params["limit"] = limit_arg
+    if offset_arg is not None:
+        params["offset"] = offset_arg
+    response = client.get("/documents", query_string=params)
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["documents"] == []
+    assert payload["limit"] == expected_limit
+    assert payload["offset"] == expected_offset
+    dbs["user_db"].__getitem__.return_value.find.assert_called_once_with({})
+    cursor.skip.assert_called_once_with(expected_offset)
+    cursor.limit.assert_called_once_with(expected_limit)
+
+
+def test_list_documents_double_encoded_query_and_extended_json(
+    client, mock_mongo_client
+) -> None:
+    """A JSON string of an object is parsed twice, and a sole $oid becomes an ObjectId."""
+    dbs = _wire_mongo(mock_mongo_client)
+    cursor = _cursor_returning([])
+    dbs["user_db"].__getitem__.return_value.find.return_value = cursor
+    oid = "64b8f7b7b1f1eaf5b2f0c001"
+    encoded = json.dumps(json.dumps({"_id": {"$oid": oid}, "status": "active"}))
+    response = client.get(
+        "/documents",
+        query_string={
+            "database_name": "test_db",
+            "collection_name": "docs",
+            "query": encoded,
+        },
+    )
+    assert response.status_code == 200
+    dbs["user_db"].__getitem__.return_value.find.assert_called_once_with(
+        {"_id": ObjectId(oid), "status": "active"}
+    )
+
+
+def test_list_documents_invalid_oid_stays_a_raw_dict(client, mock_mongo_client) -> None:
+    dbs = _wire_mongo(mock_mongo_client)
+    cursor = _cursor_returning([])
+    dbs["user_db"].__getitem__.return_value.find.return_value = cursor
+    response = client.get(
+        "/documents",
+        query_string={
+            "database_name": "test_db",
+            "collection_name": "docs",
+            "query": json.dumps({"_id": {"$oid": "not-an-id"}}),
+        },
+    )
+    assert response.status_code == 200
+    dbs["user_db"].__getitem__.return_value.find.assert_called_once_with(
+        {"_id": {"$oid": "not-an-id"}}
+    )
+
+
+def test_list_documents_double_encoded_operator_is_rejected(
+    client, mock_mongo_client
+) -> None:
+    dbs = _wire_mongo(mock_mongo_client)
+    response = client.get(
+        "/documents",
+        query_string={
+            "database_name": "test_db",
+            "collection_name": "docs",
+            "query": json.dumps(json.dumps({"$where": "1==1"})),
+        },
+    )
+    assert response.status_code == 400
+    assert "$where" in response.get_json()["error"]
+    assert "not allowed" in response.get_json()["error"]
+    dbs["user_db"].__getitem__.return_value.find.assert_not_called()
+
+
 def test_list_documents_success(client, mock_mongo_client) -> None:
     dbs = _wire_mongo(mock_mongo_client)
     first_id = ObjectId()
@@ -178,6 +286,33 @@ def test_list_all_databases_success(client, mock_mongo_client) -> None:
     assert payload["databases"] == ["db1", "db2"]
 
 
+def test_list_all_databases_hides_reserved_names(client, mock_mongo_client) -> None:
+    mock_mongo_client.list_database_names.return_value = [
+        "admin",
+        "Admin",
+        "CONFIG",
+        "local",
+        "app",
+        "administration",
+    ]
+    response = client.get("/all-databases")
+    assert response.status_code == 200
+    assert response.get_json()["databases"] == ["app", "administration"]
+
+
+@pytest.mark.parametrize("database_name", ["admin", "Config", "LOCAL"])
+def test_list_all_collections_rejects_reserved_database(
+    client, mock_mongo_client, database_name: str
+) -> None:
+    dbs = _wire_mongo(mock_mongo_client)
+    response = client.get(
+        "/all-collections", query_string={"database_name": database_name}
+    )
+    assert response.status_code == 400
+    assert "reserved" in response.get_json()["error"].lower()
+    dbs["user_db"].list_collection_names.assert_not_called()
+
+
 def test_list_all_collections_success(client, mock_mongo_client) -> None:
     dbs = _wire_mongo(mock_mongo_client)
     dbs["user_db"].list_collection_names.return_value = ["a", "b"]
@@ -185,6 +320,63 @@ def test_list_all_collections_success(client, mock_mongo_client) -> None:
     assert response.status_code == 200
     payload = response.get_json()
     assert payload["collections"] == ["a", "b"]
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        (
+            {"database_name": "admin", "collection_name": "docs", "document": {"a": 1}},
+            "reserved",
+        ),
+        (
+            {"database_name": "Config", "collection_name": "docs", "document": {"a": 1}},
+            "reserved",
+        ),
+        (
+            {"database_name": "LOCAL", "collection_name": "docs", "document": {"a": 1}},
+            "reserved",
+        ),
+        (
+            {
+                "database_name": "test_db",
+                "collection_name": "docs.evil",
+                "document": {"a": 1},
+            },
+            "letters, numbers",
+        ),
+        (
+            {
+                "database_name": "bad name",
+                "collection_name": "docs",
+                "document": {"a": 1},
+            },
+            "letters, numbers",
+        ),
+        (
+            {
+                "database_name": "test_db",
+                "collection_name": "docs",
+                "document": ["row"],
+            },
+            "JSON object",
+        ),
+        (
+            {"database_name": "test_db", "collection_name": "docs", "document": "text"},
+            "JSON object",
+        ),
+    ],
+)
+def test_write_to_collection_rejects_unsafe_targets(
+    client, mock_mongo_client, body: dict, expected: str
+) -> None:
+    dbs = _wire_mongo(mock_mongo_client)
+    response = client.post("/write_to_collection", json=body)
+    assert response.status_code == 400
+    assert expected in response.get_json()["error"]
+    collection = dbs["user_db"].__getitem__.return_value
+    collection.insert_one.assert_not_called()
+    collection.replace_one.assert_not_called()
 
 
 def test_write_to_collection_append_success(client, mock_mongo_client) -> None:
