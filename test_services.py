@@ -141,6 +141,29 @@ async def test_embedder_cache_hit() -> None:
     mock_model.encode.assert_not_called()
 
 
+def test_anthropic_llm_client_sets_request_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LLM calls must time out. A missing timeout leaves a hung provider call running."""
+    captured: dict = {}
+
+    class _FakeAnthropic:
+        def __init__(self, api_key: str, timeout: float | None = None) -> None:
+            captured["api_key"] = api_key
+            captured["timeout"] = timeout
+
+    monkeypatch.setattr("llm_client.anthropic.Anthropic", _FakeAnthropic)
+    from llm_client import LLM_TIMEOUT_SECONDS, AnthropicLLMClient
+
+    client = AnthropicLLMClient(
+        "test-key",
+        type("Cfg", (), {"llm_model_name": "claude", "llm_max_tokens": 32})(),
+    )
+    assert captured["api_key"] == "test-key"
+    assert captured["timeout"] == 60
+    assert LLM_TIMEOUT_SECONDS == 60
+    assert client._model == "claude"
+    assert client._max_tokens == 32
+
+
 @pytest.mark.anyio
 async def test_embedder_empty_text() -> None:
     """Embedder returns empty list for empty text."""

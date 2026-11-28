@@ -1,6 +1,8 @@
 """Tests for db blueprint category-mapping endpoints."""
 from __future__ import annotations
 
+import json
+
 from bson import ObjectId
 from flask import Flask
 from unittest.mock import MagicMock
@@ -76,6 +78,67 @@ def test_get_category_mapping_filtered_by_sub_topic(client, mock_coll) -> None:
     response = client.get("/category-mapping?sub_topic=right_to_delete")
     assert response.status_code == 200
     mock_coll.find.assert_called_once_with({"sub_topic": "right_to_delete"})
+
+
+def test_get_category_mapping_rejects_operators_before_query(client, mock_coll) -> None:
+    """A raw query must not bypass statute_category, and $where must not reach Mongo."""
+    response = client.get(
+        "/category-mapping",
+        query_string={
+            "statute_category": "retention",
+            "query": json.dumps({"$where": "1==1"}),
+        },
+    )
+    assert response.status_code == 400
+    assert "$where" in response.get_json()["error"]
+    assert "not allowed" in response.get_json()["error"]
+    mock_coll.find.assert_not_called()
+
+
+def test_get_category_mapping_query_replaces_field_filters(client, mock_coll) -> None:
+    mock_coll.find.return_value = []
+    response = client.get(
+        "/category-mapping",
+        query_string={
+            "statute_category": "retention",
+            "sub_topic": "sale",
+            "query": json.dumps({"statute_category": "other"}),
+        },
+    )
+    assert response.status_code == 200
+    mock_coll.find.assert_called_once_with({"statute_category": "other"})
+
+
+def test_get_category_mapping_rejects_nested_operator(client, mock_coll) -> None:
+    response = client.get(
+        "/category-mapping",
+        query_string={"query": json.dumps({"name": {"$regex": ".*"}})},
+    )
+    assert response.status_code == 400
+    assert "$regex" in response.get_json()["error"]
+    mock_coll.find.assert_not_called()
+
+
+def test_delete_category_mapping_converts_oid_and_rejects_sibling_keys(
+    client, mock_coll
+) -> None:
+    oid = "64b8f7b7b1f1eaf5b2f0c001"
+    mock_coll.delete_many.return_value.deleted_count = 1
+    ok = client.delete(
+        "/category-mapping",
+        query_string={"query": json.dumps({"_id": {"$oid": oid}})},
+    )
+    assert ok.status_code == 200
+    mock_coll.delete_many.assert_called_once_with({"_id": ObjectId(oid)})
+
+    mock_coll.delete_many.reset_mock()
+    rejected = client.delete(
+        "/category-mapping",
+        query_string={"query": json.dumps({"_id": {"$oid": oid, "extra": 1}})},
+    )
+    assert rejected.status_code == 400
+    assert "$oid must be the only key" in rejected.get_json()["error"]
+    mock_coll.delete_many.assert_not_called()
 
 
 def test_get_category_mapping_invalid_query_json(client, mock_coll) -> None:

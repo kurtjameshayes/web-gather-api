@@ -6,6 +6,7 @@ from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 from flask import Flask
 
 # Avoid loading sentence_transformers in unit tests.
@@ -39,16 +40,30 @@ def mock_clients() -> Dict[str, Any]:
     }
 
 
-def _wire_mongo(mock_mongo: MagicMock) -> None:
+def _wire_mongo(mock_mongo: MagicMock) -> Dict[str, MagicMock]:
     db = MagicMock()
     wg_db = MagicMock()
+    user_coll = MagicMock()
+    meta_coll = MagicMock()
 
     def _get_db(name: str) -> MagicMock:
         return wg_db if name == WEB_GATHER_DB else db
 
     mock_mongo.__getitem__.side_effect = _get_db
-    db.__getitem__.return_value = MagicMock()
-    wg_db.__getitem__.return_value = MagicMock()
+    db.__getitem__.return_value = user_coll
+    wg_db.__getitem__.return_value = meta_coll
+    return {"db": db, "wg_db": wg_db, "user_coll": user_coll, "meta_coll": meta_coll}
+
+
+def _post_web_ingest(client, firecrawl, url: str = "https://example.com/policy", **extra):
+    """POST /ingest for a non-PDF page without a live HEAD request."""
+    firecrawl.crawl.return_value = [
+        {"url": url, "title": "Title", "markdown": "Hello world"}
+    ]
+    body = {"url": url, "database": "test_db", "collection": "docs"}
+    body.update(extra)
+    with patch("core.detect_content_type", return_value=""):
+        return client.post("/ingest", json=body)
 
 
 def test_gather_success(client, mock_clients) -> None:
@@ -147,6 +162,128 @@ def test_ingest_rejects_ssrf_private_ip(client, mock_clients) -> None:
     assert response.status_code == 400
     payload = response.get_json()
     assert "private" in payload["error"].lower() or "link-local" in payload["error"].lower()
+
+
+def test_ingest_overwrite_deletes_only_the_same_source_url(client, mock_clients) -> None:
+    """Overwrite must not wipe the collection. Only rows for this URL are removed."""
+    wired = _wire_mongo(mock_clients["mongo"])
+    wired["user_coll"].count_documents.return_value = 2
+    url = "https://example.com/policy"
+    response = _post_web_ingest(
+        client, mock_clients["firecrawl"], url=url, mode="Overwrite"
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["mode"] == "overwrite"
+    assert payload["overwritten"] is True
+    assert payload["previous_document_count"] == 2
+    wired["user_coll"].count_documents.assert_called_once_with({"source_url": url})
+    wired["user_coll"].delete_many.assert_called_once_with({"source_url": url})
+    wired["meta_coll"].delete_many.assert_called_once_with(
+        {
+            "database_name": "test_db",
+            "collection_name": "docs",
+            "source_url": url,
+        }
+    )
+    inserted = wired["user_coll"].insert_one.call_args[0][0]
+    assert inserted["source_url"] == url
+    assert inserted["text"]
+
+
+def test_ingest_overwrite_with_no_matches_does_not_delete(client, mock_clients) -> None:
+    wired = _wire_mongo(mock_clients["mongo"])
+    wired["user_coll"].count_documents.return_value = 0
+    url = "https://example.com/policy"
+    response = _post_web_ingest(
+        client, mock_clients["firecrawl"], url=url, mode="overwrite"
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["overwritten"] is False
+    assert payload["previous_document_count"] == 0
+    wired["user_coll"].count_documents.assert_called_once_with({"source_url": url})
+    wired["user_coll"].delete_many.assert_not_called()
+    wired["meta_coll"].delete_many.assert_not_called()
+    wired["user_coll"].insert_one.assert_called_once()
+
+
+def test_ingest_append_does_not_delete_existing_documents(client, mock_clients) -> None:
+    wired = _wire_mongo(mock_clients["mongo"])
+    wired["user_coll"].count_documents.return_value = 5
+    response = _post_web_ingest(client, mock_clients["firecrawl"])
+    assert response.status_code == 200
+    assert "overwritten" not in response.get_json()
+    wired["user_coll"].count_documents.assert_not_called()
+    wired["user_coll"].delete_many.assert_not_called()
+    wired["meta_coll"].delete_many.assert_not_called()
+
+
+def test_ingest_pdf_download_error_hides_exception_text(client, mock_clients) -> None:
+    wired = _wire_mongo(mock_clients["mongo"])
+    secret = "upstream-169.254.169.254-token"
+    with patch("core.is_pdf_url", return_value=True), patch(
+        "core.download_pdf",
+        side_effect=requests.RequestException(secret),
+    ):
+        response = client.post(
+            "/ingest",
+            json={
+                "url": "https://example.com/file.pdf",
+                "database": "test_db",
+                "collection": "docs",
+                "mode": "overwrite",
+            },
+        )
+    assert response.status_code == 500
+    assert response.get_json()["error"] == (
+        "Failed to download PDF. The URL may be unreachable."
+    )
+    assert secret not in response.get_data(as_text=True)
+    wired["user_coll"].delete_many.assert_not_called()
+
+
+def test_ingest_pdf_parse_error_hides_exception_text(client, mock_clients) -> None:
+    secret = "PdfReadError xref trailer secret-xref"
+    with patch("core.is_pdf_url", return_value=True), patch(
+        "core.download_pdf", return_value=b"%PDF-1.0"
+    ), patch("core.extract_text_from_pdf", side_effect=ValueError(secret)):
+        response = client.post(
+            "/ingest",
+            json={
+                "url": "https://example.com/file.pdf",
+                "database": "test_db",
+                "collection": "docs",
+            },
+        )
+    assert response.status_code == 500
+    assert response.get_json()["error"] == (
+        "Failed to parse PDF. The file may be corrupted or unsupported."
+    )
+    assert secret not in response.get_data(as_text=True)
+
+
+def test_ingest_crawl_error_hides_exception_text(client, mock_clients) -> None:
+    wired = _wire_mongo(mock_clients["mongo"])
+    secret = "fc-live-secret-key"
+    mock_clients["firecrawl"].crawl.side_effect = RuntimeError(secret)
+    with patch("core.detect_content_type", return_value=""):
+        response = client.post(
+            "/ingest",
+            json={
+                "url": "https://example.com/policy",
+                "database": "test_db",
+                "collection": "docs",
+                "mode": "overwrite",
+            },
+        )
+    assert response.status_code == 500
+    assert response.get_json()["error"] == (
+        "Crawl failed. The target website may be unreachable or blocking requests."
+    )
+    assert secret not in response.get_data(as_text=True)
+    wired["user_coll"].delete_many.assert_not_called()
+    wired["user_coll"].count_documents.assert_not_called()
 
 
 def test_ingest_invalid_mode(client, mock_clients) -> None:
